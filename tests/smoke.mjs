@@ -11,7 +11,9 @@ import {
   applyFeedback,
   removeSource,
   inspectGraph,
-  slugify
+  reviewQueue,
+  slugify,
+  MAX_ACTIVE_FEEDBACK_CONCEPTS
 } from "../graph-core.js";
 import { createGraphStore } from "../graph-store.js";
 
@@ -70,6 +72,22 @@ assert(extracted.nodes.every((node) => node.sources.includes(extracted.source.id
 const normalizedSource = sourceText.replace(/\n+/g, " ");
 assert(extracted.edges.some((edge) => edge.label === "uses"), "explicit relation verbs should be preserved");
 assert(extracted.edges.every((edge) => edge.evidence.some((quote) => normalizedSource.includes(quote.text) && quote.sources.includes(extracted.source.id))), "relations should retain source sentence evidence");
+const adapted = extractGraph("Feedback notes", "The bridge representation organizes signals for review.", {
+  feedback: [
+    { kind: "concept", id: "latent-bridge", label: "Latent Bridge", status: "accepted", aliases: ["bridge representation"] },
+    { kind: "concept", id: "signals", label: "signals", status: "rejected" }
+  ]
+});
+assert(adapted.nodes.some((node) => node.id === "latent-bridge" && node.aliases.includes("bridge representation")), "accepted concept feedback should seed and enrich matching concepts");
+assert(!adapted.nodes.some((node) => node.id === "bridge-representation"), "accepted aliases should not create duplicate concept IDs");
+assert.equal(MAX_ACTIVE_FEEDBACK_CONCEPTS, 100, "adaptive extraction should bound active concept feedback hints");
+assert(!adapted.nodes.some((node) => node.id === "signals"), "rejected concept feedback should suppress matching concepts");
+const adaptedRelation = extractGraph("Relation feedback", "Alpha guides Beta through a useful representation for review.", {
+  feedback: [
+    { kind: "relation", source: "alpha", target: "beta", label: "guides", status: "accepted" }
+  ]
+});
+assert(adaptedRelation.edges.some((edge) => edge.source === "alpha" && edge.target === "beta" && edge.label === "guides"), "accepted relation feedback should guide matching relation labels");
 const boundedExtraction = extractGraph(null,  `${sourceText}${" extra".repeat(100000)}`);
 assert.equal(boundedExtraction.source.text.length, 300000, "the pure extractor should enforce the document size limit");
 assert.doesNotThrow(() => extractGraph("Non-string input", null));
@@ -105,6 +123,10 @@ const health = inspectGraph(merged);
 assert.equal(health.documents, 1);
 assert.equal(health.provenanceCoverage, 100);
 assert.equal(health.unsupportedNodes, 0);
+const queue = reviewQueue(merged, 2);
+assert.equal(queue.length, 2);
+assert(queue.every((candidate) => ["node", "edge"].includes(candidate.kind)));
+assert(queue[0].confidence <= queue[1].confidence, "review queue should prioritize low confidence items");
 const brokenProvenance = inspectGraph({
   ...merged,
   nodes: merged.nodes.map((node) => ({ ...node, sources: ["missing-document"], evidence: [{ text: "broken", sources: ["missing-document"] }] })),
@@ -162,6 +184,13 @@ assert.equal(graphStore.read().version, merged.version);
 assert.equal(graphStore.readHistory().length, 1);
 assert.equal(graphStore.undo(), true);
 assert.equal(graphStore.read().version, 0);
+storage.set("graph", JSON.stringify({ ...merged, version: merged.version + 1 }));
+assert.equal(graphStore.write(defaultGraph(), { expectedVersion: 0 }), false, "stale batch writes should fail safely");
+assert.equal(graphStore.getLastWriteMode(), "conflict");
+assert.equal(graphStore.read().version, merged.version + 1, "conflicting writes must preserve the newer graph");
+assert.equal(graphStore.restore(defaultGraph(), [], { expectedVersion: 0 }), false, "stale backup restores should fail safely");
+assert.equal(graphStore.getLastWriteMode(), "conflict");
+storage.delete("graph");
 localStorage.failWrites = true;
 assert.equal(graphStore.write(merged), false, "storage failure should be reported");
 localStorage.failWrites = false;
@@ -171,6 +200,14 @@ assert.equal(graphStore.read().version, 0, "corrupt saved state should fail clos
 assert.equal(graphStore.readRecovery(), "{not valid json", "corrupt saved state should be preserved for recovery");
 assert.equal(graphStore.clearRecovery(), true);
 assert.equal(graphStore.readRecovery(), null);
+storage.set("graph", JSON.stringify({ schema: "llm-field-notes/graph@999", nodes: [{ id: "lost", label: "Recover me" }] }));
+assert.equal(graphStore.read().nodes.length, 0, "unsupported schema should fail closed");
+assert(storage.get("recovery")?.includes("graph@999"), "unsupported schema should be preserved for recovery");
+graphStore.clearRecovery();
+storage.delete("graph");
+storage.set("history", JSON.stringify(Array.from({ length: 100 }, () => defaultGraph())));
+assert.equal(graphStore.readHistory().length, 3, "history should be bounded before normalization");
+storage.delete("history");
 const historyQuotaStorage = new Map();
 const historyQuotaAdapter = {
   getItem: (key) => historyQuotaStorage.has(key) ? historyQuotaStorage.get(key) : null,
@@ -198,6 +235,16 @@ assert.equal(quotaStore.getLastWriteMode(), "without-history");
 const duplicateResult = mergeExtraction(merged, extractGraph("Same notes", sourceText));
 assert.equal(duplicateResult.duplicate, true, "the same document should not create a second source");
 assert.equal(duplicateResult.graph.documents.length, 1);
+const lineEndingGraph = mergeExtraction(defaultGraph(), extractGraph("Line endings", "Alpha uses context.\nBeta supports learning."));
+const lineEndingDuplicate = mergeExtraction(lineEndingGraph.graph, extractGraph("Line endings copy", "Alpha uses context.\r\nBeta supports learning.  "));
+assert.equal(lineEndingDuplicate.duplicate, true, "equivalent line endings and trailing whitespace should not duplicate a source");
+const legacyFingerprintGraph = normalizeGraph({
+  schema: GRAPH_SCHEMA,
+  documents: [{ id: "legacy-doc", title: "Legacy", text: sourceText, fingerprint: "old-custom-fingerprint" }],
+  nodes: [],
+  edges: []
+});
+assert.equal(mergeExtraction(legacyFingerprintGraph, extractGraph("Legacy copy", sourceText)).duplicate, true, "canonical content should catch legacy fingerprint duplicates");
 
 const aliasGraph = normalizeGraph({
   schema: GRAPH_SCHEMA,
@@ -262,6 +309,33 @@ assert.equal(duplicateImported.nodes.find((node) => node.id === "same").status, 
 assert.equal(duplicateImported.edges.length, 1, "imported duplicate relations should collapse");
 assert.equal(duplicateImported.edges[0].confidence, .8);
 assert.equal(duplicateImported.edges[0].feedback, 0);
+const duplicateDocuments = normalizeGraph({
+  schema: GRAPH_SCHEMA,
+  documents: [
+    { id: "doc-same", title: "Untitled document", text: "", fingerprint: "doc-same", addedAt: new Date().toISOString() },
+    { id: "doc-same", title: "Useful source", text: "source text", fingerprint: "doc-same", addedAt: new Date().toISOString() },
+    { title: "Generated ID", text: "another source" }
+  ]
+});
+assert.equal(duplicateDocuments.documents.length, 2, "duplicate source IDs should collapse");
+assert.equal(duplicateDocuments.documents[0].title, "Useful source");
+assert(duplicateDocuments.documents[0].text, "duplicate source text should be retained");
+assert(duplicateDocuments.documents[1].id, "empty source IDs should be repaired");
+assert.equal(
+  normalizeGraph(duplicateDocuments).documents[1].id,
+  duplicateDocuments.documents[1].id,
+  "repaired source IDs should remain stable across normalization"
+);
+const unsafeFingerprint = normalizeGraph({
+  schema: GRAPH_SCHEMA,
+  documents: [{ fingerprint: "External Fingerprint\nwith spaces", text: "safe source" }]
+});
+assert(!/[\s\n]/.test(unsafeFingerprint.documents[0].id), "repaired source IDs should be safe for projections");
+const distinctFingerprints = normalizeGraph({
+  schema: GRAPH_SCHEMA,
+  documents: [{ fingerprint: "a b", text: "one" }, { fingerprint: "a-b", text: "two" }]
+});
+assert.notEqual(distinctFingerprints.documents[0].id, distinctFingerprints.documents[1].id, "repaired source IDs should preserve fingerprint uniqueness");
 const legacyEvidence = normalizeGraph({ schema: "llm-field-notes/graph@0", documents: [{ id: "doc-legacy", title: "Legacy", text: "text" }], nodes: [{ id: "legacy", label: "Legacy", sources: ["doc-legacy"], evidence: ["legacy quote"] }] });
 assert.equal(legacyEvidence.nodes[0].evidence[0].text, "legacy quote");
 assert.equal(JSON.stringify([...legacyEvidence.nodes[0].evidence[0].sources]), JSON.stringify(["doc-legacy"]));
@@ -274,12 +348,12 @@ const app = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
 const projectionStart = app.indexOf("function buildMarkdown");
 const projectionEnd = app.indexOf('document.querySelector("#load-sample")');
 assert(projectionStart >= 0 && projectionEnd > projectionStart, "projection boundaries should exist");
-const sandbox = { console, Date, Math, Set, Map, JSON, TextEncoder, Uint8Array, DataView };
+const sandbox = { console, Date, Math, Set, Map, JSON, TextEncoder, Uint8Array, DataView, GRAPH_SCHEMA };
 sandbox.globalThis = sandbox;
 vm.runInNewContext(`const slugify = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 70);
 ${app.slice(projectionStart, projectionEnd)}
-globalThis.__projectionTest = { buildVaultFiles, zipStore, buildMarkdown };`, sandbox);
-const { buildVaultFiles, zipStore, buildMarkdown } = sandbox.__projectionTest;
+globalThis.__projectionTest = { buildVaultFiles, zipStore, buildMarkdown, buildFeedbackDataset };`, sandbox);
+const { buildVaultFiles, zipStore, buildMarkdown, buildFeedbackDataset } = sandbox.__projectionTest;
 const vaultFiles = buildVaultFiles(merged);
 assert(vaultFiles.some((file) => file.name === "_index.md"));
 assert(vaultFiles.some((file) => file.name.startsWith("Concepts/")));
@@ -292,6 +366,15 @@ const retitled = normalizeGraph({ ...merged, documents: merged.documents.map((do
 assert.equal(buildVaultFiles(retitled).find((file) => file.name.startsWith("Sources/"))?.name, vaultFiles.find((file) => file.name.startsWith("Sources/"))?.name, "source paths should remain stable when titles change");
 const imperfectProjectionGraph = { ...merged, edges: merged.edges.map((edge) => ({ ...edge, evidence: [{ text: "orphan evidence", sources: ["missing-source"] }] })) };
 assert(!buildMarkdown(imperfectProjectionGraph).includes("undefined"), "projections should not emit undefined links");
+const feedbackDataset = buildFeedbackDataset(acceptedKnowledge);
+assert.equal(feedbackDataset.format, "llm-field-notes/feedback@1");
+assert(feedbackDataset.examples.some((example) => example.kind === "concept" && example.status === "accepted"), "feedback export should include reviewed concepts");
+const aliasFeedbackGraph = normalizeGraph({
+  ...acceptedKnowledge,
+  nodes: acceptedKnowledge.nodes.map((node, index) => index === 0 ? { ...node, aliases: ["human alias"] } : node)
+});
+const aliasFeedbackDataset = buildFeedbackDataset(aliasFeedbackGraph);
+assert(aliasFeedbackDataset.examples.find((example) => example.kind === "concept")?.aliases.includes("human alias"), "feedback export should preserve reviewed aliases");
 const zip = zipStore(vaultFiles);
 assert.equal(zip[0], 0x50);
 assert.equal(zip[1], 0x4b);

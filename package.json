@@ -5,8 +5,9 @@
   "type": "module",
   "description": "A document-to-knowledge-graph workspace with Obsidian projections.",
   "scripts": {
-    "test": "node --check app.js && node --check graph-core.js && node --check graph-store.js && node --check extractor-adapter.js && node --check projection-adapter.js && node --check sw.js && node tests/smoke.mjs && node tests/extractor-smoke.mjs && node tests/projection-smoke.mjs && node tests/site-check.mjs && node tests/http-smoke.mjs",
-    "serve": "python3 -m http.server 8000"
+    "test": "node --check app.js && node --check graph-core.js && node --check graph-store.js && node --check extractor-adapter.js && node --check projection-adapter.js && node --check server.mjs && node --check sw.js && node tests/smoke.mjs && node tests/extractor-smoke.mjs && node tests/projection-smoke.mjs && node tests/server-smoke.mjs && node tests/site-check.mjs && node tests/http-smoke.mjs && node tests/sw-smoke.mjs",
+    "serve": "python3 -m http.server 8000",
+    "serve:node": "node server.mjs"
   },
   "engines": {
     "node": ">=18"

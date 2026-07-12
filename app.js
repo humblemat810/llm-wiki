@@ -11,11 +11,13 @@ import {
   applyFeedback,
   removeSource,
   inspectGraph,
+  reviewQueue,
   slugify,
   asArray
 } from "./graph-core.js";
 import { createGraphStore } from "./graph-store.js";
 import { applyObsidianFeedback, parseObsidianFeedback, parseObsidianVault } from "./projection-adapter.js";
+import { createRemoteExtractor } from "./extractor-adapter.js";
 
 const notes = [
   { id: "tokens", category: "foundations", number: "01", tag: "FOUNDATIONS", title: "Tokens are the interface", description: "What a model actually sees, why text becomes integers, and where the seams show.", meta: "12 min read", question: "Why can't the model see words?" },
@@ -187,6 +189,30 @@ document.querySelector("#copy-prompt").addEventListener("click", async () => {
   }
   setTimeout(() => { feedback.textContent = ""; }, 4000);
 });
+document.querySelector("#share-wiki").addEventListener("click", async () => {
+  const shareUrl = new URL(location.href);
+  shareUrl.hash = "workbench";
+  const shareData = {
+    title: "LLM Field Notes",
+    text: "Turn documents into an inspectable, evolving knowledge graph.",
+    url: shareUrl.toString()
+  };
+  const feedback = document.querySelector("#share-status");
+  try {
+    if (navigator.share) {
+      await navigator.share(shareData);
+      feedback.textContent = "Share sheet opened.";
+    } else if (navigator.clipboard) {
+      await navigator.clipboard.writeText(shareUrl.toString());
+      feedback.textContent = "Link copied.";
+    } else {
+      throw new Error("Sharing is unavailable in this browser.");
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") feedback.textContent = error instanceof Error ? error.message : "Sharing is unavailable in this browser.";
+  }
+  setTimeout(() => { feedback.textContent = ""; }, 5000);
+});
 
 renderNotes();
 renderPath();
@@ -197,6 +223,31 @@ renderPath();
 // without changing the graph schema, renderer, or export formats.
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
 const graphStore = createGraphStore(localStorage);
+const extractorEndpointInput = document.querySelector("#extractor-endpoint");
+const privacyNote = document.querySelector("#privacy-note");
+const cancelExtractionButton = document.querySelector("#cancel-extraction");
+let activeExtractionController = null;
+function updatePrivacyNote() {
+  privacyNote.textContent = extractorEndpointInput.value.trim()
+    ? "Documents and bounded reviewed feedback will be sent to the configured same-origin extractor endpoint. The graph remains in browser storage; do not configure secrets in this page."
+    : "No server call while the extractor endpoint is blank. The graph stays in browser storage; the app may request persistent storage to reduce eviction risk.";
+}
+extractorEndpointInput.addEventListener("input", updatePrivacyNote);
+updatePrivacyNote();
+async function runRemoteExtraction(extractor, document, feedback) {
+  const controller = new AbortController();
+  activeExtractionController = controller;
+  cancelExtractionButton.disabled = false;
+  try {
+    return await extractor(document, { feedback, signal: controller.signal });
+  } finally {
+    if (activeExtractionController === controller) activeExtractionController = null;
+    cancelExtractionButton.disabled = true;
+  }
+}
+cancelExtractionButton.addEventListener("click", () => {
+  activeExtractionController?.abort();
+});
 let persistenceRequested = false;
 async function requestPersistentStorage() {
   if (persistenceRequested || !navigator.storage?.persist) return;
@@ -209,12 +260,19 @@ async function requestPersistentStorage() {
   }
 }
 let graphSearchQuery = "";
-function getVisibleNodes(graph) {
+function createGraphSearchIndex(graph) {
+  const documentTitleMap = new Map(graph.documents.map((document) => [document.id, document.title || document.id]));
+  const sourceTitles = (sources) => sources.map((sourceId) => documentTitleMap.get(sourceId) || sourceId).join(" ");
+  const nodeText = (node) => `${node.label} ${(node.aliases || []).join(" ")} ${node.type} ${sourceTitles(node.sources)} ${node.evidence.map((item) => item.text).join(" ")}`.toLowerCase();
+  const edgeText = (edge, nodeName) => `${nodeName(edge.source)} ${edge.label} ${nodeName(edge.target)} ${edge.status} ${sourceTitles(edge.sources)} ${edge.evidence.map((item) => item.text).join(" ")}`.toLowerCase();
+  return { documentTitleMap, nodeText, edgeText };
+}
+function getVisibleNodes(graph, searchIndex = createGraphSearchIndex(graph)) {
   const query = graphSearchQuery.toLowerCase().trim();
   return graph.nodes.filter((node) => {
     if (node.status === "rejected") return false;
     if (!query) return true;
-    return `${node.label} ${(node.aliases || []).join(" ")} ${node.type}`.toLowerCase().includes(query);
+    return searchIndex.nodeText(node).includes(query);
   });
 }
 function fitGraphPositions(graph, visibleNodes = getVisibleNodes(graph)) {
@@ -300,7 +358,8 @@ function renderInspector(graph) {
 
 function renderWorkbenchUnsafe() {
   const graph = graphStore.read();
-  const visibleNodes = getVisibleNodes(graph);
+  const searchIndex = createGraphSearchIndex(graph);
+  const visibleNodes = getVisibleNodes(graph, searchIndex);
   const positions = fitGraphPositions(graph, visibleNodes);
   const positionById = new Map(positions.map((node) => [node.id, node]));
   const canvas = document.querySelector("#graph-canvas");
@@ -314,6 +373,7 @@ function renderWorkbenchUnsafe() {
   const activeCount = graph.nodes.filter((node) => node.status !== "rejected").length;
   const filteredCount = activeCount - positions.length;
   const health = inspectGraph(graph);
+  const reviews = reviewQueue(graph, 15000);
   document.querySelector("#graph-summary").textContent = graph.nodes.length ? `${positions.length}${graphSearchQuery ? `/${activeCount}` : ""} visible · ${activeEdges.length} relations · ${graph.documents.length} source${graph.documents.length === 1 ? "" : "s"}${graph.nodes.length - activeCount ? ` · ${graph.nodes.length - activeCount} dismissed` : ""}${filteredCount && graphSearchQuery ? ` · ${filteredCount} filtered` : ""}` : "No concepts yet — ingest a document to begin.";
   document.querySelector("#hero-node-count").textContent = positions.length;
   document.querySelector("#hero-edge-count").textContent = activeEdges.length;
@@ -323,7 +383,7 @@ function renderWorkbenchUnsafe() {
   const storageWarning = storageMode === "without-history" || storageMode === "without-new-history"
     ? "<small class=\"storage-warning\">Saved with reduced undo history</small>"
     : "";
-  document.querySelector("#graph-health").innerHTML = `<span>HEALTH</span><small>${health.provenanceCoverage}% provenance</small><small>${health.unsupportedNodes} unsupported concept${health.unsupportedNodes === 1 ? "" : "s"}</small><small>${health.unsupportedEdges} unsupported relation${health.unsupportedEdges === 1 ? "" : "s"}</small>${health.orphanedSourceReferences ? `<small>${health.orphanedSourceReferences} broken source reference${health.orphanedSourceReferences === 1 ? "" : "s"}</small>` : ""}${storageWarning}${recoveryAvailable ? `<small class="recovery-warning">Recovery snapshot available</small><button type="button" data-recovery-action="download">download recovery</button><button type="button" data-recovery-action="dismiss">dismiss</button>` : ""}`;
+  document.querySelector("#graph-health").innerHTML = `<span>HEALTH</span><small>${health.provenanceCoverage}% provenance</small><small>${health.unsupportedNodes} unsupported concept${health.unsupportedNodes === 1 ? "" : "s"}</small><small>${health.unsupportedEdges} unsupported relation${health.unsupportedEdges === 1 ? "" : "s"}</small>${reviews.length ? `<small>${reviews.length} review candidate${reviews.length === 1 ? "" : "s"}</small><button type="button" data-review-action="next">review next</button>` : ""}${health.orphanedSourceReferences ? `<small>${health.orphanedSourceReferences} broken source reference${health.orphanedSourceReferences === 1 ? "" : "s"}</small>` : ""}${storageWarning}${recoveryAvailable ? `<small class="recovery-warning">Recovery snapshot available</small><button type="button" data-recovery-action="download">download recovery</button><button type="button" data-recovery-action="dismiss">dismiss</button>` : ""}`;
   undoButton.disabled = !graphStore.canUndo();
   empty.hidden = positions.length > 0;
   document.querySelector("#graph-empty p").textContent = graph.nodes.length && !positions.length ? "All concepts are dismissed." : "Your graph will appear here.";
@@ -339,12 +399,15 @@ function renderWorkbenchUnsafe() {
     canvas.innerHTML = `<g class="graph-edges">${edges}</g><g class="graph-nodes">${nodes}</g>`;
   }
   const query = graphSearchQuery.toLowerCase().trim();
-  const visibleGraphNodes = graph.nodes.filter((node) => !query || `${node.label} ${(node.aliases || []).join(" ")} ${node.type}`.toLowerCase().includes(query));
+  const visibleGraphNodes = graph.nodes.filter((node) => {
+    if (!query) return true;
+    return searchIndex.nodeText(node).includes(query);
+  });
   list.innerHTML = visibleGraphNodes.map((node) => `<div class="node-row ${node.status === "rejected" ? "rejected" : ""}" data-node-id="${escapeHtml(node.id)}"><div><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${node.status} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback</small></div><div class="node-feedback">${node.status === "rejected" ? `<button data-feedback="restore" data-node-id="${escapeHtml(node.id)}" aria-label="Restore ${escapeHtml(node.label)}">↺ restore</button>` : `<button data-feedback="up" data-node-id="${escapeHtml(node.id)}" aria-label="Confirm ${escapeHtml(node.label)}">+ confirm</button><button data-feedback="down" data-node-id="${escapeHtml(node.id)}" aria-label="Dismiss ${escapeHtml(node.label)}">− dismiss</button>`}</div></div>`).join("");
   const nodeName = (id) => graph.nodes.find((node) => node.id === id)?.label || id;
   const visibleGraphEdges = graph.edges.filter((edge) => {
     if (!query) return true;
-    return `${nodeName(edge.source)} ${edge.label} ${nodeName(edge.target)} ${edge.status}`.toLowerCase().includes(query);
+    return searchIndex.edgeText(edge, nodeName).includes(query);
   });
   relationList.innerHTML = visibleGraphEdges.map((edge) => `<div class="relation-row ${edge.status === "rejected" ? "rejected" : ""}" data-edge-id="${escapeHtml(edge.id)}"><div><strong>${escapeHtml(nodeName(edge.source))} <span>${escapeHtml(edge.label)}</span> ${escapeHtml(nodeName(edge.target))}</strong><small>${edge.status} · ${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}</small></div><div class="node-feedback">${edge.status === "rejected" ? `<button data-edge-feedback="restore" data-edge-id="${escapeHtml(edge.id)}">↺ restore</button>` : `<button data-edge-feedback="up" data-edge-id="${escapeHtml(edge.id)}">+ confirm</button><button data-edge-feedback="down" data-edge-id="${escapeHtml(edge.id)}">− dismiss</button>`}</div></div>`).join("");
   const manualNodes = graph.nodes.filter((node) => node.status !== "rejected");
@@ -413,6 +476,48 @@ function buildMarkdown(graph) {
     ...graph.edges.flatMap((edge) => edge.evidence.map((quote) => `> ${quote.text}\n>\n> — ${conceptLink(edge.source)} ${edge.label} ${conceptLink(edge.target)}${quote.sources?.length ? `\n> sources: ${quote.sources.map(sourceLink).join(", ")}` : ""}`))
   ];
   return lines.join("\n");
+}
+
+function buildFeedbackDataset(graph) {
+  const nodeLabel = (id) => graph.nodes.find((node) => node.id === id)?.label || id;
+  const examples = [
+    ...graph.nodes
+      .filter((node) => node.status !== "inferred" || node.feedback !== 0)
+      .map((node) => ({
+        kind: "concept",
+        id: node.id,
+        label: node.label,
+        aliases: node.aliases || [],
+        type: node.type,
+        status: node.status,
+        confidence: node.confidence,
+        feedback: node.feedback,
+        evidence: node.evidence,
+        sources: node.sources
+      })),
+    ...graph.edges
+      .filter((edge) => edge.status !== "inferred" || edge.feedback !== 0)
+      .map((edge) => ({
+        kind: "relation",
+        id: edge.id,
+        source: edge.source,
+        sourceLabel: nodeLabel(edge.source),
+        target: edge.target,
+        targetLabel: nodeLabel(edge.target),
+        label: edge.label,
+        status: edge.status,
+        confidence: edge.confidence,
+        feedback: edge.feedback,
+        evidence: edge.evidence,
+        sources: edge.sources
+      }))
+  ];
+  return {
+    format: "llm-field-notes/feedback@1",
+    graphSchema: GRAPH_SCHEMA,
+    exportedAt: new Date().toISOString(),
+    examples
+  };
 }
 
 function safeFileName(value, fallback) {
@@ -620,6 +725,15 @@ document.querySelector("#load-sample").addEventListener("click", () => {
   document.querySelector("#ingest-status").textContent = "Sample loaded. Build the graph when ready.";
 });
 document.querySelector("#graph-health").addEventListener("click", (event) => {
+  const reviewAction = event.target.closest("[data-review-action]")?.dataset.reviewAction;
+  if (reviewAction === "next") {
+    const candidate = reviewQueue(graphStore.read(), 1)[0];
+    if (!candidate) return;
+    if (candidate.kind === "node") selectGraphNode(candidate.id);
+    else selectGraphEdge(candidate.id);
+    document.querySelector(".mini-button[data-view='list']").click();
+    return;
+  }
   const action = event.target.closest("[data-recovery-action]")?.dataset.recoveryAction;
   if (!action) return;
   if (action === "dismiss") {
@@ -674,16 +788,21 @@ document.querySelector("#document-file").addEventListener("change", async (event
       status.textContent = "Obsidian vault loaded. Build the graph to import its feedback notes.";
       return;
     }
-    if (files.some((file) => file.name.toLowerCase().endsWith(".json"))) {
-      if (files.length !== 1) throw new Error("Import one graph JSON at a time.");
-      const file = files[0];
-      const text = await file.text();
+      if (files.some((file) => file.name.toLowerCase().endsWith(".json"))) {
+        if (files.length !== 1) throw new Error("Import one graph JSON at a time.");
+        const file = files[0];
+        const expectedVersion = graphStore.read().version;
+        const text = await file.text();
       const imported = JSON.parse(text);
       if (imported.format === "llm-field-notes/backup@1") {
         if (!imported.graph || (imported.graph.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(imported.graph.schema))) throw new Error("That backup does not contain a valid graph.");
         const importedGraph = normalizeGraph(imported.graph);
         const importedHistory = asArray(imported.history).map(normalizeGraph);
-        if (!graphStore.restore(importedGraph, importedHistory)) throw new Error("The backup could not be restored in this browser.");
+        if (!graphStore.restore(importedGraph, importedHistory, { expectedVersion })) {
+          throw new Error(graphStore.getLastWriteMode() === "conflict"
+            ? "The graph changed in another tab while the backup was loading. The backup was not restored."
+            : "The backup could not be restored in this browser.");
+        }
         renderWorkbench();
         status.textContent = `Full backup restored · revision ${importedGraph.version} with ${importedHistory.length} undo snapshot${importedHistory.length === 1 ? "" : "s"}.`;
         pendingFiles = [];
@@ -692,7 +811,11 @@ document.querySelector("#document-file").addEventListener("change", async (event
       }
       if (imported.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(imported.schema)) throw new Error("That JSON file is not an LLM Field Notes graph.");
       const importedGraph = normalizeGraph(imported);
-      if (!graphStore.write(importedGraph)) throw new Error("The graph could not be saved in this browser.");
+      if (!graphStore.write(importedGraph, { expectedVersion })) {
+        throw new Error(graphStore.getLastWriteMode() === "conflict"
+          ? "The graph changed in another tab while the import was loading. The import was not written."
+          : "The graph could not be saved in this browser.");
+      }
       renderWorkbench();
       status.textContent = `Graph imported · revision ${importedGraph.version} restored.`;
       pendingFiles = [];
@@ -718,6 +841,8 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
   const title = document.querySelector("#document-title").value.trim() || "Untitled document";
   const text = document.querySelector("#document-input").value.trim();
   const status = document.querySelector("#ingest-status");
+  const endpoint = extractorEndpointInput.value.trim();
+  let remoteExtractor = null;
   if (pendingFiles.length) {
     const files = pendingFiles.slice();
     if (files.some((file) => file.name.toLowerCase().endsWith(".zip")) && files.length !== 1) {
@@ -726,6 +851,7 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
     }
     if (files.length === 1 && files[0].name.toLowerCase().endsWith(".zip")) {
       try {
+        const expectedVersion = graphStore.read().version;
         const vault = parseObsidianVault(await files[0].arrayBuffer());
         if (!vault.feedbacks.length) {
           status.textContent = "That vault contains no exported concept or relation feedback notes.";
@@ -736,8 +862,10 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
           status.textContent = "No matching graph items or changes were found in that vault.";
           return;
         }
-        if (!graphStore.write(result.graph)) {
-          status.textContent = "Obsidian vault feedback could not be saved. Your prior graph is still intact.";
+        if (!graphStore.write(result.graph, { expectedVersion })) {
+          status.textContent = graphStore.getLastWriteMode() === "conflict"
+            ? "The graph changed in another tab while the vault was loading. Vault feedback was not written."
+            : "Obsidian vault feedback could not be saved. Your prior graph is still intact.";
           return;
         }
         pendingFiles = [];
@@ -750,6 +878,7 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
       }
       return;
     }
+    const expectedVersion = graphStore.read().version;
     let fileTexts;
     try {
       fileTexts = await Promise.all(files.map((file) => file.text()));
@@ -768,8 +897,10 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
         status.textContent = "No matching graph items or changes were found in those Obsidian notes.";
         return;
       }
-      if (!graphStore.write(result.graph)) {
-        status.textContent = "Obsidian feedback could not be saved. Your prior graph is still intact.";
+      if (!graphStore.write(result.graph, { expectedVersion })) {
+        status.textContent = graphStore.getLastWriteMode() === "conflict"
+          ? "The graph changed in another tab while the notes were loading. Obsidian feedback was not written."
+          : "Obsidian feedback could not be saved. Your prior graph is still intact.";
         return;
       }
       pendingFiles = [];
@@ -780,9 +911,20 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
       return;
     }
   }
+  if (endpoint) {
+    try {
+      const endpointUrl = new URL(endpoint, location.href);
+      if (endpointUrl.origin !== location.origin) throw new Error("The browser extractor endpoint must be same-origin with this app.");
+      remoteExtractor = createRemoteExtractor({ endpoint: endpointUrl.toString() });
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : "The remote extractor configuration is invalid.";
+      return;
+    }
+  }
   if (pendingFiles.length > 1) {
     const files = pendingFiles.slice();
     let graph = graphStore.read();
+    const expectedVersion = graph.version;
     let added = 0;
     let duplicates = 0;
     const failures = [];
@@ -797,18 +939,28 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
           failures.push(`${file.name}: over ${Math.round(MAX_DOCUMENT_CHARS / 1000)}k characters`);
           continue;
         }
-        const result = mergeExtraction(graph, extractGraph(file.name.replace(/\.[^/.]+$/, ""), fileText.trim()));
+        const extraction = remoteExtractor
+          ? await runRemoteExtraction(
+            remoteExtractor,
+            { title: file.name.replace(/\.[^/.]+$/, ""), text: fileText.trim() },
+            buildFeedbackDataset(graph).examples
+          )
+          : extractGraph(file.name.replace(/\.[^/.]+$/, ""), fileText.trim(), { feedback: buildFeedbackDataset(graph).examples });
+        const result = mergeExtraction(graph, extraction);
         if (result.duplicate) duplicates += 1;
         else {
           graph = result.graph;
           added += 1;
         }
-      } catch {
-        failures.push(`${file.name}: could not read`);
+      } catch (error) {
+        failures.push(`${file.name}: ${error instanceof Error ? error.message : "could not extract"}`);
+        if (error?.code === "CANCELED") break;
       }
     }
-    if (added && !graphStore.write(graph)) {
-      status.textContent = "The batch could not be saved. Your browser may be out of storage.";
+    if (added && !graphStore.write(graph, { expectedVersion })) {
+      status.textContent = graphStore.getLastWriteMode() === "conflict"
+        ? "The graph changed in another tab while this batch was running. Your batch was not written; reload the graph and try again."
+        : "The batch could not be saved. Your browser may be out of storage.";
       return;
     }
     pendingFiles = [];
@@ -826,7 +978,17 @@ document.querySelector("#ingest-document").addEventListener("click", async () =>
     status.textContent = `Keep documents under ${Math.round(MAX_DOCUMENT_CHARS / 1000)}k characters for this local prototype.`;
     return;
   }
-  const result = mergeExtraction(graphStore.read(), extractGraph(title, text));
+  let extraction;
+  try {
+    const currentGraph = graphStore.read();
+    extraction = remoteExtractor
+      ? await runRemoteExtraction(remoteExtractor, { title, text }, buildFeedbackDataset(currentGraph).examples)
+      : extractGraph(title, text, { feedback: buildFeedbackDataset(currentGraph).examples });
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : "The document could not be extracted.";
+    return;
+  }
+  const result = mergeExtraction(graphStore.read(), extraction);
   if (result.duplicate) {
     status.textContent = "This document is already in the graph; no duplicate revision was created.";
     return;
@@ -1075,6 +1237,11 @@ document.querySelector("#download-backup").addEventListener("click", () => {
   };
   downloadFile("llm-field-notes-backup.json", JSON.stringify(backup, null, 2), "application/json");
   document.querySelector("#projection-status").textContent = `Full backup downloaded · ${backup.history.length} undo snapshot${backup.history.length === 1 ? "" : "s"}.`;
+});
+document.querySelector("#download-feedback").addEventListener("click", () => {
+  const dataset = buildFeedbackDataset(graphStore.read());
+  downloadFile("llm-field-notes-feedback.json", JSON.stringify(dataset, null, 2), "application/json");
+  document.querySelector("#projection-status").textContent = `Feedback dataset downloaded · ${dataset.examples.length} reviewed example${dataset.examples.length === 1 ? "" : "s"}.`;
 });
 document.querySelector("#reload-app").addEventListener("click", () => window.location.reload());
 const reportRuntimeError = (error) => {

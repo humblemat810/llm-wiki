@@ -4,6 +4,7 @@ export const MAX_DOCUMENT_CHARS = 300000;
 export const MAX_GRAPH_DOCUMENTS = 1000;
 export const MAX_GRAPH_NODES = 5000;
 export const MAX_GRAPH_EDGES = 10000;
+export const MAX_ACTIVE_FEEDBACK_CONCEPTS = 100;
 
 export const sampleDocument = {
   title: "Attention Is All You Need — working notes",
@@ -41,12 +42,13 @@ const asLine = (value, fallback = "") => asText(value, fallback).replace(/\s+/g,
 const asConfidence = (value, fallback = .5) => Number.isFinite(Number(value)) ? Math.max(.01, Math.min(.99, Number(value))) : fallback;
 
 function fingerprintText(text) {
+  const canonical = text.replace(/\r\n?/g, "\n").split("\n").map((line) => line.trimEnd()).join("\n").trim();
   let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
+  for (let index = 0; index < canonical.length; index += 1) {
+    hash ^= canonical.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
-  return `${(hash >>> 0).toString(16)}-${text.length}`;
+  return `${(hash >>> 0).toString(16)}-${canonical.length}`;
 }
 
 function normalizeEvidence(value, fallbackSources = []) {
@@ -170,13 +172,29 @@ export function normalizeGraph(value) {
   const graph = defaultGraph();
   graph.version = Number.isInteger(value.version) && value.version >= 0 ? value.version : 0;
   graph.updatedAt = asText(value.updatedAt, null);
-  graph.documents = asArray(value.documents).filter((doc) => doc && typeof doc === "object").slice(0, MAX_GRAPH_DOCUMENTS).map((doc) => ({
-    id: asText(doc.id, makeId("doc")),
-    title: asLine(doc.title, "Untitled document").slice(0, 200),
-    text: asText(doc.text).slice(0, MAX_DOCUMENT_CHARS),
-    fingerprint: asText(doc.fingerprint, fingerprintText(asText(doc.text).slice(0, MAX_DOCUMENT_CHARS))),
-    addedAt: asText(doc.addedAt, new Date().toISOString())
-  }));
+  const normalizedDocuments = asArray(value.documents).filter((doc) => doc && typeof doc === "object").slice(0, MAX_GRAPH_DOCUMENTS).map((doc) => {
+    const text = asText(doc.text).slice(0, MAX_DOCUMENT_CHARS);
+    const fingerprint = asText(doc.fingerprint).trim() || fingerprintText(text);
+    return {
+      id: asText(doc.id).trim() || `doc-${fingerprintText(fingerprint)}`,
+      title: asLine(doc.title, "Untitled document").slice(0, 200),
+      text,
+      fingerprint,
+      addedAt: asText(doc.addedAt, new Date().toISOString())
+    };
+  });
+  const documentsById = new Map();
+  normalizedDocuments.forEach((document) => {
+    const existing = documentsById.get(document.id);
+    if (!existing) {
+      documentsById.set(document.id, document);
+      return;
+    }
+    if (existing.title === "Untitled document" && document.title !== "Untitled document") existing.title = document.title;
+    if (!existing.text && document.text) existing.text = document.text;
+    if (!existing.fingerprint && document.fingerprint) existing.fingerprint = document.fingerprint;
+  });
+  graph.documents = [...documentsById.values()];
   const normalizedNodes = asArray(value.nodes).filter((node) => node && typeof node === "object" && asText(node.id)).slice(0, MAX_GRAPH_NODES).map((node) => ({
     id: asText(node.id),
     label: asLine(node.label, "Unnamed concept").slice(0, 120),
@@ -262,21 +280,74 @@ export function normalizeGraph(value) {
 const cleanPhrase = (value) => value.replace(/^#+\s*/, "").replace(/[`"'“”()[\]{}]/g, "").replace(/\s+/g, " ").trim().replace(/^(the|a|an)\s+/i, "").replace(/[.,;:!?]+$/, "");
 const wordsIn = (value) => (value.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) || []).filter((word) => !stopWords.has(word));
 
-export function extractGraph(title, text) {
+function feedbackHints(value) {
+  const concepts = new Map();
+  const relations = [];
+  asArray(value).slice(0, 500).forEach((example) => {
+    if (!example || typeof example !== "object") return;
+    const status = ["accepted", "rejected"].includes(example.status) ? example.status : null;
+    if (!status) return;
+    if (example.kind === "concept") {
+      const label = cleanPhrase(asLine(example.label));
+      const id = slugify(asText(example.id, label));
+      if (!id || !label) return;
+      const keys = [...new Set([id, slugify(label), ...asArray(example.aliases).map((alias) => slugify(asLine(alias))).filter(Boolean)])];
+      keys.forEach((key) => concepts.set(key, {
+        id,
+        label,
+        aliases: asArray(example.aliases).map((alias) => asLine(alias)).filter(Boolean).slice(0, 20),
+        status
+      }));
+      return;
+    }
+    if (example.kind === "relation") {
+      const label = cleanPhrase(asLine(example.label));
+      const source = slugify(asText(example.source, example.sourceLabel));
+      const target = slugify(asText(example.target, example.targetLabel));
+      if (label && source && target) relations.push({ source, target, label, status });
+    }
+  });
+  return { concepts, relations };
+}
+
+export function extractGraph(title, text, { feedback = [] } = {}) {
   const boundedText = asText(text).slice(0, MAX_DOCUMENT_CHARS);
   const sourceId = makeId("doc");
   const sentences = boundedText.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/).map((item) => item.trim()).filter((item) => item.length > 25);
+  const hints = feedbackHints(feedback);
+  const rejectedConcepts = new Set([...hints.concepts.values()].filter((hint) => hint.status === "rejected").map((hint) => hint.id));
   const candidates = new Map();
   const addCandidate = (raw, kind, sentence = "") => {
     const label = cleanPhrase(raw);
-    const id = slugify(label);
-    if (!id || label.length < 3 || label.length > 64 || stopWords.has(id)) return;
-    const existing = candidates.get(id) || { id, label, kind, mentions: 0, evidence: [] };
+    const rawId = slugify(label);
+    if (!rawId || label.length < 3 || label.length > 64 || stopWords.has(rawId)) return;
+    const hint = hints.concepts.get(rawId);
+    const id = hint?.id || rawId;
+    if (rejectedConcepts.has(id) || hint?.status === "rejected") return;
+    const existing = candidates.get(id) || { id, label: hint?.label || label, kind, mentions: 0, evidence: [] };
     existing.mentions += 1;
     if (sentence && !existing.evidence.includes(sentence)) existing.evidence.push(sentence);
     if (kind === "heading" || kind === "quoted") existing.kind = kind;
+    if (hint?.status === "accepted") {
+      existing.feedback = "accepted";
+      existing.aliases = [...new Set([...(existing.aliases || []), ...hint.aliases, label].filter((item) => item !== existing.label))].slice(0, 20);
+    }
     candidates.set(id, existing);
   };
+  const searchableText = ` ${boundedText.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ")} `;
+  [...hints.concepts.values()]
+    .filter((hint) => hint.status === "accepted")
+    .filter((hint, index, values) => values.findIndex((candidate) => candidate.id === hint.id) === index)
+    .slice(0, MAX_ACTIVE_FEEDBACK_CONCEPTS)
+    .forEach((hint) => {
+      for (const term of [hint.label, ...hint.aliases]) {
+        const normalizedTerm = ` ${term.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ")} `;
+        if (searchableText.includes(normalizedTerm)) {
+          addCandidate(term, "feedback");
+          break;
+        }
+      }
+    });
   boundedText.split("\n").map((line) => line.trim()).filter(Boolean).forEach((line) => {
     if (/^#{1,3}\s+/.test(line)) addCandidate(line, "heading");
     (line.match(/`([^`]+)`/g) || []).forEach((term) => addCandidate(term, "quoted"));
@@ -296,8 +367,8 @@ export function extractGraph(title, text) {
     id: item.id,
     label: item.label,
     type: item.kind === "heading" ? "topic" : "concept",
-    aliases: [],
-    confidence: Math.min(.96, .46 + item.mentions * .09 + (item.kind === "heading" ? .16 : 0)),
+    aliases: item.aliases || [],
+    confidence: Math.min(.96, .46 + item.mentions * .09 + (item.kind === "heading" ? .16 : 0) + (item.feedback === "accepted" ? .14 : 0)),
     mentions: item.mentions,
     feedback: 0,
     status: "inferred",
@@ -324,19 +395,43 @@ export function extractGraph(title, text) {
       const rightStart = lowerSentence.indexOf(right.label.toLowerCase(), leftEnd);
       const between = rightStart >= leftEnd ? sentence.slice(leftEnd, rightStart) : "";
       const relationMatch = between.match(/\b(is|are|uses|enables|requires|contains|depends on|allows|supports|creates|gives|removes|means)\b/i);
-      const label = relationMatch ? relationMatch[1].toLowerCase() : "co-mentioned with";
+      const relationHints = hints.relations.filter((hint) => (
+        hint.source === left.id && hint.target === right.id
+      ));
+      const rejectedRelation = relationHints.find((hint) => hint.status === "rejected");
+      if (rejectedRelation) continue;
+      const acceptedRelation = relationHints.find((hint) => hint.status === "accepted");
+      const label = acceptedRelation?.label || (relationMatch ? relationMatch[1].toLowerCase() : "co-mentioned with");
       edges.push({
         source: left.id,
         target: right.id,
         label,
         id: `${left.id}--${right.id}--${slugify(label)}`,
-        confidence: .52 + Math.min(.35, (left.mentions + right.mentions) * .04),
+        confidence: Math.min(.96, .52 + Math.min(.35, (left.mentions + right.mentions) * .04) + (acceptedRelation ? .14 : 0)),
         feedback: 0,
         evidence: [{ text: sentence, sources: [sourceId] }],
         sources: [sourceId],
         status: "inferred"
       });
     }
+    const presentIds = new Set(present.map((item) => item.id));
+    hints.relations
+      .filter((hint) => hint.status === "accepted" && presentIds.has(hint.source) && presentIds.has(hint.target) && hint.source !== hint.target)
+      .forEach((hint) => {
+        const key = edgeKey(hint.source, hint.target, hint.label);
+        if (edges.some((edge) => edge.source === hint.source && edge.target === hint.target && edgeKey(edge.source, edge.target, edge.label) === key)) return;
+        edges.push({
+          source: hint.source,
+          target: hint.target,
+          label: hint.label,
+          id: `${hint.source}--${hint.target}--${slugify(hint.label)}`,
+          confidence: .82,
+          feedback: 0,
+          evidence: [{ text: sentence, sources: [sourceId] }],
+          sources: [sourceId],
+          status: "inferred"
+        });
+      });
   });
   return normalizeExtraction({
     source: { id: sourceId, title: title || "Untitled document", text: boundedText },
@@ -348,7 +443,11 @@ export function extractGraph(title, text) {
 export function mergeExtraction(graph, extraction) {
   graph = normalizeGraph(graph);
   extraction = normalizeExtraction(extraction);
-  const duplicate = graph.documents.some((document) => document.fingerprint && document.fingerprint === extraction.source.fingerprint);
+  const duplicate = graph.documents.some((document) => (
+    document.fingerprint && document.fingerprint === extraction.source.fingerprint
+  ) || (
+    document.text && extraction.source.text && fingerprintText(document.text) === fingerprintText(extraction.source.text)
+  ));
   if (duplicate) return { graph, duplicate: true };
   const now = new Date().toISOString();
   const knownNodes = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -517,4 +616,27 @@ export function inspectGraph(value) {
     orphanedSourceReferences,
     provenanceCoverage: evidenceRecords.length ? Math.round(evidenceRecords.filter((item) => item.sources.some((sourceId) => documentIds.has(sourceId))).length / evidenceRecords.length * 100) : 100
   };
+}
+
+export function reviewQueue(value, limit = 20) {
+  const graph = normalizeGraph(value);
+  const candidates = [
+    ...graph.nodes.filter((node) => node.status === "inferred").map((node) => ({
+      kind: "node",
+      id: node.id,
+      label: node.label,
+      confidence: node.confidence,
+      evidence: node.evidence.length
+    })),
+    ...graph.edges.filter((edge) => edge.status === "inferred").map((edge) => ({
+      kind: "edge",
+      id: edge.id,
+      label: edge.label,
+      confidence: edge.confidence,
+      evidence: edge.evidence.length
+    }))
+  ];
+  return candidates
+    .sort((left, right) => left.confidence - right.confidence || left.evidence - right.evidence || left.label.localeCompare(right.label))
+    .slice(0, Math.max(0, Math.min(Number(limit) || 0, 15000)));
 }

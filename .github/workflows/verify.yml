@@ -11,12 +11,17 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18.x", "20.x", "22.x"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
       - name: Run smoke checks
         run: npm test
+      - name: Build container
+        run: docker build --tag llm-field-notes:ci .

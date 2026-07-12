@@ -17,6 +17,12 @@
       content="An evolving knowledge workspace: ingest documents, inspect the graph, improve the representation, and project it into Obsidian."
     />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="LLM Field Notes" />
+    <meta property="og:image" content="icon.svg" />
+    <meta property="og:image:alt" content="LLM Field Notes mark" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="LLM Field Notes — documents into living knowledge" />
+    <meta name="twitter:description" content="Turn documents into an inspectable, evolving knowledge graph." />
     <title>LLM Field Notes — documents into living knowledge</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
@@ -58,7 +64,9 @@
           <div class="hero-actions">
             <a class="button button-primary" href="#workbench">Open the workbench <span>↓</span></a>
             <a class="button button-quiet" href="#projection">See the projection <span>→</span></a>
+            <button class="button button-quiet" id="share-wiki" type="button">Share the wiki <span>↗</span></button>
           </div>
+          <p class="share-status" id="share-status" role="status" aria-live="polite"></p>
           <div class="hero-proof">
             <span><strong id="hero-node-count">0</strong> concepts</span>
             <span class="rule"></span>
@@ -113,20 +121,27 @@
               <div class="file-queue" id="file-queue" aria-live="polite"></div>
               <label for="document-input">Paste a document</label>
               <textarea id="document-input" rows="11" placeholder="Paste notes, a paper, a transcript, or a set of observations here…"></textarea>
+              <details class="extractor-settings">
+                <summary>Optional model extractor</summary>
+                <label for="extractor-endpoint">Same-origin extraction endpoint</label>
+                <input id="extractor-endpoint" type="text" inputmode="url" placeholder="/api/extract-graph" autocomplete="off" />
+                <small>Leave blank for the local heuristic. Use a same-origin path such as <code>/api/extract-graph</code>; reviewed feedback may be sent with documents, and credentials belong on your server.</small>
+              </details>
               <div class="ingest-actions">
                 <button class="button button-primary" id="ingest-document">Build graph <span>↗</span></button>
                 <button class="text-button inverse" id="load-sample">Load sample</button>
+                <button class="text-button inverse" id="cancel-extraction" type="button" disabled>Cancel extraction</button>
               </div>
               <button class="clear-graph" id="clear-graph" type="button">Clear local graph</button>
               <button class="undo-graph" id="undo-graph" type="button" disabled>Undo last change ↶</button>
-              <p class="privacy-note">No server call. The graph stays in browser storage; the app may request persistent storage to reduce eviction risk.</p>
+              <p class="privacy-note" id="privacy-note">No server call while the extractor endpoint is blank. The graph stays in browser storage; the app may request persistent storage to reduce eviction risk.</p>
               <div class="ingest-status" id="ingest-status" role="status" aria-live="polite"></div>
             </aside>
 
             <section class="graph-panel" aria-label="Knowledge graph viewer">
               <div class="panel-topline"><span>02 / INTERNAL REPRESENTATION</span><span id="graph-version">REV 000</span></div>
               <div class="graph-toolbar">
-                <div class="graph-toolbar-left"><span id="graph-summary">No concepts yet — ingest a document to begin.</span><label class="sr-only" for="graph-search">Filter graph</label><input id="graph-search" class="graph-search" type="search" placeholder="Filter graph…" autocomplete="off" /></div>
+                <div class="graph-toolbar-left"><span id="graph-summary">No concepts yet — ingest a document to begin.</span><label class="sr-only" for="graph-search">Filter graph</label><input id="graph-search" class="graph-search" type="search" placeholder="Filter concepts, evidence, sources…" autocomplete="off" /></div>
                 <div>
                   <button class="mini-button active" data-view="graph" aria-pressed="true">Graph</button>
                   <button class="mini-button" data-view="list" aria-pressed="false">List</button>
@@ -180,6 +195,7 @@
                   <button class="button button-light" id="download-vault">Download Obsidian vault <span>↓</span></button>
                   <button class="button button-quiet" id="download-json">Export graph JSON <span>↓</span></button>
                   <button class="button button-quiet" id="download-backup">Download full backup <span>↓</span></button>
+                  <button class="button button-quiet" id="download-feedback">Export feedback dataset <span>↓</span></button>
                 </div>
                 <p class="projection-status" id="projection-status" role="status" aria-live="polite"></p>
               </div>

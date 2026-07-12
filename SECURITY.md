@@ -12,6 +12,17 @@ The default application is local-first:
 Treat downloaded graph JSON, backups, and Obsidian vaults as sensitive if the
 source documents are sensitive. They contain source text and derived evidence.
 
+## Reference server deployment
+
+The optional Node server binds to `127.0.0.1` by default. Container
+deployments set `HOST=0.0.0.0` for connectivity, so public deployments should
+place authentication, TLS, and a shared rate limiter in a trusted reverse
+proxy. The built-in `EXTRACTOR_RATE_LIMIT` is an in-process safety net, not a
+replacement for multi-instance gateway controls.
+
+The reference endpoint intentionally does not accept browser API keys. Keep
+provider credentials in the server-side extraction implementation or proxy.
+
 ## Reporting a vulnerability
 
 Please do not open a public issue for a security vulnerability. Contact the

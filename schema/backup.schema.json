@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/backup@1",
+  "title": "LLM Field Notes full backup",
+  "description": "Graph state plus bounded undo history for local restoration.",
+  "type": "object",
+  "required": ["format", "exportedAt", "graph", "history"],
+  "properties": {
+    "format": { "const": "llm-field-notes/backup@1" },
+    "exportedAt": { "type": "string", "format": "date-time" },
+    "graph": { "$ref": "graph.schema.json" },
+    "history": {
+      "type": "array",
+      "maxItems": 3,
+      "items": { "$ref": "graph.schema.json" }
+    }
+  },
+  "additionalProperties": false
+}

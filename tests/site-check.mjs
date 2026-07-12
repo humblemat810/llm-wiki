@@ -4,12 +4,19 @@ import fs from "node:fs";
 const html = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const manifest = JSON.parse(fs.readFileSync(new URL("../manifest.webmanifest", import.meta.url), "utf8"));
 const graphSchema = JSON.parse(fs.readFileSync(new URL("../schema/graph.schema.json", import.meta.url), "utf8"));
+const feedbackSchema = JSON.parse(fs.readFileSync(new URL("../schema/feedback.schema.json", import.meta.url), "utf8"));
+const backupSchema = JSON.parse(fs.readFileSync(new URL("../schema/backup.schema.json", import.meta.url), "utf8"));
+const requestSchema = JSON.parse(fs.readFileSync(new URL("../schema/extractor-request.schema.json", import.meta.url), "utf8"));
 const app = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
 const serviceWorker = fs.readFileSync(new URL("../sw.js", import.meta.url), "utf8");
 const bugTemplate = fs.readFileSync(new URL("../.github/ISSUE_TEMPLATE/bug_report.yml", import.meta.url), "utf8");
 const featureTemplate = fs.readFileSync(new URL("../.github/ISSUE_TEMPLATE/feature_request.yml", import.meta.url), "utf8");
+const security = fs.readFileSync(new URL("../SECURITY.md", import.meta.url), "utf8");
+const server = fs.readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+const dockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+const dockerignore = fs.readFileSync(new URL("../.dockerignore", import.meta.url), "utf8");
 
-for (const id of ["workbench", "app-error", "reload-app", "document-file", "ingest-document", "clear-graph", "undo-graph", "graph-search", "manual-node-label", "add-manual-node", "manual-edge-source", "manual-edge-target", "add-manual-edge", "graph-canvas", "node-list", "relation-list", "inspector-panel", "graph-health", "download-markdown", "download-vault", "download-json", "download-backup"]) {
+for (const id of ["workbench", "app-error", "reload-app", "document-file", "ingest-document", "extractor-endpoint", "cancel-extraction", "clear-graph", "undo-graph", "graph-search", "manual-node-label", "add-manual-node", "manual-edge-source", "manual-edge-target", "add-manual-edge", "graph-canvas", "node-list", "relation-list", "inspector-panel", "graph-health", "download-markdown", "download-vault", "download-json", "download-backup", "download-feedback"]) {
   assert(html.includes(`id="${id}"`), `missing required element: ${id}`);
 }
 for (const match of html.matchAll(/<label[^>]+for="([^"]+)"/g)) {
@@ -17,16 +24,43 @@ for (const match of html.matchAll(/<label[^>]+for="([^"]+)"/g)) {
 }
 assert(/id="document-file"[^>]*multiple/.test(html), "document input should support batches");
 assert(html.includes('id="file-queue"'), "file queue status should be visible");
-for (const asset of ["./index.html", "./styles.css", "./app.js", "./graph-core.js", "./graph-store.js", "./extractor-adapter.js", "./projection-adapter.js", "./manifest.webmanifest", "./icon.svg", "./schema/graph.schema.json"]) {
+for (const asset of ["./index.html", "./styles.css", "./app.js", "./graph-core.js", "./graph-store.js", "./extractor-adapter.js", "./projection-adapter.js", "./manifest.webmanifest", "./icon.svg", "./schema/graph.schema.json", "./schema/feedback.schema.json", "./schema/backup.schema.json", "./schema/extractor-request.schema.json"]) {
   assert(serviceWorker.includes(asset), `service worker missing shell asset: ${asset}`);
 }
 assert.equal(manifest.name, "LLM Field Notes");
+assert(serviceWorker.includes('const CACHE = "llm-field-notes-v2"'), "service worker cache version should be explicit");
+assert(serviceWorker.includes("network-first") || (serviceWorker.includes("await fetch(event.request)") && serviceWorker.includes("await caches.match(event.request)")), "service worker should prefer fresh shell assets and fall back offline");
+assert(serviceWorker.includes("isShellRequest") && serviceWorker.includes("SHELL_PATHS"), "service worker should restrict interception to the app shell");
 assert.equal(graphSchema.properties.schema.const, "llm-field-notes/graph@1");
 assert(graphSchema.$defs.evidence.required.includes("sources"), "evidence provenance is part of the graph contract");
+assert.equal(feedbackSchema.properties.format.const, "llm-field-notes/feedback@1");
+assert.equal(backupSchema.properties.format.const, "llm-field-notes/backup@1");
+assert.equal(requestSchema.properties.operation.const, "extract-graph");
+assert.equal(backupSchema.properties.graph.$ref, "graph.schema.json", "backup schema should resolve graph schema locally");
 assert(html.includes("Content-Security-Policy"), "a restrictive content security policy must be present");
+assert(html.includes('id="share-wiki"'), "the public wiki should have a share action");
+assert(html.includes('name="twitter:card"'), "social preview metadata should be present");
 assert(app.includes("normalizeGraph"), "state normalization must remain wired");
 assert(app.includes("downloadFile"), "projection download must remain wired");
 assert(app.includes("zipStore"), "Obsidian vault export must remain wired");
+assert(app.includes("buildFeedbackDataset"), "feedback dataset export must remain wired");
+assert(app.includes("aliases: node.aliases"), "feedback export should preserve concept aliases");
+assert(app.includes("MAX_ACTIVE_FEEDBACK_CONCEPTS") || fs.readFileSync(new URL("../graph-core.js", import.meta.url), "utf8").includes("MAX_ACTIVE_FEEDBACK_CONCEPTS"), "adaptive extraction should bound active feedback hints");
+assert(server.includes("/api/extract-graph"), "reference extraction endpoint must remain wired");
+assert(dockerfile.includes("HEALTHCHECK") && dockerfile.includes("readyz"), "container deployment should expose a readiness health check");
+assert(dockerfile.includes("USER node"), "container should not run as root");
+assert(/FROM node:20-alpine@sha256:[0-9a-f]{64}/.test(dockerfile), "container base image should be digest-pinned");
+assert(dockerignore.includes(".env") && dockerignore.includes("tests"), "container context should exclude secrets and development tests");
+assert(server.includes("process.env.HOST"), "server host should be configurable for containers");
+assert(server.includes("/readyz") && server.includes("Static app shell is unavailable"), "server should distinguish process health from app readiness");
+assert(server.includes("SIGTERM") && server.includes("draining active requests"), "server should drain requests during shutdown");
+assert(server.includes("EXTRACTOR_RATE_LIMIT"), "server rate limit should be configurable");
+assert(server.includes("content-length") && server.includes("request.resume()"), "server should reject declared oversized request bodies early");
+assert(server.includes("durationMs") && server.includes("route: \"extract-graph\""), "server should support structured extraction logs");
+assert(server.includes("Number.isFinite(configuredRateLimit)"), "invalid rate limit configuration should fail safe");
+assert(server.includes("EXTRACTOR_TIMEOUT_MS") && server.includes("AbortController") && server.includes("504"), "provider extraction should be bounded and cancellable");
+assert(server.includes('request.once("aborted"') && server.includes('response.once("close"'), "provider work should stop when clients disconnect");
+assert(server.includes("abortActiveExtractors"), "graceful shutdown should abort active provider work");
 assert(app.includes("renderInspector"), "evidence inspector must remain wired");
 assert(app.includes("data-select-source"), "source inspection links must remain wired");
 assert(app.includes("previewLimit"), "source previews must remain bounded");
@@ -36,6 +70,8 @@ assert(app.includes("data-edit-source"), "source metadata editing must remain wi
 assert(app.includes("data-remove-source"), "source removal must remain wired");
 assert(app.includes("commitManualGraph"), "manual graph editing must remain wired");
 assert(app.includes("inspectGraph"), "graph health diagnostics must remain wired");
+assert(app.includes("reviewQueue"), "active-learning review queue must remain wired");
+assert(app.includes("data-review-action"), "review-next navigation must remain wired");
 assert(app.includes("applyFeedback"), "feedback behavior must remain centralized in the graph core");
 assert(app.includes("feedback} feedback"), "feedback state should be visible in the workbench");
 assert(app.includes("applyObsidianFeedback"), "Obsidian feedback import must remain wired");
@@ -46,11 +82,26 @@ assert(app.includes("broken source reference"), "broken provenance must be visib
 assert(app.includes("readRecovery"), "corrupt graph recovery must be wired");
 assert(app.includes("data-recovery-action"), "recovery actions must be visible in the workbench");
 assert(app.includes("requestPersistentStorage"), "local graph durability request must remain wired");
+assert(app.includes("navigator.share"), "share action should use the native share surface when available");
+assert(app.includes("createRemoteExtractor"), "optional remote extraction must remain wired");
+assert(app.includes("runRemoteExtraction"), "remote extraction cancellation must remain wired");
+assert(app.includes("endpointUrl.origin !== location.origin"), "browser extraction must respect same-origin CSP");
+assert(app.indexOf("const endpoint = extractorEndpointInput.value.trim();") < app.indexOf("if (pendingFiles.length)"), "endpoint validation should not block feedback imports");
+assert(app.includes("updatePrivacyNote"), "remote extraction data boundary must be disclosed dynamically");
 assert(app.includes("Saved with reduced undo history"), "degraded storage writes must be visible");
 assert(app.includes("That feedback could not be saved"), "feedback persistence failures must be surfaced");
 assert(app.includes("graph.revisions = graph.revisions.slice(0, 20)"), "feedback revisions must remain bounded");
+assert(app.includes("expectedVersion") && app.includes("changed in another tab"), "batch writes should detect cross-tab graph conflicts");
+assert(app.includes("backup was not restored") && app.includes("import was not written"), "async imports should detect cross-tab graph conflicts");
+assert(app.includes("sourceTitles") && app.includes("node.evidence.map"), "graph search should include source and evidence text");
+assert(app.includes("createGraphSearchIndex") && app.includes("documentTitleMap"), "graph search should reuse a per-render document title index");
+assert(app.includes("getVisibleNodes(graph, searchIndex)"), "graph layout and lists should share one search index");
 assert(bugTemplate.includes("name: Bug report") && bugTemplate.includes("id: reproduce"), "bug intake should request reproduction steps");
 assert(featureTemplate.includes("name: Feature request") && featureTemplate.includes("id: proposal"), "feature intake should request a concrete proposal");
+assert(security.includes("EXTRACTOR_RATE_LIMIT") && security.includes("trusted reverse") && security.includes("proxy"), "server deployment security guidance should remain present");
+const workflow = fs.readFileSync(new URL("../.github/workflows/verify.yml", import.meta.url), "utf8");
+assert(workflow.includes('"18.x", "20.x", "22.x"'), "CI should verify the supported Node runtime matrix");
+assert(workflow.includes("docker build --tag llm-field-notes:ci ."), "CI should build the deployment container");
 assert(app.includes("revision-items"), "revision timeline must remain wired");
 assert(app.includes("backup@1"), "full backup format must remain wired");
 console.log("site check ok");

@@ -5,7 +5,7 @@ import { join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const assets = ["index.html", "styles.css", "app.js", "graph-core.js", "graph-store.js", "extractor-adapter.js", "projection-adapter.js", "manifest.webmanifest", "sw.js", "icon.svg", "schema/graph.schema.json"];
+const assets = ["index.html", "styles.css", "app.js", "graph-core.js", "graph-store.js", "extractor-adapter.js", "projection-adapter.js", "manifest.webmanifest", "sw.js", "icon.svg", "schema/graph.schema.json", "schema/feedback.schema.json", "schema/backup.schema.json", "schema/extractor-request.schema.json"];
 const server = createServer(async (request, response) => {
   const requested = request.url === "/" ? "index.html" : request.url.slice(1);
   if (!assets.includes(requested)) {

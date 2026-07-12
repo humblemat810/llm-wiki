@@ -1,4 +1,4 @@
-import { defaultGraph, normalizeGraph } from "./graph-core.js";
+import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, defaultGraph, normalizeGraph } from "./graph-core.js";
 
 export const GRAPH_KEY = "llm-field-notes-knowledge-graph";
 export const HISTORY_KEY = "llm-field-notes-knowledge-graph-history";
@@ -25,7 +25,11 @@ export function createGraphStore(storage, {
     try {
       raw = storage.getItem(graphKey);
       const stored = JSON.parse(raw || "null");
-      return normalizeGraph(stored);
+      const normalized = normalizeGraph(stored);
+      if (stored && typeof stored === "object" && stored.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(stored.schema)) {
+        captureRecovery(raw);
+      }
+      return normalized;
     } catch {
       captureRecovery(raw);
       return defaultGraph();
@@ -49,7 +53,7 @@ export function createGraphStore(storage, {
   const readHistory = () => {
     try {
       const stored = JSON.parse(storage.getItem(historyKey) || "[]");
-      return Array.isArray(stored) ? stored.map(normalizeGraph) : [];
+      return Array.isArray(stored) ? stored.slice(-historyLimit).map(normalizeGraph) : [];
     } catch {
       return [];
     }
@@ -70,13 +74,17 @@ export function createGraphStore(storage, {
     readRecovery,
     clearRecovery,
     getLastWriteMode: () => lastWriteMode,
-    write(graph, { recordHistory = true } = {}) {
+    write(graph, { recordHistory = true, expectedVersion } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       try {
         previousGraphRaw = storage.getItem(graphKey);
         previousHistoryRaw = storage.getItem(historyKey);
         const normalized = normalizeGraph(graph);
+        if (Number.isInteger(expectedVersion) && read().version !== expectedVersion) {
+          lastWriteMode = "conflict";
+          return false;
+        }
         if (recordHistory) {
           const history = readHistory();
           const current = read();
@@ -129,14 +137,18 @@ export function createGraphStore(storage, {
         return false;
       }
     },
-    restore(graph, history = []) {
+    restore(graph, history = [], { expectedVersion } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       const normalizedGraph = normalizeGraph(graph);
-      const normalizedHistory = Array.isArray(history) ? history.map(normalizeGraph).slice(-historyLimit) : [];
+      const normalizedHistory = Array.isArray(history) ? history.slice(-historyLimit).map(normalizeGraph) : [];
       try {
         previousGraphRaw = storage.getItem(graphKey);
         previousHistoryRaw = storage.getItem(historyKey);
+        if (Number.isInteger(expectedVersion) && read().version !== expectedVersion) {
+          lastWriteMode = "conflict";
+          return false;
+        }
         storage.setItem(graphKey, JSON.stringify(normalizedGraph));
         storage.setItem(historyKey, JSON.stringify(normalizedHistory));
         lastWriteMode = "normal";

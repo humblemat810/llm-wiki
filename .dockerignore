@@ -1,0 +1,10 @@
+.git
+.github
+.env
+.env.*
+tests
+node_modules
+*.log
+llm-field-notes-*.json
+knowledge-graph.json
+knowledge-graph.md
