@@ -1,0 +1,17 @@
+{
+  "name": "LLM Field Notes",
+  "short_name": "LLM Notes",
+  "description": "Turn documents into an inspectable, evolving knowledge graph.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#151513",
+  "theme_color": "#10100f",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

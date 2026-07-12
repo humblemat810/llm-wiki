@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible problem in the workbench or projection.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping make the graph trustworthy. Please remove private document text before posting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest document or graph shape that reproduces the issue.
+      placeholder: |
+        1. Load ...
+        2. Ingest ...
+        3. Click ...
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks
+      description: Include `npm test` output or a link to a minimal backup with sensitive content removed.

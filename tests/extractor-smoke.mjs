@@ -1,0 +1,60 @@
+import assert from "node:assert/strict";
+import { createRemoteExtractor, ExtractorAdapterError } from "../extractor-adapter.js";
+
+const calls = [];
+const extractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/v1/graph",
+  timeoutMs: 1000,
+  fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        nodes: [{ label: "Attention" }, { label: "Context" }],
+        edges: [{ source: "Attention", target: "Context", label: "uses" }]
+      })
+    };
+  }
+});
+const result = await extractor({ title: "Adapter test", text: "Attention uses context to make a useful knowledge representation." });
+assert.equal(result.source.title, "Adapter test");
+assert.equal(result.nodes[0].id, "attention");
+assert.equal(result.edges[0].source, "attention");
+assert.equal(calls[0].options.method, "POST");
+assert.equal(JSON.parse(calls[0].options.body).operation, "extract-graph");
+
+assert.throws(
+  () => createRemoteExtractor({ endpoint: "file:///tmp/extractor" }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_ENDPOINT"
+);
+assert.throws(
+  () => createRemoteExtractor({ endpoint: "https://extractor.example.test", timeoutMs: 99 }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_TIMEOUT"
+);
+await assert.rejects(
+  () => extractor({ title: "Too short", text: "short" }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_DOCUMENT"
+);
+const malformedResponseExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/malformed",
+  fetchImpl: async () => ({ ok: true, status: 200, json: async () => [] })
+});
+await assert.rejects(
+  () => malformedResponseExtractor({ title: "Malformed", text: "This document is long enough to exercise response validation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE"
+);
+const timeoutExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/timeout",
+  fetchImpl: async () => {
+    const error = new Error("aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+});
+await assert.rejects(
+  () => timeoutExtractor({ title: "Timeout", text: "This document is long enough to exercise timeout handling." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "TIMEOUT"
+);
+
+console.log("extractor adapter smoke ok");

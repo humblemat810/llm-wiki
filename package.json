@@ -1,0 +1,14 @@
+{
+  "name": "llm-field-notes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A document-to-knowledge-graph workspace with Obsidian projections.",
+  "scripts": {
+    "test": "node --check app.js && node --check graph-core.js && node --check graph-store.js && node --check extractor-adapter.js && node --check projection-adapter.js && node --check sw.js && node tests/smoke.mjs && node tests/extractor-smoke.mjs && node tests/projection-smoke.mjs && node tests/site-check.mjs && node tests/http-smoke.mjs",
+    "serve": "python3 -m http.server 8000"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

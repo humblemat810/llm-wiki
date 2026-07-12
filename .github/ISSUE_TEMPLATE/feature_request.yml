@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose an improvement to the graph, extractor, or projection.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the user workflow that is currently difficult or impossible.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the smallest useful behavior and how it should affect the graph contract.
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Evidence and trade-offs
+      description: Include examples, source links, privacy concerns, or compatibility considerations.

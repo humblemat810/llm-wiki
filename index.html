@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta
+      name="description"
+      content="Turn documents into an inspectable, evolving knowledge graph and project it into Obsidian-ready Markdown."
+    />
+    <meta name="theme-color" content="#10100f" />
+    <meta name="color-scheme" content="light" />
+    <meta property="og:title" content="LLM Field Notes — documents into living knowledge" />
+    <meta
+      property="og:description"
+      content="An evolving knowledge workspace: ingest documents, inspect the graph, improve the representation, and project it into Obsidian."
+    />
+    <meta property="og:type" content="website" />
+    <title>LLM Field Notes — documents into living knowledge</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#workbench">Skip to workbench</a>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="site-header">
+      <a class="brand" href="#" aria-label="LLM Field Notes home">
+        <span class="brand-mark">⌁</span>
+        <span>
+          <strong>LLM FIELD NOTES</strong>
+          <small>an open learning map</small>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Main navigation">
+        <a href="#workbench">Workbench</a>
+        <a href="#map">Learning map</a>
+        <a href="#principles">Principles</a>
+        <a class="nav-cta" href="#contribute">Improve it <span>↗</span></a>
+      </nav>
+    </header>
+    <div class="app-error section-shell" id="app-error" role="alert" hidden>
+      <strong>The workbench needs a refresh.</strong>
+      <span id="app-error-message">Your saved graph was preserved, but this view could not render.</span>
+      <button id="reload-app" type="button">Reload ↻</button>
+    </div>
+
+    <main>
+      <section class="hero section-shell">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="pulse"></span> DOCUMENTS → GRAPH → UNDERSTANDING</p>
+          <h1>Turn documents<br />into a <em>living map.</em></h1>
+          <p class="hero-lede">
+            An evolving knowledge workspace that extracts concepts, preserves
+            evidence, and lets you project the same understanding into Obsidian.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#workbench">Open the workbench <span>↓</span></a>
+            <a class="button button-quiet" href="#projection">See the projection <span>→</span></a>
+          </div>
+          <div class="hero-proof">
+            <span><strong id="hero-node-count">0</strong> concepts</span>
+            <span class="rule"></span>
+            <span><strong id="hero-edge-count">0</strong> relations</span>
+            <span class="rule"></span>
+            <span><strong id="hero-source-count">0</strong> source docs</span>
+          </div>
+        </div>
+        <div class="hero-art" aria-label="A visual representation of tokens becoming a useful product">
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="signal signal-one">token</div>
+          <div class="signal signal-two">context</div>
+          <div class="signal signal-three">action</div>
+          <div class="core">
+            <span class="core-bracket">[</span>
+            <span class="core-word">model</span>
+            <span class="core-bracket">]</span>
+          </div>
+          <div class="art-caption"><span>01</span> from prediction<br />to leverage</div>
+        </div>
+      </section>
+
+      <section class="ticker" aria-label="Wiki promise">
+        <div class="ticker-track">
+          <span>FIRST PRINCIPLES</span><i>✳</i><span>RUNNABLE EXPERIMENTS</span><i>✳</i><span>HONEST TRADE-OFFS</span><i>✳</i><span>SHARE THE WORK</span><i>✳</i>
+          <span>FIRST PRINCIPLES</span><i>✳</i><span>RUNNABLE EXPERIMENTS</span><i>✳</i><span>HONEST TRADE-OFFS</span><i>✳</i><span>SHARE THE WORK</span><i>✳</i>
+        </div>
+      </section>
+
+      <section class="workbench-section" id="workbench">
+        <div class="section-shell">
+          <div class="section-heading workbench-heading">
+            <div>
+              <div class="section-label"><span class="section-number">01</span><span>THE KNOWLEDGE WORKBENCH</span></div>
+              <h2>Give it a document.<br /><em>Keep the structure.</em></h2>
+            </div>
+            <p class="section-aside">
+              Everything runs in this browser for now. The graph is yours,
+              the evidence stays attached, and every pass becomes a revision
+              you can inspect or export.
+            </p>
+          </div>
+
+          <div class="workbench-grid">
+            <aside class="ingest-panel">
+              <div class="panel-topline"><span>01 / INGEST</span><span class="live-label"><i></i> LOCAL</span></div>
+              <label for="document-title">Document title</label>
+              <input id="document-title" type="text" placeholder="e.g. Attention Is All You Need" />
+              <label for="document-file">Load a document, graph export, or Obsidian feedback note</label>
+              <input id="document-file" class="file-input" type="file" accept=".txt,.md,.markdown,.text,.json,.zip" multiple />
+              <div class="file-queue" id="file-queue" aria-live="polite"></div>
+              <label for="document-input">Paste a document</label>
+              <textarea id="document-input" rows="11" placeholder="Paste notes, a paper, a transcript, or a set of observations here…"></textarea>
+              <div class="ingest-actions">
+                <button class="button button-primary" id="ingest-document">Build graph <span>↗</span></button>
+                <button class="text-button inverse" id="load-sample">Load sample</button>
+              </div>
+              <button class="clear-graph" id="clear-graph" type="button">Clear local graph</button>
+              <button class="undo-graph" id="undo-graph" type="button" disabled>Undo last change ↶</button>
+              <p class="privacy-note">No server call. The graph stays in browser storage; the app may request persistent storage to reduce eviction risk.</p>
+              <div class="ingest-status" id="ingest-status" role="status" aria-live="polite"></div>
+            </aside>
+
+            <section class="graph-panel" aria-label="Knowledge graph viewer">
+              <div class="panel-topline"><span>02 / INTERNAL REPRESENTATION</span><span id="graph-version">REV 000</span></div>
+              <div class="graph-toolbar">
+                <div class="graph-toolbar-left"><span id="graph-summary">No concepts yet — ingest a document to begin.</span><label class="sr-only" for="graph-search">Filter graph</label><input id="graph-search" class="graph-search" type="search" placeholder="Filter graph…" autocomplete="off" /></div>
+                <div>
+                  <button class="mini-button active" data-view="graph" aria-pressed="true">Graph</button>
+                  <button class="mini-button" data-view="list" aria-pressed="false">List</button>
+                </div>
+              </div>
+              <details class="manual-add">
+                <summary>+ Add manual knowledge</summary>
+                <div class="manual-add-grid">
+                  <div>
+                    <label for="manual-node-label">Concept</label>
+                    <div class="manual-inline"><input id="manual-node-label" type="text" maxlength="120" placeholder="e.g. Retrieval quality" /><button id="add-manual-node" type="button">Add</button></div>
+                  </div>
+                  <div>
+                    <label for="manual-edge-source">Relation</label>
+                    <div class="manual-inline">
+                      <select id="manual-edge-source" aria-label="Relation source"></select>
+                      <input id="manual-edge-label" type="text" maxlength="80" placeholder="supports" />
+                      <select id="manual-edge-target" aria-label="Relation target"></select>
+                      <button id="add-manual-edge" type="button">Add</button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+              <div class="graph-canvas-wrap" id="graph-canvas-wrap">
+                <svg id="graph-canvas" viewBox="0 0 720 430" role="img" aria-label="Interactive knowledge graph"></svg>
+                <div class="graph-empty" id="graph-empty"><span>⌁</span><p>Your graph will appear here.</p><small>Nodes are concepts. Lines are evidence.</small></div>
+              </div>
+              <div class="node-list" id="node-list" hidden></div>
+              <div class="relation-list" id="relation-list" hidden></div>
+              <aside class="inspector-panel" id="inspector-panel" aria-live="polite">
+                <div class="inspector-empty"><span>INSPECTOR</span><p>Select a concept or relation to inspect its evidence.</p></div>
+              </aside>
+              <div class="graph-legend"><span><i class="legend-dot concept"></i> concept</span><span><i class="legend-dot source"></i> source</span><span><i class="legend-line"></i> inferred relation</span></div>
+              <div class="health-strip" id="graph-health" aria-live="polite"></div>
+              <div class="revision-log" id="revision-log"></div>
+            </section>
+          </div>
+
+          <div class="projection-panel" id="projection">
+            <div class="panel-topline"><span>03 / EXTERNAL PROJECTION</span><span>OBSIDIAN-READY</span></div>
+            <div class="projection-grid">
+              <div class="projection-copy">
+                <h3>Same graph.<br /><em>Different surface.</em></h3>
+                <p>
+                  Export a navigable Markdown projection with YAML frontmatter,
+                  backlinks, relation lists, and source evidence. Open it in
+                  Obsidian, edit it, and bring corrections back as feedback.
+                </p>
+                <div class="projection-actions">
+                  <button class="button button-light" id="download-markdown">Download .md <span>↓</span></button>
+                  <button class="button button-light" id="download-vault">Download Obsidian vault <span>↓</span></button>
+                  <button class="button button-quiet" id="download-json">Export graph JSON <span>↓</span></button>
+                  <button class="button button-quiet" id="download-backup">Download full backup <span>↓</span></button>
+                </div>
+                <p class="projection-status" id="projection-status" role="status" aria-live="polite"></p>
+              </div>
+              <div class="markdown-preview">
+                <div class="preview-top"><span>_knowledge-graph.md</span><span>preview</span></div>
+                <pre id="markdown-preview"><code>Ingest a document to generate an Obsidian projection.</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-shell intro-grid" id="principles">
+        <div class="section-label">
+          <span class="section-number">00</span>
+          <span>THE POINT OF VIEW</span>
+        </div>
+        <div class="intro-content">
+          <h2>Less mystique.<br /><span>More contact with reality.</span></h2>
+          <div class="intro-columns">
+            <p>
+              A document is useful once its ideas can be found, connected, and
+              challenged. The workbench turns unstructured text into a
+              transparent internal representation instead of hiding the path
+              behind a single answer.
+            </p>
+            <p>
+              The loop is: <strong>ingest → infer → inspect → improve → project.</strong>
+              The graph is not the final truth. It is a living hypothesis with
+              evidence attached and a revision history.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="map-section" id="map">
+        <div class="section-shell">
+          <div class="section-heading">
+            <div>
+              <div class="section-label"><span class="section-number">02</span><span>THE LEARNING MAP</span></div>
+              <h2>Pick a thread.<br /><em>Follow it all the way down.</em></h2>
+            </div>
+            <p class="section-aside">
+              Start anywhere. The map is arranged by dependency, not prestige.
+              The best next note is usually the one that makes your current
+              project less mysterious.
+            </p>
+          </div>
+
+          <div class="map-toolbar">
+            <div class="search-wrap">
+              <span class="search-icon">⌕</span>
+              <label class="sr-only" for="search">Search notes</label>
+              <input id="search" type="search" placeholder="Search notes, topics, questions…" autocomplete="off" />
+              <kbd>/</kbd>
+            </div>
+            <div class="filters" role="group" aria-label="Filter notes">
+              <button class="filter active" data-filter="all" aria-pressed="true">All <span>12</span></button>
+              <button class="filter" data-filter="foundations" aria-pressed="false">Foundations <span>4</span></button>
+              <button class="filter" data-filter="systems" aria-pressed="false">Systems <span>4</span></button>
+              <button class="filter" data-filter="shipping" aria-pressed="false">Shipping <span>4</span></button>
+            </div>
+          </div>
+          <div class="notes-grid" id="notes-grid"></div>
+          <p class="empty-state" id="empty-state" hidden>No notes match that search. Try a broader question.</p>
+        </div>
+      </section>
+
+      <section class="path-section section-shell" id="path">
+        <div class="path-intro">
+          <div class="section-label"><span class="section-number">03</span><span>THE 30-DAY PATH</span></div>
+          <h2>One month.<br /><em>One working artifact.</em></h2>
+          <p>
+            A deliberately small syllabus for building intuition through
+            contact. You do not need to finish every exercise. You do need to
+            keep making things.
+          </p>
+          <button class="text-button" id="reset-progress">Reset progress ↺</button>
+        </div>
+        <div class="path-list" id="path-list"></div>
+      </section>
+
+      <section class="lab-section">
+        <div class="section-shell lab-grid">
+          <div class="lab-stamp">FIELD<br />LAB <span>✳</span></div>
+          <div>
+            <div class="section-label"><span class="section-number">04</span><span>THIS WEEK'S EXPERIMENT</span></div>
+            <h2>Train a tiny<br /><em>character model.</em></h2>
+            <p class="lab-description">
+              Take a text file you care about. Build a tokenizer. Train a
+              small transformer. Watch the loss curve move. Then make it fail
+              in three interesting ways.
+            </p>
+            <div class="lab-meta">
+              <span><b>DIFFICULTY</b> ★★☆</span>
+              <span><b>TIME</b> 2–4 evenings</span>
+              <span><b>OUTPUT</b> a notebook + model</span>
+            </div>
+            <a class="button button-light" href="#contribute">See the build brief <span>↗</span></a>
+          </div>
+          <div class="lab-terminal">
+            <div class="terminal-top"><span></span><span></span><span></span><small>train.py</small></div>
+            <pre><code><i># the loop is the lesson</i>
+for step in range(max_steps):
+    xb, yb = get_batch()
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+<b>print</b>(f"step {step}: {loss.item():.3f}")</code></pre>
+            <div class="terminal-status"><span class="status-dot"></span> loss is falling <strong>▁▂▃▅▇</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="principles-section section-shell">
+        <div class="section-label"><span class="section-number">05</span><span>THE HOUSE RULES</span></div>
+        <div class="principles-heading">
+          <h2>Make the map<br /><em>worth trusting.</em></h2>
+          <p>These are not commandments. They are useful constraints for a fast-moving field.</p>
+        </div>
+        <div class="principles-grid">
+          <article><span>01</span><h3>Show your work.</h3><p>Primary sources, runnable code, screenshots of failure. Make claims easy to inspect.</p></article>
+          <article><span>02</span><h3>Keep it small.</h3><p>The smallest useful explanation beats the grand unified theory every time.</p></article>
+          <article><span>03</span><h3>Name the edges.</h3><p>Performance, cost, latency, data, and weird behavior are part of the concept.</p></article>
+          <article><span>04</span><h3>Leave a handle.</h3><p>Every page should give the next curious person somewhere concrete to start.</p></article>
+        </div>
+      </section>
+
+      <section class="contribute-section" id="contribute">
+        <div class="section-shell contribute-grid">
+          <div>
+            <div class="section-label"><span class="section-number">06</span><span>THE WIKI IS A VERB</span></div>
+            <h2>Found a gap?<br /><em>Pull the thread.</em></h2>
+          </div>
+          <div class="contribute-copy">
+            <p>
+              The best version of this resource cannot be written by one
+              person. Add a correction, a sharper analogy, a benchmark, a
+              failed attempt, or a link that deserves more context.
+            </p>
+            <div class="contribute-actions">
+              <a class="button button-primary" href="CONTRIBUTING.md">Open a contribution <span>↗</span></a>
+              <button class="button button-quiet" id="copy-prompt">Copy the page template <span>⧉</span></button>
+            </div>
+            <p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog class="note-dialog" id="note-dialog">
+      <button class="dialog-close" id="dialog-close" aria-label="Close note">×</button>
+      <div class="dialog-kicker" id="dialog-kicker"></div>
+      <h2 id="dialog-title"></h2>
+      <p class="dialog-question" id="dialog-question"></p>
+      <div class="dialog-columns">
+        <div>
+          <span class="dialog-label">THE SHORT VERSION</span>
+          <p id="dialog-summary"></p>
+        </div>
+        <div>
+          <span class="dialog-label">BUILD IT</span>
+          <p id="dialog-build"></p>
+        </div>
+      </div>
+      <div class="dialog-try">
+        <span class="dialog-label">NEXT EXPERIMENT</span>
+        <p id="dialog-next"></p>
+      </div>
+    </dialog>
+
+    <footer class="site-footer section-shell">
+      <a class="brand" href="#" aria-label="LLM Field Notes home">
+        <span class="brand-mark">⌁</span>
+        <span><strong>LLM FIELD NOTES</strong><small>learn by building</small></span>
+      </a>
+      <p>Open knowledge for a moving target.</p>
+      <div class="footer-links"><a href="#map">Map</a><a href="#path">Path</a><a href="#contribute">Contribute</a><span>v0.1 · July 2026</span></div>
+    </footer>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
