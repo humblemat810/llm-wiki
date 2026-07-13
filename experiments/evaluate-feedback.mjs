@@ -1,22 +1,41 @@
-import { readFile, stat } from "node:fs/promises";
 import { FEEDBACK_FORMAT, GRAPH_SCHEMA, matchesFeedbackFingerprint, matchesGraphFingerprint } from "../graph-core.js";
-import { evaluateExtraction } from "../evaluation.js";
+import { evaluateExtraction, MAX_EVALUATION_EXAMPLES } from "../evaluation.js";
+import { readBoundedTextFile } from "./bounded-file.mjs";
 
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
-const [feedbackPath, extractionPath] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const feedbackPath = args.shift();
+const extractionPath = args.shift();
+
+function parseOptions(values) {
+  let maxUntrustedFeedback = null;
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] !== "--max-untrusted-feedback") {
+      throw new Error(`Unknown option: ${values[index]}`);
+    }
+    const raw = values[++index];
+    const value = Number(raw);
+    if (!raw || !Number.isSafeInteger(value) || value < 0 || value > MAX_EVALUATION_EXAMPLES) {
+      throw new Error(`--max-untrusted-feedback must be an integer from 0 to ${MAX_EVALUATION_EXAMPLES}.`);
+    }
+    maxUntrustedFeedback = value;
+  }
+  return { maxUntrustedFeedback };
+}
 
 async function readJsonFile(path) {
-  const metadata = await stat(path);
-  if (!metadata.isFile()) throw new Error(`Evaluation input is not a file: ${path}`);
-  if (metadata.size > MAX_INPUT_BYTES) throw new Error(`Evaluation input exceeds the ${MAX_INPUT_BYTES / (1024 * 1024)} MB safety limit: ${path}`);
-  return JSON.parse(await readFile(path, "utf8"));
+  return JSON.parse(await readBoundedTextFile(path, MAX_INPUT_BYTES, {
+    label: "Evaluation input",
+    tooLargeMessage: `Evaluation input exceeds the ${MAX_INPUT_BYTES / (1024 * 1024)} MB safety limit: ${path}`
+  }));
 }
 
 if (!feedbackPath || !extractionPath) {
-  console.error("Usage: node experiments/evaluate-feedback.mjs <feedback.json> <extraction-or-graph.json>");
+  console.error("Usage: node experiments/evaluate-feedback.mjs <feedback.json> <extraction-or-graph.json> [--max-untrusted-feedback <integer>]");
   process.exitCode = 1;
 } else {
   try {
+    const { maxUntrustedFeedback } = parseOptions(args);
     const feedback = await readJsonFile(feedbackPath);
     const extraction = await readJsonFile(extractionPath);
     if (!Array.isArray(feedback) && feedback?.format !== undefined && feedback.format !== FEEDBACK_FORMAT) {
@@ -43,7 +62,11 @@ if (!feedbackPath || !extractionPath) {
       && !matchesFeedbackFingerprint(examples, feedback.datasetFingerprint)) {
       throw new Error("Feedback JSON dataset fingerprint does not match its examples.");
     }
-    console.log(JSON.stringify(evaluateExtraction(extractionValue, examples), null, 2));
+    const report = evaluateExtraction(extractionValue, examples);
+    if (maxUntrustedFeedback !== null && report.feedback.untrustedExamples > maxUntrustedFeedback) {
+      throw new Error(`untrusted feedback examples ${report.feedback.untrustedExamples} exceed ${maxUntrustedFeedback}`);
+    }
+    console.log(JSON.stringify(report, null, 2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : "Evaluation failed.");
     process.exitCode = 1;

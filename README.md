@@ -12,6 +12,19 @@ The goal is not to hide behind a generated summary. It is to preserve the
 concepts, relations, confidence, source evidence, and revision history so a
 curious person can challenge the representation and improve it over time.
 
+## Try it in 60 seconds
+
+The fastest path to the useful loop is:
+
+```bash
+npm run serve:pages
+```
+
+Open `http://localhost:8000`, choose **Try a sample graph**, then inspect the
+concepts, evidence, review queue, and Obsidian projection. After that, paste a
+paper or transcript into the workbench and choose **Build graph**. The default
+path stays local in the browser; no provider or API key is required.
+
 ## Current workbench
 
 The browser prototype supports:
@@ -25,6 +38,14 @@ The browser prototype supports:
 - Showing a bounded summary of per-file batch failures so partial imports are
   recoverable without overwhelming the workbench.
 - Extracting candidate concepts and evidence-backed co-occurrence relations.
+- Preferring repeated concepts, explicit phrases, headings, quoted terms, and
+  reviewed feedback over isolated generic vocabulary in the local extractor.
+- Capturing a bounded set of adjacent content-word phrases such as “weighted
+  lookup” and “positional encoding” so important lower-case concepts remain
+  legible, while filtering common verb and preposition fragments that create
+  misleading graph edges.
+- Keeping Markdown headings separate from prose units so heading text does not
+  become duplicated or synthetic concepts during extraction.
 - Handling punctuation-light and mixed Markdown by supplementing prose with
   bounded paragraph, bullet, numbered-list, and quote-line units, while keeping
   separate list items from becoming false cross-item relations.
@@ -32,13 +53,21 @@ The browser prototype supports:
   of silently reducing local extraction to ASCII-only documents.
 - Bounding extracted words per text unit as well as total extraction units, so
   multilingual segmentation cannot turn a large document into unbounded work.
+- Bounding the total heuristic candidate set and per-candidate evidence before
+  ranking, so adversarial documents cannot force unbounded pre-normalization
+  memory or quadratic phrase analysis, while reserving capacity for phrases and
+  structural candidates after generic terms.
 - Keeping Unicode segmentation itself behind an explicit character budget and
   ignoring numeric-only tokens to reduce low-value graph noise.
 - Making offline shell fallback query-tolerant so cache-busted static assets
   still resolve to the installed application shell.
+- Coordinating service-worker upgrades with an explicit reload action so an
+  open workbench is not mixed with assets from two application releases.
 - Optionally sending documents to a configured same-origin extraction endpoint
   that returns the same normalized graph contract; blank configuration keeps
   extraction fully local.
+- Remembering a validated same-origin extractor path locally across reloads,
+  without accepting embedded credentials or cross-origin endpoints.
 - Supporting an optional server-side `EXTRACTOR_AUTH_TOKEN` bearer guard for
   single-instance deployments without putting credentials in the browser.
 - Supplying up to 500 reviewed feedback examples with remote extraction so
@@ -64,7 +93,14 @@ The browser prototype supports:
 - Confirming or dismissing concepts to update confidence and create a revision.
 - Confirming or dismissing relations with the same persistent feedback loop.
 - Re-ingesting later documents without silently overriding dismissed knowledge.
+- Canceling a remote source replacement before it can mutate the graph, while
+  preserving the existing source if extraction is interrupted.
 - Normalizing imported graph JSON so duplicate IDs cannot create ambiguous state.
+- Collapsing duplicate imported and extractor records deterministically so
+  reordering equivalent payloads cannot change graph fingerprints or learning
+  identity.
+- Preserving bounded-import truncation diagnostics so an oversized or partial
+  graph cannot look complete without an explicit warning.
 - Enforcing document-size limits inside the extractor, not only in the browser UI.
 - Canonicalizing labels and titles so external text cannot break projections.
 - Bounding graph collections to keep imports and model responses within a
@@ -115,6 +151,9 @@ The browser prototype supports:
 - Flushing queued durable writes when the page is being discarded, reducing the
   chance that the newest local revision is lost during navigation or tab
   closure.
+- Recording a bounded pending-write marker beside the synchronous mirror so an
+  interrupted IndexedDB commit cannot make the next hydration prefer stale
+  graph state.
 - Surfacing asynchronous durable-storage failures in the privacy note and graph
   health strip so users know when to export a backup, with a direct backup
   action available from the warning.
@@ -137,9 +176,24 @@ The browser prototype supports:
 - Allowing users to clear local state even when a pre-clear undo snapshot cannot
   fit in storage.
 - Browsing the graph as SVG or as an inspectable concept list.
+- Browsing every ingested source document in the List view, including sources
+  whose extraction produced no concepts.
 - Filtering large graphs across concepts and relations without changing the
   stored representation.
-- Searching graph evidence and source titles as well as concept/relation labels.
+- Preserving explicit relation verbs such as “improves,” “preserves,” “reduces,”
+  and “increases” instead of collapsing them into generic co-occurrence edges,
+  including shared-subject multi-clause sentences.
+- Keeping sparse documents on the same noise-filtered ranking path, so a
+  short input does not reintroduce isolated terms beside stronger phrases.
+- Retaining one-off endpoints explicitly named by accepted relation feedback,
+  so reviewed learning can still guide a short follow-up document.
+- Removing weaker one-word candidates when their evidence is fully subsumed by
+  a stronger multi-word phrase, without hiding repeated or reviewed concepts.
+- Coalescing expensive search renders per animation frame so filtering remains
+  responsive as the graph grows.
+- Reusing fingerprinted health, review-queue, and Markdown projection work
+  while search changes, avoiding repeated full-graph scans.
+- Searching graph evidence and bounded source text as well as concept/relation labels.
 - Searching source quality and review metadata through the same graph index.
 - Retaining optional bounded source URIs through graph JSON, remote extraction,
   and Obsidian source notes.
@@ -157,9 +211,15 @@ The browser prototype supports:
   distribution.
 - Showing how many reviewed feedback decisions are retained for future
   extraction guidance.
+- Showing how many unique reviewed decisions are available versus retained in
+  the bounded extractor guidance context, so learning-memory truncation is
+  visible rather than silent.
 - Revisiting stale human decisions after a bounded freshness window, so
   accepted or rejected knowledge and source metadata can be challenged as new
   evidence arrives.
+- Prioritizing reviewed concepts and relations immediately when a newly added
+  source contributes evidence after their last human review, rather than
+  waiting for the time-based stale window.
 - Reporting stale-review pressure in graph health exports and the workbench,
   making representation drift visible to operators and quality gates.
 - Separating historical source-review coverage from fresh source-review
@@ -178,6 +238,16 @@ The browser prototype supports:
   documents or the current knowledge graph.
 - Allowing users to forget only stale reusable learning memory while preserving
   fresh reviewed guidance and an undoable revision.
+- Keeping stale reusable learning memory in the audit trail while excluding it
+  from new extraction guidance until a human reviews it again.
+- Reporting active extractor guidance counts separately from stale learning
+  memory, so health metrics describe what the next extraction can actually use.
+- Applying the same fresh-only guidance rule to stale accepted or rejected
+  concepts and relations, not only to detached learning examples.
+- Requiring a valid review timestamp before any reusable memory or reviewed
+  graph item can steer new extraction.
+- Reporting guidance withheld pending review so stale-memory suppression is
+  visible rather than silent.
 - Marking each source as unknown, primary, secondary, or tertiary quality and
   recording its last-reviewed date in the graph and Obsidian projection.
 - Normalizing review dates to ISO timestamps and discarding malformed dates at
@@ -189,14 +259,21 @@ The browser prototype supports:
 - Restricting graph and revision versions to JavaScript-safe integers so
   optimistic concurrency remains reliable.
 - Importing those source metadata edits back from Obsidian source notes.
+- Verifying projection identity on every feedback note inside a vault, not
+  only on the vault manifest, so stale individual edits are disclosed before
+  import.
 - Surfacing an explainable review queue that prioritizes low-confidence,
   evidence-free, or unresolved-provenance inferred concepts and relations,
   plus unknown-quality or never-reviewed sources, for the next human
   correction, with confirm/dismiss actions available directly in the
   inspector.
+- Showing the bounded prioritized review queue itself, including each
+  candidate's reason and priority, so the self-improvement loop remains
+  inspectable rather than hidden behind a single “review next” action.
 - Exporting the internal representation as JSON.
 - Including an optional deterministic graph fingerprint in JSON exports so
-  imports can detect accidental edits or truncation while legacy graphs remain
+  imports can detect accidental edits or truncation without treating harmless
+  document/concept/relation reordering as a change, while legacy graphs remain
   readable.
 - Binding Markdown projections to the normalized graph fingerprint so copied
   notes can be traced back to the exact representation that produced them.
@@ -209,12 +286,16 @@ The browser prototype supports:
 - Exporting a redacted Obsidian vault with the same privacy boundary, so
   shareable Markdown projections do not require exposing source material; the
   exported notes visibly mark the redaction state.
+- Regression-checking complete redacted Markdown and vault payloads for
+  source-text and URI leakage, not only their individual source files.
 - Exporting a bounded structured diff for the latest graph revision, so
   representation changes, learning memory, integrity diagnostics, and privacy
   state can be reviewed or shared independently.
 - Exporting a versioned privacy-safe graph health report with provenance,
   review, actionable-candidate, ambiguity, and support diagnostics for issue
-  reports or automation.
+  reports or automation, including a bounded metadata-only review queue without
+  source text, evidence text, or source URIs, and identifying the producing app
+  version for reproducible diagnostics.
 - Exporting/restoring a versioned full backup containing the graph and undo
   history, with a deterministic fingerprint that detects accidental edits or
   truncation before restore.
@@ -256,6 +337,9 @@ retains the existing correction semantics.
   synchronizing progress across open tabs.
 - Giving note deep links note-specific browser and share metadata while
   restoring the wiki-level metadata when the dialog closes.
+- Linking each learning-map card directly to both its crawler-readable HTML
+  viewer and its raw Markdown source, so shared reading and Obsidian forking
+  are equally close at hand.
 - Exporting a complete Obsidian vault ZIP with an index, one Markdown note per
   concept, one editable note per relation, one note per source document,
   relations, a navigable reusable-review ledger, the bounded revision history,
@@ -271,14 +355,19 @@ retains the existing correction semantics.
   examples, portable relation endpoint labels, and graph revision counts for
   external audit.
 - Preflighting each generated vault and learning-note file against the ZIP
-  size limit before retaining more projection content in browser memory, and
-  failing clearly rather than silently omitting notes when the limit is hit.
+  size limit, streaming learning-note responses under a 1 MB per-note memory
+  bound, and failing clearly rather than silently omitting notes when a limit
+  is hit.
 - Maintaining the public learning map as versioned Markdown pages under
   `notes/`, so the curriculum is forkable, linkable, and usable in Obsidian.
+- Rendering those same Markdown notes as escaped, crawler-readable HTML
+  learning pages, while preserving the raw Markdown alternate for copying and
+  Obsidian and allowing only safe HTTP(S) source links to become clickable.
 - Including a bounded Mermaid graph view in Markdown projections for visual
   inspection in Obsidian-compatible viewers.
 - Including privacy-safe graph health diagnostics in the Markdown projection,
-  so provenance gaps and review debt remain visible outside the browser.
+  so provenance gaps, review debt, and bounded-import or malformed-import loss
+  remain visible outside the browser.
 - Bounding evidence retained in full Markdown projections so large graphs
   produce a useful, explicitly marked export instead of an unbounded string.
 - Including those learning pages in Obsidian vault exports and precaching them
@@ -294,6 +383,13 @@ retains the existing correction semantics.
   than weakening the page with `unsafe-inline`.
 - Opening learning notes through shareable `#note=...` deep links that survive
   reloads and browser back/forward navigation.
+- Publishing crawler-readable note landing pages with note-specific canonical,
+  Article JSON-LD, feed discovery, and social metadata while retaining the
+  interactive modal workflow.
+- Enforcing a no-script content-security policy on note landing pages so the
+  public reading surface stays separate from the interactive workbench.
+- Precaching generated note landing pages in the Pages service-worker shell so
+  shared curriculum links remain available offline after first install.
 - Importing edited concept/relation Markdown notes from an unpacked Obsidian
   vault so label, alias, and status corrections become graph revisions; vault
   imports surface invalid or stale manifest metadata, require explicit
@@ -319,14 +415,17 @@ The implementation boundaries and extension rules are documented in
 To compare an extractor revision against reviewed examples:
 
 ```bash
-node experiments/evaluate-feedback.mjs feedback.json extraction.json
+node experiments/evaluate-feedback.mjs feedback.json extraction.json --max-untrusted-feedback 0
 ```
 
 The evaluator emits the versioned `llm-field-notes/evaluation@1` contract. It
 measures accepted recall, reviewed-candidate precision, and whether rejected
 examples stay out of the representation; reviewed precision is limited to
 candidates that match reviewed examples and does not pretend a sparse human
-feedback set is a complete precision benchmark.
+feedback set is a complete precision benchmark. The report also separates fresh,
+stale, and undated reviewed examples. Use `--max-untrusted-feedback 0` to make
+production promotion fail closed on stale or undated feedback while preserving
+historical evaluation for analysis.
 
 To compare two graph exports or full backups outside the browser:
 
@@ -342,17 +441,21 @@ them.
 To gate an extractor or representation improvement:
 
 ```bash
-node experiments/compare-evaluations.mjs baseline-evaluation.json candidate-evaluation.json
+node experiments/compare-evaluations.mjs baseline-evaluation.json candidate-evaluation.json --max-untrusted-feedback 0
 ```
 
 The command exits non-zero when any accepted-recall, reviewed-precision, or
 rejected-suppression metric regresses. Pass `--max-regression 0.02` to allow a
-documented two-point tradeoff.
+documented two-point tradeoff. Pass `--max-untrusted-feedback 0` to make the
+promotion gate reject stale or undated reviewed examples; legacy reports
+without freshness diagnostics fail closed when this option is used. Gated
+comparison artifacts record the threshold and the baseline/candidate untrusted
+example counts.
 
 To inspect graph quality in automation:
 
 ```bash
-npm run health -- graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-stale-review-candidates 10 --max-stale-learning-examples 25
+npm run health -- graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-truncated-items 0 --max-dropped-items 0
 ```
 
 This emits the privacy-safe health contract and exits non-zero when the
@@ -361,7 +464,8 @@ The report and gate reuse the same normalized diagnostic pass, so large graphs
 are not scanned twice; `--max-ambiguous` includes duplicate canonical concept
 labels as well as provenance and identifier ambiguity. The unsupported-node
 and unsupported-edge gates require every active item to retain valid evidence
-or provenance.
+or provenance. Use `--max-truncated-items 0 --max-dropped-items 0` when partial
+or malformed imports must fail the gate rather than remain diagnostic-only.
 
 To project a graph or backup into JSON-LD from automation:
 
@@ -385,7 +489,8 @@ the stable boundary for partial or provider-specific extraction responses.
 HTTP adapters should use `normalizeExtractionForDocument()` when the submitted
 document's title, text, URI, and provenance must remain authoritative.
 `extractor-adapter.js` provides a small HTTP adapter with endpoint validation,
-timeouts, bounded document input and response size, and normalized responses. It is intentionally
+timeouts, one bounded retry for transient network/HTTP failures, bounded
+document input and response size, and normalized responses. It is intentionally
 not wired to a vendor or API key, so deployments can add a server-side provider
 without putting credentials in the browser.
 Remote extraction treats the submitted title, text, URI, and content fingerprint
@@ -429,6 +534,8 @@ return HTTP 504 with a correlated request ID. The default provider timeout is
 120 seconds and is configurable with `EXTRACTOR_TIMEOUT_MS` (capped at 120
 seconds); disconnected clients also abort in-flight provider work. The
 normalized extractor response is capped at 10 MB before transmission. The
+provider response also fails closed when it exceeds the graph's concept or
+relation collection limits rather than silently dropping model output. The
 invalid or absent `PORT` falls back to `8000`; an empty or absent `HOST`
 falls back to `127.0.0.1`, while a non-empty host is passed to Node for
 normal hostname validation. The reference endpoint requires JSON, validates
@@ -446,6 +553,8 @@ contains no document content.
 Set `PUBLIC_ORIGIN` to the externally visible HTTPS origin to enable
 `/sitemap.xml` and a deployment-aware `robots.txt` with crawlable learning-note
 URLs, plus `/feed.xml` as an Atom subscription feed for the learning map.
+The same HTTPS setting enables conditional HSTS for deployed responses; local
+HTTP development remains free of browser-persistent HSTS state.
 When configured, the server also emits absolute canonical, feed, and social
 image URLs in the HTML shell so shared links remain previewable outside the
 deployment origin.
@@ -468,10 +577,10 @@ a process-uptime gauge for restart correlation. Operational JSON and metrics
 responses explicitly opt out of search indexing. Public static assets, including learning notes, are
 bounded to 10 MB so readiness and serving cannot buffer an unexpectedly large
 deployment file.
-Extraction responses include an `X-Request-ID` UUID for operational
-correlation, and the browser adapter preserves that ID in remote errors. The
-standalone server logs structured request ID, status, duration, route,
-document character count, and feedback count without document content.
+Every server response includes an `X-Request-ID` UUID for operational
+correlation; the browser adapter preserves extraction IDs in remote errors.
+The standalone server logs structured extraction request ID, status, duration,
+route, document character count, and feedback count without document content.
 
 Quick contract smoke test:
 
@@ -566,6 +675,7 @@ those files as feedback updates rather than new source documents.
 - `notes/` — versioned Markdown learning pages and curriculum index
 - `experiments/` — small dependency-free runnable learning artifacts (see [experiments/README.md](experiments/README.md))
 - `server.mjs` — optional same-origin static server and extraction contract example
+- `scripts/note-page.mjs` — shared crawler-readable learning-note page renderer
 - `manifest.webmanifest` / `sw.js` — installable, cacheable static deployment
 - `version.json` — public release metadata shared by the browser and static
   deployment checks
@@ -663,8 +773,11 @@ a model-backed extraction implementation behind the same graph contract.
   control characters from forked note headings and summaries. The Node server
   provides the same origin-aware crawler assets at runtime, with a 2 MB
   generated feed/sitemap safety bound.
-- Public asset delivery is defined once in `scripts/public-assets.mjs` and
-  checked against the offline service-worker shell during release validation.
+- Public asset delivery is defined once in `scripts/public-assets.mjs`, bounded
+  to 10 MB per asset and 100 MB in aggregate across Node serving, Pages builds,
+  and release checks, with a 1,000-note publication ceiling, and checked
+  against the offline service-worker shell during release validation. Node and
+  Pages sitemaps publish the same source-note and canonical HTML landing URLs.
 - The repo should be easy to fork, improve, and deploy on GitHub Pages.
 - The service worker prefers fresh shell assets and only falls back to its
   cache when offline, when the network stalls for three seconds, or when a
@@ -672,6 +785,9 @@ a model-backed extraction implementation behind the same graph contract.
   cached.
 - Service-worker activation removes only older `llm-field-notes-*` caches, so
   deploying beside another app on the same origin does not erase its cache.
+- Later service-worker releases wait for user approval before taking over an
+  active tab; the first install activates automatically and the update banner
+  reloads only after the user chooses to apply it.
 - Shell requests explicitly revalidate the browser HTTP cache so deployments
   do not remain stale for the static asset max-age window.
 - The service-worker script itself is served `no-cache` so worker updates are

@@ -1,17 +1,35 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { request as httpRequest } from "node:http";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { Agent, request as httpRequest } from "node:http";
+import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { createAppServer } from "../server.mjs";
-import { extractGraph } from "../graph-core.js";
+import { createAppServer, readBoundedFile } from "../server.mjs";
+import { extractGraph, MAX_GRAPH_NODES } from "../graph-core.js";
+import { FIXED_PUBLIC_ASSETS, MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
 
 const logs = [];
 const server = createAppServer({ logger: (entry) => logs.push(entry) });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
 try {
+  const boundedReadRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-bounded-read-"));
+  try {
+    const boundedReadPath = join(boundedReadRoot, "asset.bin");
+    await writeFile(boundedReadPath, Buffer.alloc(17, 0x78));
+    await assert.rejects(
+      () => readBoundedFile(boundedReadPath, 16),
+      (error) => error?.code === "FILE_TOO_LARGE",
+      "runtime asset reads should reject bytes beyond the configured limit"
+    );
+    await assert.rejects(
+      () => readBoundedFile(boundedReadPath, Number.POSITIVE_INFINITY),
+      (error) => error instanceof RangeError,
+      "runtime asset reads should reject invalid unbounded limits"
+    );
+  } finally {
+    await rm(boundedReadRoot, { recursive: true, force: true });
+  }
   assert.equal(server.requestTimeout, 120000);
   assert.equal(server.headersTimeout, 15000);
   assert.equal(server.keepAliveTimeout, 5000);
@@ -20,8 +38,10 @@ try {
   const index = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(index.status, 200);
   assert((await index.text()).includes("LLM Field Notes"));
+  assert.match(index.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/, "static responses should expose a request ID for operational correlation");
   assert.equal(Number(index.headers.get("content-length")), Buffer.byteLength(await (await fetch(`http://127.0.0.1:${port}/index.html`)).text()), "static responses should advertise their byte length");
   assert(index.headers.get("content-security-policy")?.includes("frame-ancestors 'none'"));
+  assert.equal(index.headers.get("strict-transport-security"), null, "local HTTP servers should not advertise HSTS");
   const indexEtag = index.headers.get("etag");
   assert.match(indexEtag || "", /^"[0-9a-f]{64}"$/);
   const notModified = await fetch(`http://127.0.0.1:${port}/`, { headers: { "if-none-match": indexEtag } });
@@ -38,6 +58,32 @@ try {
   assert.equal(note.status, 200);
   assert.equal(note.headers.get("content-type"), "text/markdown; charset=utf-8");
   assert((await note.text()).includes("# Tokens are the interface"), "versioned learning notes should be served as Markdown");
+  const notePage = await fetch(`http://127.0.0.1:${port}/notes/tokens.html`);
+  assert.equal(notePage.status, 200);
+  const notePageText = await notePage.text();
+  assert(notePageText.includes("Tokens are the interface") && notePageText.includes("<h2>The short version</h2>") && notePageText.includes("application/ld+json") && notePageText.includes("\"@type\":\"Article\"") && notePageText.includes("application/atom+xml") && notePageText.includes("Content-Security-Policy") && notePageText.includes("script-src 'none'") && notePageText.includes("robots\" content=\"index,follow\"") && notePageText.includes("og:type\" content=\"article\"") && notePageText.includes("text/markdown"), "Node hosts should serve safe rendered note pages with Article structured data, feed discovery, strict CSP, and Markdown alternate");
+  assert(notePage.headers.get("content-security-policy")?.includes("script-src 'none'") && notePage.headers.get("content-security-policy")?.includes("connect-src 'none'"), "Node note landing pages should enforce their strict CSP at the response boundary");
+  const notePageEtag = notePage.headers.get("etag");
+  assert.match(notePageEtag || "", /^"[0-9a-f]{64}"$/, "note landing pages should expose deterministic validators");
+  const notePageHead = await fetch(`http://127.0.0.1:${port}/notes/tokens.html`, { method: "HEAD" });
+  assert.equal(notePageHead.status, 200, "note landing pages should support HEAD probes");
+  assert.equal(Number(notePageHead.headers.get("content-length")), Number(notePage.headers.get("content-length")), "note landing page HEAD responses should advertise the same length");
+  assert.equal(await notePageHead.text(), "", "note landing page HEAD responses should not contain a body");
+  const notePageNotModified = await fetch(`http://127.0.0.1:${port}/notes/tokens.html`, { headers: { "if-none-match": notePageEtag } });
+  assert.equal(notePageNotModified.status, 304, "note landing pages should support conditional requests");
+  assert(notePageNotModified.headers.get("content-security-policy")?.includes("script-src 'none'"), "note landing page 304 responses should preserve the strict CSP");
+  const oversizedNoteRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-note-page-oversized-"));
+  await mkdir(join(oversizedNoteRoot, "notes"), { recursive: true });
+  await writeFile(join(oversizedNoteRoot, "notes", "large.md"), `# Large note\n\n${"x".repeat(10 * 1024 * 1024 + 1)}`);
+  const oversizedNoteServer = createAppServer({ staticRoot: oversizedNoteRoot });
+  await new Promise((resolve) => oversizedNoteServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const oversizedNoteResponse = await fetch(`http://127.0.0.1:${oversizedNoteServer.address().port}/notes/large.html`);
+    assert.equal(oversizedNoteResponse.status, 413, "oversized dynamic note pages should be rejected before source buffering");
+  } finally {
+    oversizedNoteServer.close();
+    await rm(oversizedNoteRoot, { recursive: true, force: true });
+  }
   const shareCard = await fetch(`http://127.0.0.1:${port}/social-card.svg`);
   assert.equal(shareCard.status, 200);
   assert.equal(shareCard.headers.get("content-type"), "image/svg+xml");
@@ -68,6 +114,7 @@ try {
   const health = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0" });
+  assert.match(health.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/, "health responses should expose a request ID for operational correlation");
   assert.equal(health.headers.get("cache-control"), "no-store");
   const healthHead = await fetch(`http://127.0.0.1:${port}/healthz`, { method: "HEAD" });
   assert.equal(healthHead.status, 200, "health checks should support HEAD probes");
@@ -136,12 +183,48 @@ try {
     request.end(Buffer.alloc(2 * 1024 * 1024 + 1, 0x78));
   });
   assert.equal(chunkedOversizedUpload.status, 413, "chunked oversized bodies should be rejected as soon as the limit is crossed");
+  const declaredOversizedUpload = await new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      path: "/api/extract-graph",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(2 * 1024 * 1024 + 1)
+      }
+    }, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response.statusCode));
+    });
+    request.on("error", reject);
+    request.end();
+  });
+  assert.equal(declaredOversizedUpload, 413, "declared oversized JSON bodies should be rejected without buffering");
   const invalidMediaType = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json-malicious" },
     body: "{}"
   });
   assert.equal(invalidMediaType.status, 415, "invalid JSON media type variants should be rejected");
+  const earlyRejectedOversized = await new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      path: "/api/extract-graph",
+      method: "POST",
+      headers: {
+        "content-type": "text/plain",
+        "content-length": String(2 * 1024 * 1024 + 1)
+      }
+    }, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response.statusCode));
+    });
+    request.on("error", reject);
+    request.end();
+  });
+  assert.equal(earlyRejectedOversized, 415, "early rejection should respond before draining a declared oversized upload");
   const abortedUpload = httpRequest({
     hostname: "127.0.0.1",
     port,
@@ -180,6 +263,59 @@ try {
   } finally {
     loggerFailureServer.close();
   }
+  const httpsOriginServer = createAppServer({ publicOrigin: "https://notes.example.test" });
+  await new Promise((resolve) => httpsOriginServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const httpsOriginHealth = await fetch(`http://127.0.0.1:${httpsOriginServer.address().port}/healthz`);
+    assert.equal(httpsOriginHealth.headers.get("strict-transport-security"), "max-age=31536000; includeSubDomains", "HTTPS public origins should advertise HSTS");
+    const crossOriginExtraction = await fetch(`http://127.0.0.1:${httpsOriginServer.address().port}/api/extract-graph`, {
+      method: "POST",
+      headers: {
+        origin: "https://evil.example.test",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Cross origin", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(crossOriginExtraction.status, 403, "browser extraction should reject cross-origin POSTs");
+    const fetchMetadataRejected = await fetch(`http://127.0.0.1:${httpsOriginServer.address().port}/api/extract-graph`, {
+      method: "POST",
+      headers: {
+        "sec-fetch-site": "cross-site",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Fetch metadata", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(fetchMetadataRejected.status, 403, "cross-site fetch metadata should reject browser extraction without Origin");
+    const sameOriginExtraction = await fetch(`http://127.0.0.1:${httpsOriginServer.address().port}/api/extract-graph`, {
+      method: "POST",
+      headers: {
+        origin: "https://notes.example.test",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Same origin", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(sameOriginExtraction.status, 200, "configured public origins should permit same-origin browser extraction");
+  } finally {
+    httpsOriginServer.close();
+  }
   const symlinkRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-"));
   await symlink(process.execPath, join(symlinkRoot, "index.html"));
   const symlinkServer = createAppServer({ staticRoot: symlinkRoot });
@@ -200,6 +336,7 @@ try {
   try {
     const unavailable = await fetch(`http://127.0.0.1:${unavailablePort}/readyz`);
     assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.headers.get("retry-after"), "5", "unavailable readiness should advise probes to retry after a bounded delay");
     assert.equal((await unavailable.json()).ready, false);
   } finally {
     unavailableServer.close();
@@ -293,6 +430,28 @@ try {
     oversizedAssetServer.close();
     await rm(oversizedAssetRoot, { recursive: true, force: true });
   }
+  const aggregateAssetRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-aggregate-assets-"));
+  await Promise.all(FIXED_PUBLIC_ASSETS.map(async (asset) => {
+    const destination = join(aggregateAssetRoot, asset);
+    await mkdir(dirname(destination), { recursive: true });
+    await copyFile(join(process.cwd(), asset), destination);
+  }));
+  await mkdir(join(aggregateAssetRoot, "notes"), { recursive: true });
+  const aggregateNoteBytes = 6 * 1024 * 1024;
+  const aggregateNoteCount = Math.ceil(MAX_PUBLIC_ASSET_BYTES / aggregateNoteBytes) + 1;
+  await Promise.all(Array.from({ length: aggregateNoteCount }, (_, index) => writeFile(
+    join(aggregateAssetRoot, "notes", `aggregate-${index}.md`),
+    Buffer.concat([Buffer.from(`# Aggregate note ${index}\n\n`), Buffer.alloc(aggregateNoteBytes, 0x78)])
+  )));
+  const aggregateAssetServer = createAppServer({ staticRoot: aggregateAssetRoot });
+  await new Promise((resolve) => aggregateAssetServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const aggregateReady = await fetch(`http://127.0.0.1:${aggregateAssetServer.address().port}/readyz`);
+    assert.equal(aggregateReady.status, 503, "readiness should fail when individually valid public assets exceed the aggregate budget");
+  } finally {
+    aggregateAssetServer.close();
+    await rm(aggregateAssetRoot, { recursive: true, force: true });
+  }
   const extraction = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -321,6 +480,18 @@ try {
   assert.match(extraction.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/);
   assert(logs.some((entry) => entry.route === "extract-graph" && entry.status === 200 && Number.isInteger(entry.durationMs) && entry.documentChars > 0 && entry.feedbackCount === 500));
   assert(!JSON.stringify(logs).includes("Attention uses context"), "structured logs must not contain document text");
+  const unsafeUriResponse = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [],
+      document: { title: "Unsafe URI", uri: "javascript:alert(1)", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(unsafeUriResponse.status, 400, "server extraction should reject unsafe source URI metadata");
   const invalidFeedback = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -334,7 +505,9 @@ try {
   });
   assert.equal(invalidFeedback.status, 400, "the server should reject unreviewed feedback hints");
   const providerCalls = [];
+  const providerLogs = [];
   const providerServer = createAppServer({
+    logger: (entry) => providerLogs.push(entry),
     extractor: async ({ document, feedback, requestId }) => {
       if (document.title === "Oversized response") {
         return {
@@ -342,6 +515,15 @@ try {
             id: `oversized-${index}`,
             label: `Oversized ${index}`,
             evidence: [{ text: "x".repeat(12000) }]
+          })),
+          edges: []
+        };
+      }
+      if (document.title === "Oversized collections") {
+        return {
+          nodes: Array.from({ length: MAX_GRAPH_NODES + 1 }, (_, index) => ({
+            id: `oversized-node-${index}`,
+            label: `Oversized node ${index}`
           })),
           edges: []
         };
@@ -360,6 +542,8 @@ try {
           edges: []
         };
       }
+      if (document.title === "Invalid response") return null;
+      if (document.title === "Invalid schema") return { schema: "llm-field-notes/graph@999", nodes: [], edges: [] };
       providerCalls.push({ document, feedback, feedbackCount: feedback.length, requestId });
       return extractGraph(document.title, document.text, { feedback });
     }
@@ -419,6 +603,7 @@ try {
     assert.equal(providerMetadataPayload.extraction.source.uri, "https://example.org/submitted-source", "server extraction must preserve the submitted source URI");
     assert.equal(providerMetadataPayload.extraction.source.quality, "unknown", "provider output must not assign source quality");
     assert.notEqual(providerMetadataPayload.extraction.source.fingerprint, "untrusted-provider-fingerprint", "server extraction must derive source fingerprints from submitted text");
+    assert.equal(providerMetadataPayload.extraction.source.id, extractGraph("Provider metadata", "Attention uses context to create a useful graph representation for review.").source.id, "server extraction must derive source IDs from submitted content");
     assert.deepEqual(providerMetadataPayload.extraction.nodes[0].sources, [providerMetadataPayload.extraction.source.id], "server extraction must bind node provenance to the submitted source");
     assert.deepEqual(providerMetadataPayload.extraction.nodes[0].evidence[0].sources, [providerMetadataPayload.extraction.source.id], "server extraction must bind evidence provenance to the submitted source");
     const oversizedResponse = await fetch(`http://127.0.0.1:${providerPort}/api/extract-graph`, {
@@ -434,6 +619,34 @@ try {
     });
     assert.equal(oversizedResponse.status, 502);
     assert.equal((await oversizedResponse.json()).error, "The extractor response exceeded the 10 MB safety limit.");
+    const oversizedCollectionsResponse = await fetch(`http://127.0.0.1:${providerPort}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Oversized collections", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(oversizedCollectionsResponse.status, 502);
+    assert.equal((await oversizedCollectionsResponse.json()).error, "The configured extractor failed. Try again or inspect the provider logs.", "oversized provider collections should fail closed at the server boundary");
+    assert(providerLogs.some((entry) => entry.error === "EXTRACTION_NODES_TOO_LARGE"), "oversized provider collections should remain diagnosable without exposing provider output");
+    for (const title of ["Invalid response", "Invalid schema"]) {
+      const invalidProviderResponse = await fetch(`http://127.0.0.1:${providerPort}/api/extract-graph`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operation: "extract-graph",
+          schema: "llm-field-notes/graph@1",
+          feedbackFormat: "llm-field-notes/feedback@1",
+          feedback: [],
+          document: { title, text: "Attention uses context to create a useful graph representation for review." }
+        })
+      });
+      assert.equal(invalidProviderResponse.status, 502, `${title} should fail closed at the server provider boundary`);
+    }
   } finally {
     providerServer.close();
   }
@@ -787,6 +1000,41 @@ try {
   } finally {
     authenticatedServer.close();
   }
+  const keepAliveServer = createAppServer({ extractorAuthToken: "keep-alive-secret", maxRequestsPerMinute: 10 });
+  await new Promise((resolve) => keepAliveServer.listen(0, "127.0.0.1", resolve));
+  const keepAlivePort = keepAliveServer.address().port;
+  const keepAliveAgent = new Agent({ keepAlive: true, maxSockets: 1 });
+  const keepAliveRequest = (headers, body) => new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: keepAlivePort,
+      path: "/api/extract-graph",
+      method: "POST",
+      agent: keepAliveAgent,
+      headers: { "content-length": Buffer.byteLength(body), ...headers }
+    }, (response) => {
+      let responseBody = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { responseBody += chunk; });
+      response.on("end", () => resolve({ status: response.statusCode, body: responseBody }));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
+  const keepAlivePayload = JSON.stringify({
+    operation: "extract-graph",
+    schema: "llm-field-notes/graph@1",
+    feedbackFormat: "llm-field-notes/feedback@1",
+    feedback: [],
+    document: { title: "Keep alive", text: "Attention uses context to create a useful graph representation for review." }
+  });
+  try {
+    assert.equal((await keepAliveRequest({ "content-type": "application/json" }, keepAlivePayload)).status, 401, "unauthorized keep-alive requests should still be rejected");
+    assert.equal((await keepAliveRequest({ "content-type": "application/json", authorization: "Bearer keep-alive-secret" }, keepAlivePayload)).status, 200, "a valid request should survive after an early rejection on the same keep-alive connection");
+  } finally {
+    keepAliveAgent.destroy();
+    keepAliveServer.close();
+  }
   const protectedMetricsServer = createAppServer({ metricsAuthToken: "metrics-secret-token" });
   await new Promise((resolve) => protectedMetricsServer.listen(0, "127.0.0.1", resolve));
   const protectedMetricsPort = protectedMetricsServer.address().port;
@@ -840,7 +1088,8 @@ try {
     const sitemap = await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`);
     assert.equal(sitemap.status, 200, "configured public origins should expose a sitemap");
     assert.equal(sitemap.headers.get("content-type"), "application/xml; charset=utf-8");
-    assert((await sitemap.text()).includes("https://notes.example.test/notes/tokens.md"), "sitemap should include crawlable learning notes");
+    const sitemapText = await sitemap.text();
+    assert(sitemapText.includes("https://notes.example.test/notes/tokens.md") && sitemapText.includes("https://notes.example.test/notes/tokens.html"), "sitemap should include both source notes and canonical learning-note landing pages");
     assert(!(await (await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`)).text()).includes("https://notes.example.test/notes/README.md"), "sitemap should exclude the learning-map index README");
     const seoRobots = await fetch(`http://127.0.0.1:${seoPort}/robots.txt`);
     assert.equal(seoRobots.status, 200);
@@ -865,7 +1114,7 @@ try {
     assert.equal(feed.status, 200, "configured public origins should expose an Atom feed");
     assert.equal(feed.headers.get("content-type"), "application/atom+xml; charset=utf-8");
     const feedText = await feed.text();
-    assert(feedText.includes("<feed xmlns=\"http://www.w3.org/2005/Atom\">") && feedText.includes("notes/tokens.md") && feedText.includes("Tokens are the interface"), "the Atom feed should include titled learning-note entries");
+    assert(feedText.includes("<feed xmlns=\"http://www.w3.org/2005/Atom\">") && feedText.includes("notes/tokens.html") && feedText.includes("Tokens are the interface") && feedText.includes("Why can&apos;t the model see words?"), "the Atom feed should include titled landing entries with note-derived summaries");
     assert.equal((feedText.match(/<id>/g) || []).length, (feedText.match(/<entry>/g) || []).length + 1, "the Atom feed should contain exactly one feed ID plus one ID per entry");
     const feedEtag = feed.headers.get("etag");
     assert.match(feedEtag || "", /^"[0-9a-f]{64}"$/);
@@ -880,7 +1129,8 @@ try {
     try {
       const subpathSitemap = await fetch(`http://127.0.0.1:${subpathPort}/sitemap.xml`);
       assert.equal(subpathSitemap.status, 200, "Node deployments should accept project-subpath public origins");
-      assert((await subpathSitemap.text()).includes("https://notes.example.test/field-notes/notes/tokens.md"), "project-subpath sitemaps should preserve the deployment prefix");
+      const subpathSitemapText = await subpathSitemap.text();
+      assert(subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.html"), "project-subpath sitemaps should preserve the deployment prefix for source and landing pages");
     } finally {
       subpathServer.close();
     }

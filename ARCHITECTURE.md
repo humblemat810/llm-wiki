@@ -28,15 +28,30 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
 - `graph-core.js` is the pure domain layer. It owns schemas, normalization,
   extraction heuristics, graph merging, provenance, feedback, bounded learning
   memory, review queues, and the shared endpoint-order-insensitive relation
-  identity key. New extractors must pass through `normalizeExtraction()` before
+  identity key. The local extractor prefers repeated or structurally explicit
+  concepts over isolated lowercase vocabulary when enough stronger candidates
+  exist, with a bounded adjacent-phrase pass for multi-word ideas. New
+  extractors must keep Markdown structure separate from prose units, filter
+  common verb/preposition fragments from adjacent phrases, preserve explicit
+  relation verbs and shared-subject clauses, keep sparse documents on the
+  noise-filtered ranking path while retaining accepted feedback endpoints,
+  removing only evidence-subsumed one-word duplicates, and passing through
+  bounded candidate and evidence collection with reserved phrase capacity
+  before `normalizeExtraction()`.
   merge; network adapters should use `normalizeExtractionForDocument()` to
-  preserve the submitted document's provenance envelope.
+  preserve the submitted document's provenance envelope. That boundary rejects
+  provider node and edge collections above graph limits before scanning or
+  copying them, so provider overproduction cannot bypass resource limits or
+  silently discard part of a model response.
 - `graph-store.js` owns graph persistence semantics: optimistic version and
   content-fingerprint checks, bounded undo history, graph and history recovery
   snapshots, and storage-failure modes. It does not know about the DOM.
 - `storage-adapter.js` provides browser storage. IndexedDB is preferred;
   localStorage is migrated and retained as a fallback. Cross-tab changes are
-  synchronized through storage events and `BroadcastChannel`.
+  synchronized through storage events and `BroadcastChannel`. A bounded
+  localStorage write-ahead marker protects synchronous mirror writes until
+  their IndexedDB commits complete, so reloads cannot silently resurrect an
+  older graph revision.
 - `projection-adapter.js` owns the editable Obsidian contract. Markdown notes
   are feedback inputs, not a second source of truth. ZIP imports validate paths,
   filenames, bounds, and checksums before applying updates; the browser requires
@@ -46,6 +61,12 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   an edit can reach the graph, while source projections bind metadata edits to
   the document fingerprint. The vault also includes a derived reusable-review
   ledger; it is navigational and does not become an independent learning store.
+  Vault parsing also checks each editable feedback note against the manifest
+  identity so one stale note cannot hide behind a current archive manifest.
+  Editable note fields that exceed graph bounds are rejected rather than
+  silently truncated before mutation. Direct feedback batches above the
+  published file/item bound, or with over-limit correction fields, are
+  rejected rather than partially applied or prefix-truncated.
   The workbench also emits JSON-LD as a non-editable interoperability
   projection; JSON-LD consumers must treat the normalized graph and its
   fingerprint as the source of truth.
@@ -81,10 +102,22 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   trusted gateway.
 - `scripts/public-assets.mjs` is the deployment asset contract. The server,
   static Pages builder, HTTP smoke test, and service-worker release check all
-  consume or validate it so public delivery paths stay aligned.
+  consume or validate it so public delivery paths stay aligned. Both runtime
+  and build-time publication reject empty or oversized public assets using its
+  shared 10 MB per-asset and 100 MB aggregate limits, cap the learning-note
+  collection at 1,000 items, and Node and Pages sitemap generation publish the
+  same Markdown and canonical HTML note URLs.
+- `scripts/note-page.mjs` is the shared crawler-readable learning-note page
+  renderer used by the Node host and generated Pages artifacts; it keeps
+  note-specific metadata, Article JSON-LD, feed discovery, the interactive
+  workbench link, and the no-script content-security policy consistent. Feed
+  entries use the same note-derived summaries in Node and Pages deployments.
 - `app.js` is orchestration and presentation. It should call domain functions
   rather than reimplementing graph mutations in event handlers. Review controls
   share one conflict-safe persistence path across list and inspector surfaces.
+  Service-worker upgrades are user-coordinated: the first install can activate
+  immediately, while later releases wait for an explicit reload so an active
+  workbench is not mixed with assets from two versions.
 
 ## Data and learning loop
 
@@ -94,13 +127,18 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
 3. The merge adds new evidence without silently overriding accepted or
    rejected knowledge.
 4. Human review changes the current graph and records compact accepted/rejected
-  examples in `graph.learning`, including bounded review timestamps for audit
-  and round-trip freshness. Concept review mutations also advance the
-  concept's `updatedAt` timestamp so item history and review history stay
-  consistent. Stale reusable examples are surfaced in health
+   examples in `graph.learning`, including bounded review timestamps for audit
+   and round-trip freshness. Concept review mutations also advance the
+   concept's `updatedAt` timestamp so item history and review history stay
+   consistent. Stale reusable examples are surfaced in health
    diagnostics and can be removed as an explicit, undoable cleanup action.
 5. Future extraction receives only bounded labels, aliases, endpoints, and
-   statuses—not source evidence.
+  statuses—not source evidence.
+   `inspectGraph()` reports the unique guidance items available versus the
+   bounded provider-context count, including whether truncation is occurring.
+   Feedback imported before its target graph exists is canonicalized by
+   portable concept labels or relation endpoint labels, so workspace-specific
+   IDs cannot preserve contradictory learning hints as separate examples.
 6. `evaluate-feedback.mjs` compares a new extractor or graph against exported
    reviewed examples before a change is trusted; `compare-evaluations.mjs`
    refuses promotion when the baseline and candidate use different reviewed
@@ -117,10 +155,26 @@ uncertainty plus missing evidence and unresolved provenance, and also surfaces
 unknown-quality or never-reviewed sources. Each candidate exposes a short
 reason so a human can correct the most consequential gaps first. Reviewed
 concepts, relations, and source metadata re-enter the queue after the bounded
-stale-review window, keeping old decisions open to revision. `inspectGraph()`
-reports the stale subset separately so automation can monitor review debt.
+stale-review window, keeping old decisions open to revision. Reviewed concepts
+and relations also re-enter immediately when a newer source is attached after
+their last review. `inspectGraph()` reports the stale and new-evidence subsets
+separately so automation can monitor review debt.
 Health also separates historical source-review coverage from fresh coverage,
 using the same stale-review window.
+
+Stale reusable learning examples remain in the graph for auditability and
+explicit cleanup, but the workbench excludes them from new extractor guidance.
+Reviewing the underlying concept or relation refreshes the example and makes
+it eligible to guide later extraction again.
+
+Health guidance counts use the same fresh-only filter as extraction requests;
+stale retained memory is reported separately as review debt.
+The filter also covers accepted or rejected graph items whose review timestamp
+has gone stale, so a live status cannot bypass the learning-memory boundary.
+Items with missing or malformed review timestamps are treated as stale for
+guidance purposes and must be reviewed before they become active again.
+Health and Markdown projections expose the count of guidance identities
+withheld by this rule.
 
 Source records may carry a bounded optional URI. It is provenance metadata,
 not extraction evidence: it travels through normalization, remote requests,
@@ -156,11 +210,24 @@ counts, active-item provenance coverage, ambiguity, and quality diagnostics
 without source text or evidence, making graph quality reportable outside the
 browser. Provenance coverage counts active concepts and relations, including
 items that have no evidence records, so unsupported graph items cannot appear
-healthy by omission.
+healthy by omission. If an imported payload exceeded a bounded collection
+limit, normalization preserves per-collection truncation counts in
+`integrity.truncated` and health reports them; the browser warns the operator
+to restore the original export before making edits instead of silently treating
+the partial graph as complete. Invalid entries that cannot be normalized are
+counted in `integrity.dropped` with the same health and automation visibility.
+The automation gate accepts one bounded violation for each supported threshold
+so simultaneous quality failures remain valid health reports rather than being
+silently dropped.
 
 Fingerprint-bearing graph exports are verified by the browser and by the
-health, diff, and evaluation CLIs before they are consumed. Legacy exports
-without a fingerprint remain readable for migration.
+health, diff, and evaluation CLIs before they are consumed. Fingerprints
+canonicalize the unordered document, concept, relation, and integrity
+collections, so an Obsidian or JSON round-trip that only reorders those arrays
+does not look like a content change; revision history and learning-example
+order remain chronological. Legacy exports without a fingerprint remain
+readable for migration, and fingerprints from the pre-canonical ordering
+implementation remain accepted during import.
 
 Full backups carry a deterministic fingerprint over normalized graph and undo
 history. New imports verify it before restoration; legacy backups without a
@@ -185,11 +252,17 @@ When adding a feature:
 1. Put invariant-bearing behavior in a pure module first.
 2. Normalize untrusted input at the boundary.
 3. Keep IDs stable and preserve provenance; prefer an explicit integrity
-   diagnostic over a silent guess.
-4. Bound every collection, text field, archive, request, and response.
-5. Make storage mutations optimistic and undoable where practical.
-6. Add a regression test for malformed input and the normal path.
-7. Update the relevant JSON schema, README, and public/offline asset lists.
+  diagnostic over a silent guess.
+4. Collapse duplicate imported records deterministically so collection order
+   cannot change graph fingerprints or learning-memory identity; conflicting
+   source IDs retain an explicit ambiguity diagnostic while choosing stable
+   canonical provenance.
+   Apply the same rule to normalized extractor responses, preferring stronger
+   directional relation evidence before using canonical tie-breaking.
+5. Bound every collection, text field, archive, request, and response.
+6. Make storage mutations optimistic and undoable where practical.
+7. Add a regression test for malformed input and the normal path.
+8. Update the relevant JSON schema, README, and public/offline asset lists.
 
 The test contract is intentionally dependency-free:
 

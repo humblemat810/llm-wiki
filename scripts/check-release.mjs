@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { LEARNING_NOTE_ASSETS, OFFLINE_SHELL_ASSETS, PUBLIC_ASSETS } from "./public-assets.mjs";
+import { LEARNING_NOTE_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, OFFLINE_SHELL_ASSETS, PUBLIC_ASSETS } from "./public-assets.mjs";
 
 const packageManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const release = JSON.parse(await readFile(new URL("../version.json", import.meta.url), "utf8"));
@@ -44,18 +44,23 @@ for (const asset of shellAssets) {
   const relative = asset === "./" ? "index.html" : asset.replace(/^\.\/+/, "");
   try {
     const metadata = await stat(new URL(`../${relative}`, import.meta.url));
-    if (!metadata.isFile() || metadata.size === 0) throw new Error("missing or empty file");
+    if (!metadata.isFile() || metadata.size === 0 || metadata.size > MAX_STATIC_ASSET_BYTES) throw new Error("missing, empty, or oversized file");
   } catch {
     throw new Error(`sw.js APP_SHELL asset is missing or empty: ${asset}`);
   }
 }
+let publicAssetBytes = 0;
 for (const asset of PUBLIC_ASSETS) {
   try {
     const metadata = await stat(new URL(`../${asset}`, import.meta.url));
     if (!metadata.isFile() || metadata.size === 0) throw new Error("missing or empty file");
+    publicAssetBytes += metadata.size;
   } catch {
     throw new Error(`public asset is missing or empty: ${asset}`);
   }
+}
+if (publicAssetBytes > MAX_PUBLIC_ASSET_BYTES) {
+  throw new Error(`public assets exceed the ${MAX_PUBLIC_ASSET_BYTES / (1024 * 1024)} MB aggregate asset limit`);
 }
 const discoveredLearningNotes = (await readdir(new URL("../notes/", import.meta.url), { withFileTypes: true }))
   .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
@@ -64,6 +69,7 @@ const discoveredLearningNotes = (await readdir(new URL("../notes/", import.meta.
 if (JSON.stringify(discoveredLearningNotes) !== JSON.stringify([...LEARNING_NOTE_ASSETS].sort())) {
   throw new Error("learning-note assets are out of sync with scripts/public-assets.mjs");
 }
+if (discoveredLearningNotes.length > MAX_LEARNING_NOTE_ASSETS) throw new Error(`learning-note assets exceed the ${MAX_LEARNING_NOTE_ASSETS} asset limit`);
 for (const workflowFile of workflowFiles) {
   const workflow = await readFile(new URL(`../${workflowFile}`, import.meta.url), "utf8");
   const mutableActions = [...workflow.matchAll(/^\s*uses:\s*([^\s@]+)@([^\s#]+)/gm)]

@@ -32,6 +32,11 @@ const report = evaluateExtraction(extraction, [
 
 assert.equal(report.schema, EVALUATION_SCHEMA);
 assert.match(report.feedback.datasetFingerprint, /^fnv1a-[0-9a-f]{16}$/);
+assert.equal(report.feedback.examples, 5);
+assert.equal(report.feedback.freshExamples, 0);
+assert.equal(report.feedback.staleExamples, 0);
+assert.equal(report.feedback.undatedExamples, 5);
+assert.equal(report.feedback.untrustedExamples, 5);
 const singleFeedback = [{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }];
 assert(matchesFeedbackFingerprint(singleFeedback, fingerprintFeedbackExamples(singleFeedback)));
 assert(matchesFeedbackFingerprint(singleFeedback, "fnv1a-7ebe5ec3"), "legacy 32-bit feedback fingerprints should remain importable");
@@ -150,6 +155,12 @@ const overlongIdentityReport = evaluateExtraction(
 );
 assert.equal(overlongIdentityReport.feedback.concepts.accepted.found, 1, "evaluation should not collide malformed overlong identities by prefix");
 assert.equal(MAX_EVALUATION_EXAMPLES, 15000);
+const boundedEvaluationAliases = new Array(21).fill("alias");
+Object.defineProperty(boundedEvaluationAliases, 20, { get() { throw new Error("evaluation alias beyond the bound was read"); } });
+assert.doesNotThrow(() => evaluateExtraction(
+  { source: { title: "Bounded evaluation", text: "Attention uses context to create a useful graph representation for review." }, nodes: [{ id: "attention", label: "Attention" }] },
+  [{ kind: "concept", id: "attention", label: "Attention", aliases: boundedEvaluationAliases, status: "accepted" }]
+), "evaluation matching should stop reading aliases after their bound");
 const largeEvaluation = evaluateExtraction(
   { nodes: [], edges: [] },
   Array.from({ length: 501 }, (_, index) => ({ kind: "concept", id: `evaluation-${index}`, label: `Evaluation ${index}`, status: "accepted" }))
@@ -178,6 +189,15 @@ const conflictingPortableRelation = evaluateExtraction({
   { kind: "relation", id: "workspace-b-edge", source: "workspace-b-context", sourceLabel: "Context", target: "workspace-b-attention", targetLabel: "Attention", label: "uses", status: "rejected" }
 ]);
 assert.equal(conflictingPortableRelation.feedback.conflicts, 1, "evaluation should detect portable relation conflicts across workspace IDs and endpoint order");
+const freshnessReport = evaluateExtraction({ nodes: [], edges: [] }, [
+  { kind: "concept", id: "fresh", label: "Fresh", status: "accepted", lastReviewedAt: new Date().toISOString() },
+  { kind: "concept", id: "stale", label: "Stale", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z" },
+  { kind: "concept", id: "undated", label: "Undated", status: "accepted" }
+]);
+assert.equal(freshnessReport.feedback.freshExamples, 1);
+assert.equal(freshnessReport.feedback.staleExamples, 1);
+assert.equal(freshnessReport.feedback.undatedExamples, 1);
+assert.equal(freshnessReport.feedback.untrustedExamples, 2);
 
 const temporaryDirectory = await mkdtemp(join("/tmp", "llm-field-notes-evaluation-"));
 try {
@@ -197,6 +217,8 @@ try {
   const cliReport = JSON.parse(stdout);
   assert.equal(cliReport.schema, EVALUATION_SCHEMA);
   assert.equal(cliReport.feedback.examples, 1);
+  assert.equal(cliReport.feedback.undatedExamples, 1);
+  assert.equal(cliReport.feedback.untrustedExamples, 1);
   assert.equal(cliReport.feedback.datasetFingerprint, fingerprintFeedbackExamples([{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }]));
   assert.equal(JSON.parse(await readFile(extractionPath, "utf8")).nodes.length, 3);
   const legacyFeedbackPath = join(temporaryDirectory, "legacy-feedback.json");
@@ -211,6 +233,30 @@ try {
     extractionPath
   ], { cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8" });
   assert.equal(JSON.parse(legacyOutput.stdout).feedback.examples, 1, "legacy feedback without a fingerprint should remain evaluable");
+  const gateError = await execFileAsync(process.execPath, [
+    "experiments/evaluate-feedback.mjs",
+    feedbackPath,
+    extractionPath,
+    "--max-untrusted-feedback",
+    "0"
+  ], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8"
+  }).then(() => null, (error) => error);
+  assert(gateError, "the untrusted-feedback gate should fail when undated examples exceed the threshold");
+  assert.match(`${gateError.stderr || ""}${gateError.message || ""}`, /untrusted feedback examples 1 exceed 0/);
+  const invalidGateError = await execFileAsync(process.execPath, [
+    "experiments/evaluate-feedback.mjs",
+    feedbackPath,
+    extractionPath,
+    "--max-untrusted-feedback",
+    String(MAX_EVALUATION_EXAMPLES + 1)
+  ], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8"
+  }).then(() => null, (error) => error);
+  assert(invalidGateError, "the untrusted-feedback gate should reject thresholds above the report bound");
+  assert.match(`${invalidGateError.stderr || ""}${invalidGateError.message || ""}`, /must be an integer/);
   const incompatibleFeedbackPath = join(temporaryDirectory, "incompatible-feedback.json");
   await writeFile(incompatibleFeedbackPath, JSON.stringify({ format: "llm-field-notes/feedback@999", examples: [] }));
   const incompatibleFeedbackError = await execFileAsync(process.execPath, [

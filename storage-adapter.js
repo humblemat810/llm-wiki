@@ -4,6 +4,8 @@ const DATABASE_VERSION = 1;
 const STORE_NAME = "values";
 const CHANNEL_NAME = "llm-field-notes-storage";
 const HYDRATION_TIMEOUT_MS = 1500;
+export const PENDING_WRITES_KEY = `${STORAGE_PREFIX}pending-writes`;
+const MAX_PENDING_WRITES = 100;
 
 export function createMemoryStorage() {
   const values = new Map();
@@ -21,7 +23,7 @@ function readLocalValues(storage) {
   try {
     for (let index = 0; index < storage.length; index += 1) {
       const key = storage.key(index);
-      if (typeof key === "string" && key.startsWith(STORAGE_PREFIX)) {
+      if (typeof key === "string" && key.startsWith(STORAGE_PREFIX) && key !== PENDING_WRITES_KEY) {
         const value = storage.getItem(key);
         if (value !== null) values.set(key, value);
       }
@@ -30,6 +32,29 @@ function readLocalValues(storage) {
     // The caller already has the storage fallback path.
   }
   return values;
+}
+
+function readPendingWrites(storage) {
+  if (!storage) return new Map();
+  try {
+    const parsed = JSON.parse(storage.getItem(PENDING_WRITES_KEY) || "[]");
+    const pending = new Map();
+    if (Array.isArray(parsed)) {
+      parsed
+        .filter((key) => typeof key === "string" && key.startsWith(STORAGE_PREFIX) && key !== PENDING_WRITES_KEY)
+        .slice(-MAX_PENDING_WRITES)
+        .forEach((key) => pending.set(key, "legacy"));
+      return pending;
+    }
+    if (!parsed || typeof parsed !== "object") return pending;
+    Object.entries(parsed)
+      .filter(([key, token]) => key.startsWith(STORAGE_PREFIX) && key !== PENDING_WRITES_KEY && typeof token === "string" && token.length <= 128)
+      .slice(-MAX_PENDING_WRITES)
+      .forEach(([key, token]) => pending.set(key, token));
+    return pending;
+  } catch {
+    return new Map();
+  }
 }
 
 function openDatabase(indexedDB) {
@@ -136,8 +161,30 @@ function createDurableStorage(owner, localStorage) {
       // The graph store reports the write failure through its own adapter.
     }
   };
-  const enqueue = (operation, fallback) => {
-    writeQueue = writeQueue.then(operation).catch(() => {
+  const pendingWrites = readPendingWrites(fallbackStorage);
+  const persistPendingWrites = () => {
+    if (pendingWrites.size) fallbackWrite(PENDING_WRITES_KEY, JSON.stringify(Object.fromEntries([...pendingWrites].slice(-MAX_PENDING_WRITES))));
+    else fallbackWrite(PENDING_WRITES_KEY, null);
+  };
+  let pendingSequence = 0;
+  const markPending = (key) => {
+    if (!key || key === PENDING_WRITES_KEY) return null;
+    pendingSequence += 1;
+    const token = `${Date.now()}-${pendingSequence}`;
+    pendingWrites.set(key, token);
+    persistPendingWrites();
+    return token;
+  };
+  const clearPending = (key, token) => {
+    if (pendingWrites.get(key) !== token) return;
+    pendingWrites.delete(key);
+    persistPendingWrites();
+  };
+  const enqueueDurableWrite = (key, token, operation, fallback) => {
+    writeQueue = writeQueue.then(async () => {
+      await operation();
+      clearPending(key, token);
+    }).catch(() => {
       durable = false;
       storageFailure = true;
       fallback?.();
@@ -154,16 +201,18 @@ function createDurableStorage(owner, localStorage) {
       const normalized = String(value);
       values.set(key, normalized);
       if (!hydrated) dirtyBeforeReady.set(key, normalized);
+      const pendingToken = owner.indexedDB ? markPending(key) : null;
       fallbackWrite(key, normalized);
-      if (durable && database) enqueue(() => writeDatabaseValue(database, key, normalized), () => fallbackWrite(key, normalized));
+      if (durable && database) enqueueDurableWrite(key, pendingToken, () => writeDatabaseValue(database, key, normalized), () => fallbackWrite(key, normalized));
       publish(key, normalized);
       notify(key, normalized);
     },
     removeItem(key) {
       values.delete(key);
       if (!hydrated) dirtyBeforeReady.set(key, null);
+      const pendingToken = owner.indexedDB ? markPending(key) : null;
       fallbackWrite(key, null);
-      if (durable && database) enqueue(() => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
+      if (durable && database) enqueueDurableWrite(key, pendingToken, () => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
       publish(key, null);
       notify(key, null);
     },
@@ -174,13 +223,14 @@ function createDurableStorage(owner, localStorage) {
 
   const onStorage = (event) => {
     if (localStorage && event.storageArea && event.storageArea !== localStorage) return;
-    if (typeof event.key !== "string" || !event.key.startsWith(STORAGE_PREFIX)) return;
+    if (typeof event.key !== "string" || !event.key.startsWith(STORAGE_PREFIX) || event.key === PENDING_WRITES_KEY) return;
     if (event.newValue === null) values.delete(event.key);
     else values.set(event.key, event.newValue);
+    const pendingToken = owner.indexedDB ? markPending(event.key) : null;
     if (!hydrated) dirtyBeforeReady.set(event.key, event.newValue);
     else if (durable && database) {
-      if (event.newValue === null) enqueue(() => removeDatabaseValue(database, event.key), () => fallbackWrite(event.key, null));
-      else enqueue(() => writeDatabaseValue(database, event.key, String(event.newValue)), () => fallbackWrite(event.key, event.newValue));
+      if (event.newValue === null) enqueueDurableWrite(event.key, pendingToken, () => removeDatabaseValue(database, event.key), () => fallbackWrite(event.key, null));
+      else enqueueDurableWrite(event.key, pendingToken, () => writeDatabaseValue(database, event.key, String(event.newValue)), () => fallbackWrite(event.key, event.newValue));
     }
     notify(event.key, event.newValue, true);
   };
@@ -193,10 +243,11 @@ function createDurableStorage(owner, localStorage) {
       const value = event.data.value === null ? null : String(event.data.value);
       if (value === null) values.delete(key);
       else values.set(key, value);
+      const pendingToken = owner.indexedDB ? markPending(key) : null;
       if (!hydrated) dirtyBeforeReady.set(key, value);
       else if (durable && database) {
-        if (value === null) enqueue(() => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
-        else enqueue(() => writeDatabaseValue(database, key, value), () => fallbackWrite(key, value));
+        if (value === null) enqueueDurableWrite(key, pendingToken, () => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
+        else enqueueDurableWrite(key, pendingToken, () => writeDatabaseValue(database, key, value), () => fallbackWrite(key, value));
       }
       notify(key, value, true, true);
     });
@@ -229,14 +280,29 @@ function createDurableStorage(owner, localStorage) {
       const { opened, storedValues } = await Promise.race([hydrationPromise, timeout]);
       const localValues = new Map(values);
       const pendingValues = new Map(dirtyBeforeReady);
+      const pendingKeys = new Set([...pendingWrites.keys(), ...pendingValues.keys()]);
       values.clear();
       storedValues.forEach((value, key) => values.set(key, value));
       localValues.forEach((value, key) => {
-        if (pendingValues.has(key) || !storedValues.has(key)) values.set(key, value);
+        if (pendingKeys.has(key) || !storedValues.has(key)) values.set(key, value);
       });
       pendingValues.forEach((value, key) => {
         if (value === null) values.delete(key);
         else values.set(key, value);
+      });
+      pendingKeys.forEach((key) => {
+        let localValue;
+        if (pendingValues.has(key)) {
+          localValue = pendingValues.get(key);
+        } else {
+          try {
+            localValue = fallbackStorage.getItem(key);
+          } catch {
+            localValue = values.has(key) ? values.get(key) : null;
+          }
+        }
+        if (localValue === null) values.delete(key);
+        else values.set(key, String(localValue));
       });
       localValues.forEach((_, key) => fallbackWrite(key, values.has(key) ? values.get(key) : null));
       values.forEach((value, key) => fallbackWrite(key, value));
@@ -244,13 +310,16 @@ function createDurableStorage(owner, localStorage) {
       hydrationAdopted = true;
       durable = true;
       hydrated = true;
+      pendingKeys.forEach((key) => {
+        if (!pendingWrites.has(key)) markPending(key);
+      });
       for (const [key, value] of values) {
-        if (!storedValues.has(key) || pendingValues.has(key)) {
-          enqueue(() => writeDatabaseValue(database, key, value), () => fallbackWrite(key, value));
+        if (!storedValues.has(key) || pendingKeys.has(key)) {
+          enqueueDurableWrite(key, pendingWrites.get(key), () => writeDatabaseValue(database, key, value), () => fallbackWrite(key, value));
         }
       }
-      pendingValues.forEach((value, key) => {
-        if (value === null) enqueue(() => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
+      pendingKeys.forEach((key) => {
+        if (!values.has(key)) enqueueDurableWrite(key, pendingWrites.get(key), () => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
       });
     } catch {
       hydrationAbandoned = true;
@@ -279,7 +348,7 @@ function createDurableStorage(owner, localStorage) {
       return storageFailure;
     },
     flush() {
-      return writeQueue.catch(() => {});
+      return ready.then(() => writeQueue.catch(() => {}));
     },
     ready,
     subscribe(callback) {

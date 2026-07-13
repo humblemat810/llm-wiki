@@ -10,6 +10,7 @@
     "graphSchema": { "const": "llm-field-notes/graph@1" },
     "graphVersion": { "type": "integer", "minimum": 0 },
     "graphFingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$" },
+    "appVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
     "inspectedAt": { "type": "string", "format": "date-time" },
     "health": {
       "type": "object",
@@ -17,17 +18,60 @@
       "properties": {
         "reviewCandidates": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "staleReviewCandidates": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "newEvidenceReviewCandidates": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "feedbackContextAvailable": { "type": "integer", "minimum": 0, "maximum": 15500 },
+        "feedbackContextRetained": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "feedbackContextTruncated": { "type": "boolean" },
+        "feedbackContextExcluded": { "type": "integer", "minimum": 0, "maximum": 15500 },
+        "truncated": { "type": "boolean" },
+        "truncatedItems": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "truncatedDocuments": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "truncatedNodes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "truncatedEdges": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "truncatedRevisions": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "truncatedLearningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "dropped": { "type": "boolean" },
+        "droppedItems": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "droppedDocuments": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "droppedNodes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "droppedEdges": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "droppedRevisions": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "droppedLearningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "staleLearningExamples": { "type": "integer", "minimum": 0, "maximum": 500 },
         "freshSourceReviewCoverage": { "type": "integer", "minimum": 0, "maximum": 100 }
       },
       "additionalProperties": true
+    },
+    "reviewQueue": {
+      "type": "array",
+      "description": "Bounded actionable review metadata. Labels and reasons are included for routing; source text, evidence text, and source URIs are never included.",
+      "maxItems": 15000,
+      "items": {
+        "type": "object",
+        "required": ["kind", "id", "label", "priority", "confidence", "evidence", "supported", "reason"],
+        "properties": {
+          "kind": { "enum": ["node", "edge", "source"] },
+          "id": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "label": { "type": "string", "maxLength": 2000 },
+          "priority": { "type": "number", "minimum": 0, "maximum": 1000 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "evidence": { "type": "integer", "minimum": 0, "maximum": 2000 },
+          "supported": { "type": "boolean" },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "stale": { "type": "boolean" },
+          "newEvidence": { "type": "boolean" },
+          "sourceQuality": { "type": "string", "enum": ["unknown", "primary", "secondary", "tertiary"] },
+          "sourceReviewed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
     },
     "gate": {
       "type": "object",
       "required": ["passed", "violations", "thresholds"],
       "properties": {
         "passed": { "type": "boolean" },
-        "violations": { "type": "array", "maxItems": 3, "items": { "type": "string", "maxLength": 200 } },
+      "violations": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 200 } },
         "thresholds": {
           "type": "object",
           "required": ["minProvenance", "maxOrphaned", "maxAmbiguous"],
@@ -40,7 +84,10 @@
             "maxUnsupportedEdges": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000 },
             "maxReviewCandidates": { "type": ["integer", "null"], "minimum": 0, "maximum": 15000 },
             "maxStaleReviewCandidates": { "type": ["integer", "null"], "minimum": 0, "maximum": 15000 },
-            "maxStaleLearningExamples": { "type": ["integer", "null"], "minimum": 0, "maximum": 500 }
+            "maxStaleLearningExamples": { "type": ["integer", "null"], "minimum": 0, "maximum": 500 },
+            "maxWithheldGuidance": { "type": ["integer", "null"], "minimum": 0, "maximum": 15500 },
+            "maxTruncatedItems": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 },
+            "maxDroppedItems": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 }
           },
           "additionalProperties": false
         }

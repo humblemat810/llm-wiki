@@ -79,6 +79,11 @@
       <span id="app-error-message">Your saved graph was preserved, but this view could not render.</span>
       <button id="reload-app" type="button">Reload ↻</button>
     </div>
+    <div class="app-update section-shell" id="app-update" role="status" aria-live="polite" hidden>
+      <strong>New version available.</strong>
+      <span>The saved graph is safe. Reload when you are ready to use the updated workbench.</span>
+      <button id="reload-update" type="button">Update ↻</button>
+    </div>
 
     <main>
       <section class="hero section-shell">
@@ -155,8 +160,8 @@
               <details class="extractor-settings">
                 <summary>Optional model extractor</summary>
                 <label for="extractor-endpoint">Same-origin extraction endpoint</label>
-                <input id="extractor-endpoint" type="text" inputmode="url" placeholder="/api/extract-graph" autocomplete="off" />
-                <small>Leave blank for the local heuristic. Use a same-origin path such as <code>/api/extract-graph</code>; reviewed feedback may be sent with documents, and credentials belong on your server.</small>
+                <input id="extractor-endpoint" type="text" inputmode="url" maxlength="2048" placeholder="/api/extract-graph" autocomplete="off" />
+                <small>Leave blank for the local heuristic. Use a same-origin path such as <code>/api/extract-graph</code>; the validated endpoint is remembered locally, reviewed feedback may be sent with documents, and credentials belong on your server.</small>
               </details>
               <div class="ingest-actions">
                 <button class="button button-primary" id="ingest-document" type="button" aria-busy="false">Build graph <span>↗</span></button>
@@ -174,8 +179,8 @@
               <div class="graph-toolbar">
                 <div class="graph-toolbar-left"><span id="graph-summary">No concepts yet — ingest a document to begin.</span><label class="sr-only" for="graph-search">Filter graph</label><input id="graph-search" class="graph-search" type="search" placeholder="Filter concepts, evidence, sources…" autocomplete="off" /></div>
                 <div>
-                  <button class="mini-button active" type="button" data-view="graph" aria-pressed="true">Graph</button>
-                  <button class="mini-button" type="button" data-view="list" aria-pressed="false">List</button>
+                  <button class="mini-button active" type="button" data-view="graph" aria-pressed="true" aria-controls="graph-canvas-wrap node-list relation-list source-list">Graph</button>
+                  <button class="mini-button" type="button" data-view="list" aria-pressed="false" aria-controls="graph-canvas-wrap node-list relation-list source-list">List</button>
                 </div>
               </div>
               <details class="manual-add">
@@ -197,16 +202,18 @@
                 </div>
               </details>
               <div class="graph-canvas-wrap" id="graph-canvas-wrap">
-                <svg id="graph-canvas" viewBox="0 0 720 430" role="img" aria-label="Interactive knowledge graph"></svg>
+                <svg id="graph-canvas" viewBox="0 0 720 430" role="group" aria-label="Interactive knowledge graph"></svg>
                 <div class="graph-empty" id="graph-empty"><span>⌁</span><p>Your graph will appear here.</p><small>Nodes are concepts. Lines are evidence.</small></div>
               </div>
               <div class="node-list" id="node-list" hidden></div>
               <div class="relation-list" id="relation-list" hidden></div>
+              <div class="source-list" id="source-list" hidden></div>
               <aside class="inspector-panel" id="inspector-panel" tabindex="-1" aria-live="polite">
                 <div class="inspector-empty"><span>INSPECTOR</span><p>Select a concept or relation to inspect its evidence.</p></div>
               </aside>
               <div class="graph-legend"><span><i class="legend-dot concept"></i> concept</span><span><i class="legend-dot source"></i> source</span><span><i class="legend-line"></i> inferred relation</span></div>
               <div class="health-strip" id="graph-health" aria-live="polite"></div>
+              <div class="review-queue" id="review-queue"></div>
               <div class="revision-log" id="revision-log"></div>
               <div class="revision-diff-preview" id="revision-diff-preview"></div>
             </section>
@@ -303,20 +310,20 @@
           <div class="notes-grid" id="notes-grid"></div>
           <noscript class="noscript-map">
             <p class="section-label">THE LEARNING MAP</p>
-            <p>Enable JavaScript for progress tracking and interactive note dialogs. The core curriculum is available here without scripts:</p>
+            <p>Enable JavaScript for progress tracking and interactive note dialogs. The core curriculum is available here through crawler-readable pages without scripts:</p>
             <ul>
-              <li><a href="./notes/tokens.md"><strong>Tokens are the interface</strong></a> — What a model sees, why text becomes integers, and where the seams show.</li>
-              <li><a href="./notes/embeddings.md"><strong>Meaning in a vector</strong></a> — Embeddings, similarity, and the geometry of learned meaning.</li>
-              <li><a href="./notes/attention.md"><strong>Attention is a lookup</strong></a> — Queries, keys, values, and the cost of context.</li>
-              <li><a href="./notes/training.md"><strong>Loss is a compass</strong></a> — Follow the gradient through a tiny training loop.</li>
-              <li><a href="./notes/transformers.md"><strong>The transformer stack</strong></a> — Blocks, residuals, norms, and logits.</li>
-              <li><a href="./notes/scaling.md"><strong>Scale changes the game</strong></a> — Balance parameters, data, and compute.</li>
-              <li><a href="./notes/inference.md"><strong>One token at a time</strong></a> — Sampling, temperature, KV caches, and latency.</li>
-              <li><a href="./notes/evaluation.md"><strong>Measure the thing</strong></a> — Build an evaluation loop around a real user task.</li>
-              <li><a href="./notes/rag.md"><strong>Give it a library</strong></a> — Chunk, search, cite, and inspect retrieval.</li>
-              <li><a href="./notes/finetuning.md"><strong>Teach, don't just prompt</strong></a> — Use examples to shape repeatable behavior.</li>
-              <li><a href="./notes/agents.md"><strong>Tools make a system</strong></a> — Constrain actions with state, checks, and stop conditions.</li>
-              <li><a href="./notes/production.md"><strong>Ship the boring parts</strong></a> — Latency, cost, observability, and fallbacks.</li>
+              <li><a href="./notes/tokens.html"><strong>Tokens are the interface</strong></a> — What a model sees, why text becomes integers, and where the seams show.</li>
+              <li><a href="./notes/embeddings.html"><strong>Meaning in a vector</strong></a> — Embeddings, similarity, and the geometry of learned meaning.</li>
+              <li><a href="./notes/attention.html"><strong>Attention is a lookup</strong></a> — Queries, keys, values, and the cost of context.</li>
+              <li><a href="./notes/training.html"><strong>Loss is a compass</strong></a> — Follow the gradient through a tiny training loop.</li>
+              <li><a href="./notes/transformers.html"><strong>The transformer stack</strong></a> — Blocks, residuals, norms, and logits.</li>
+              <li><a href="./notes/scaling.html"><strong>Scale changes the game</strong></a> — Balance parameters, data, and compute.</li>
+              <li><a href="./notes/inference.html"><strong>One token at a time</strong></a> — Sampling, temperature, KV caches, and latency.</li>
+              <li><a href="./notes/evaluation.html"><strong>Measure the thing</strong></a> — Build an evaluation loop around a real user task.</li>
+              <li><a href="./notes/rag.html"><strong>Give it a library</strong></a> — Chunk, search, cite, and inspect retrieval.</li>
+              <li><a href="./notes/finetuning.html"><strong>Teach, don't just prompt</strong></a> — Use examples to shape repeatable behavior.</li>
+              <li><a href="./notes/agents.html"><strong>Tools make a system</strong></a> — Constrain actions with state, checks, and stop conditions.</li>
+              <li><a href="./notes/production.html"><strong>Ship the boring parts</strong></a> — Latency, cost, observability, and fallbacks.</li>
             </ul>
           </noscript>
           <p class="empty-state" id="empty-state" hidden>No notes match that search. Try a broader question.</p>

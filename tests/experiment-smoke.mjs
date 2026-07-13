@@ -66,6 +66,13 @@ try {
     (error) => String(error?.stderr).includes("Graph input fingerprint does not match"),
     "graph diff should reject tampered direct graph exports"
   );
+  const legacyGraphPath = join(diffRoot, "legacy-graph.json");
+  await writeFile(legacyGraphPath, JSON.stringify({
+    ...JSON.parse(await readFile(afterPath, "utf8")),
+    schema: "llm-field-notes/graph@0"
+  }));
+  const legacyDiffOutput = execFileSync(process.execPath, ["experiments/diff-graphs.mjs", legacyGraphPath, afterPath], { encoding: "utf8" });
+  assert.equal(JSON.parse(legacyDiffOutput).format, "llm-field-notes/diff@1", "graph diff should accept supported legacy graph exports");
   const baselineEvaluationPath = join(diffRoot, "baseline-evaluation.json");
   const candidateEvaluationPath = join(diffRoot, "candidate-evaluation.json");
   const evaluation = (acceptedRecall, suppressionRate) => ({
@@ -75,6 +82,10 @@ try {
     feedback: {
       examples: 4,
       datasetFingerprint: "fnv1a-deadbeef",
+      freshExamples: 4,
+      staleExamples: 0,
+      undatedExamples: 0,
+      untrustedExamples: 0,
       conflicts: 0,
       concepts: {
         accepted: { recall: acceptedRecall, reviewedPrecision: acceptedRecall, evidenceCoverage: acceptedRecall },
@@ -126,6 +137,52 @@ try {
   );
   const toleratedOutput = execFileSync(process.execPath, ["experiments/compare-evaluations.mjs", baselineEvaluationPath, candidateEvaluationPath, "--max-regression", "0.02"], { encoding: "utf8" });
   assert.equal(JSON.parse(toleratedOutput).passed, true, "an explicitly tolerated regression should pass");
+  await writeFile(candidateEvaluationPath, JSON.stringify(evaluation(.9, .95)));
+  const freshnessOutput = execFileSync(process.execPath, [
+    "experiments/compare-evaluations.mjs",
+    baselineEvaluationPath,
+    candidateEvaluationPath,
+    "--max-untrusted-feedback",
+    "0"
+  ], { encoding: "utf8" });
+  const freshnessComparison = JSON.parse(freshnessOutput);
+  assert.equal(freshnessComparison.passed, true, "fresh evaluation reports should pass the untrusted-feedback promotion gate");
+  assert.deepEqual(freshnessComparison.feedbackTrust, {
+    maxUntrustedFeedback: 0,
+    baselineUntrustedExamples: 0,
+    candidateUntrustedExamples: 0
+  }, "promotion artifacts should record the freshness gate and evaluated counts");
+  await writeFile(candidateEvaluationPath, JSON.stringify({
+    ...evaluation(.9, .95),
+    feedback: { ...evaluation(.9, .95).feedback, freshExamples: 3, staleExamples: 1, untrustedExamples: 1 }
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, [
+      "experiments/compare-evaluations.mjs",
+      baselineEvaluationPath,
+      candidateEvaluationPath,
+      "--max-untrusted-feedback",
+      "0"
+    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("untrusted feedback examples 1 exceed 0"),
+    "the promotion gate should reject stale or undated feedback when requested"
+  );
+  await writeFile(candidateEvaluationPath, JSON.stringify({
+    ...evaluation(.9, .95),
+    feedback: Object.fromEntries(Object.entries(evaluation(.9, .95).feedback)
+      .filter(([key]) => !["freshExamples", "staleExamples", "undatedExamples", "untrustedExamples"].includes(key)))
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, [
+      "experiments/compare-evaluations.mjs",
+      baselineEvaluationPath,
+      candidateEvaluationPath,
+      "--max-untrusted-feedback",
+      "0"
+    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("must include freshness diagnostics"),
+    "the promotion gate should fail closed on legacy reports when freshness is required"
+  );
   await writeFile(candidateEvaluationPath, JSON.stringify({ ...evaluation(.9, .95), feedback: { ...evaluation(.9, .95).feedback, datasetFingerprint: "fnv1a-cafebabe" } }));
   assert.throws(
     () => execFileSync(process.execPath, ["experiments/compare-evaluations.mjs", baselineEvaluationPath, candidateEvaluationPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
@@ -137,14 +194,28 @@ try {
     schema: "llm-field-notes/graph@1",
     documents: [{ id: "health-source", title: "Health source", text: "health source text", fingerprint: "health-source" }],
     nodes: [{ id: "health-node", label: "Health node", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z", sources: ["missing-source"], evidence: [] }],
-    learning: { examples: [{ kind: "concept", id: "old-learning", label: "Old learning", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z" }] }
+    learning: { examples: [{ kind: "concept", id: "old-learning", label: "Old learning", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z" }] },
+    integrity: { truncated: { documents: 2 }, dropped: { nodes: 1 } }
   }));
   const healthOutput = execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath], { encoding: "utf8" });
   const health = JSON.parse(healthOutput);
   assert.equal(health.format, "llm-field-notes/health@1");
+  assert.equal(health.appVersion, "0.1.0", "health diagnostics should identify the producing application version");
   assert.match(health.graphFingerprint, /^fnv64-[0-9a-f]{16}-\d+$/, "health reports should identify the exact normalized graph inspected");
   assert.equal(health.gate.passed, true, "health diagnostics without thresholds should pass");
   assert.equal(health.health.staleLearningExamples, 1, "health diagnostics should report stale reusable learning examples");
+  assert.equal(health.health.feedbackContextExcluded, 2, "health diagnostics should report guidance withheld pending review");
+  assert.equal(health.health.truncatedItems, 2, "health diagnostics should report omitted import items");
+  assert.equal(health.health.droppedItems, 1, "health diagnostics should report dropped malformed import items");
+  assert(Array.isArray(health.reviewQueue), "health diagnostics should export the bounded review queue");
+  assert(health.reviewQueue.every((candidate) => candidate.id && candidate.reason && !("sourceText" in candidate) && !("uri" in candidate)), "health review queue should exclude source material");
+  const legacyHealthPath = join(diffRoot, "legacy-health-graph.json");
+  await writeFile(legacyHealthPath, JSON.stringify({
+    ...JSON.parse(await readFile(healthPath, "utf8")),
+    schema: "llm-field-notes/graph@0"
+  }));
+  const legacyHealthOutput = execFileSync(process.execPath, ["experiments/inspect-graph.mjs", legacyHealthPath], { encoding: "utf8" });
+  assert.equal(JSON.parse(legacyHealthOutput).format, "llm-field-notes/health@1", "health inspection should accept supported legacy graph exports");
   const jsonLdOutput = execFileSync(process.execPath, ["experiments/project-jsonld.mjs", healthPath], { encoding: "utf8" });
   const jsonLd = JSON.parse(jsonLdOutput);
   assert.equal(jsonLd["@type"], "schema:Dataset", "JSON-LD CLI should emit the shared dataset projection");
@@ -234,6 +305,49 @@ try {
     () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-stale-learning-examples", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("stale learning examples"),
     "health thresholds should fail when reusable learning memory is stale"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-withheld-guidance", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("withheld extractor guidance"),
+    "health thresholds should fail when guidance is withheld pending review"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-withheld-guidance", "15501"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Invalid value for --max-withheld-guidance"),
+    "health thresholds should reject values outside the published withheld-guidance bound"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-truncated-items", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("truncated import items"),
+    "health thresholds should fail when a graph import was truncated"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-dropped-items", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("dropped malformed import items"),
+    "health thresholds should fail when malformed graph entries were dropped"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, [
+      "experiments/inspect-graph.mjs",
+      healthPath,
+      "--min-provenance", "100",
+      "--min-fresh-source-review", "100",
+      "--max-orphaned", "0",
+      "--max-ambiguous", "0",
+      "--max-unsupported-nodes", "0",
+      "--max-unsupported-edges", "0",
+      "--max-review-candidates", "0",
+      "--max-stale-review-candidates", "0",
+      "--max-stale-learning-examples", "0",
+      "--max-withheld-guidance", "0",
+      "--max-truncated-items", "0",
+      "--max-dropped-items", "0"
+    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => {
+      const report = JSON.parse(String(error?.stdout));
+      return report.gate.violations.length <= 12 && report.gate.violations.length >= 1;
+    },
+    "health gates should keep simultaneous threshold violations within the schema bound"
   );
   const ambiguousHealthPath = join(diffRoot, "ambiguous-health-graph.json");
   await writeFile(ambiguousHealthPath, JSON.stringify({

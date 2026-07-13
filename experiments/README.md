@@ -8,9 +8,9 @@ node experiments/tiny-bpe.mjs
 node experiments/tiny-attention.mjs
 node experiments/tiny-training.mjs
 node experiments/tiny-transformer.mjs
-node experiments/evaluate-feedback.mjs feedback.json extraction.json
-node experiments/compare-evaluations.mjs baseline-evaluation.json candidate-evaluation.json
-node experiments/inspect-graph.mjs graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-stale-review-candidates 10 --max-stale-learning-examples 25
+node experiments/evaluate-feedback.mjs feedback.json extraction.json --max-untrusted-feedback 0
+node experiments/compare-evaluations.mjs baseline-evaluation.json candidate-evaluation.json --max-untrusted-feedback 0
+node experiments/inspect-graph.mjs graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-truncated-items 0 --max-dropped-items 0
 node experiments/diff-graphs.mjs before.json after.json
 node experiments/project-jsonld.mjs graph.json --redacted
 node experiments/verify-jsonld.mjs graph.json graph.jsonld
@@ -34,7 +34,10 @@ relation recall, reviewed-candidate precision, and suppression of rejected
 examples, making extractor changes measurable without a vendor or evaluation
 dependency. Reviewed precision covers only candidates matched to reviewed
 examples; it is not a complete precision estimate when feedback is sparse. The
-command rejects input files larger than 10 MB before parsing them.
+report separates fresh, stale, and undated reviewed examples. Historical
+evaluation remains available, while `--max-untrusted-feedback` can fail a
+production promotion when stale or undated examples exceed an explicit bound.
+The command rejects input files larger than 10 MB before parsing them.
 
 `compare-evaluations.mjs` is a promotion gate for that loop. Evaluation reports
 carry a deterministic reviewed-dataset fingerprint; the command refuses to
@@ -42,22 +45,29 @@ compare reports with different fingerprints, an empty reviewed benchmark, or
 contradictory reviewed decisions. It compares the overall, concept,
 and relation accepted-recall, reviewed-precision, and rejected-suppression
 metrics and exits non-zero when any candidate metric regresses. Use
-`--max-regression 0.02` when a small, explicit tradeoff is acceptable. The
-comparison output is versioned and bounded so it can be retained in CI
-artifacts.
+`--max-regression 0.02` when a small, explicit tradeoff is acceptable. Use
+`--max-untrusted-feedback 0` to fail promotion on stale or undated reviewed
+examples; when enabled, legacy reports without freshness diagnostics are
+rejected. The comparison output is versioned and bounded so it can be retained
+in CI artifacts and records the applied freshness threshold and both report
+counts.
 
 `inspect-graph.mjs` emits the same privacy-safe health contract as the browser
 and can fail CI when provenance, integrity, label-ambiguity, unsupported
-knowledge, or actionable-review thresholds are missed. The thresholds are
+knowledge, bounded-import truncation, malformed-import loss, or actionable-review
+thresholds are missed. The thresholds are
 optional; without them it is a diagnostic report only.
 
 `diff-graphs.mjs` compares two graph exports or full backups and emits the same
 bounded revision-diff contract used by the browser, including learning-memory
-and integrity changes. It rejects incompatible graph/backup schemas and input
-files larger than 10 MB; fingerprinted backups are verified before comparison.
+and integrity changes. Its graph input handling is shared with the JSON-LD and
+health CLIs: incompatible graph/backup schemas, tampered fingerprints, and
+inputs larger than 10 MB are rejected before normalization.
 
-`inspect-graph.mjs` applies the same backup-fingerprint verification before
-emitting health diagnostics or evaluating quality thresholds.
+`inspect-graph.mjs` uses that same shared input boundary before emitting health
+diagnostics or evaluating quality thresholds. Use
+`--max-truncated-items 0 --max-dropped-items 0` to reject partial or malformed
+graph imports in CI.
 
 `project-jsonld.mjs` emits the same full or redacted JSON-LD projection as the
 browser. It verifies graph and backup fingerprints and rejects inputs larger

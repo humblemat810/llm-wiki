@@ -27,6 +27,8 @@
   diagnostics and automation gates.
 - [JSON-LD schema](./schema/jsonld.schema.json): versioned semantic-web
   projection contract for external graph tooling.
+- [Learning note pages](./notes/README.md): runnable curriculum notes with
+  crawler-readable shared landing pages.
 
 ## Principles
 

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { createMemoryStorage, getBrowserStorage } from "../storage-adapter.js";
+import { PENDING_WRITES_KEY, createMemoryStorage, getBrowserStorage } from "../storage-adapter.js";
 
-function createFakeIndexedDB() {
+function createFakeIndexedDB(controlWrites = false) {
   const values = new Map();
+  const pendingCompletions = [];
   let initialized = false;
   const database = {
     objectStoreNames: { contains: (name) => name === "values" },
@@ -12,11 +13,15 @@ function createFakeIndexedDB() {
       transaction.objectStore = () => ({
         put(value, key) {
           values.set(key, value);
-          queueMicrotask(() => transaction.oncomplete?.());
+          const complete = () => queueMicrotask(() => transaction.oncomplete?.());
+          if (controlWrites) pendingCompletions.push(complete);
+          else complete();
         },
         delete(key) {
           values.delete(key);
-          queueMicrotask(() => transaction.oncomplete?.());
+          const complete = () => queueMicrotask(() => transaction.oncomplete?.());
+          if (controlWrites) pendingCompletions.push(complete);
+          else complete();
         },
         openCursor() {
           const request = { result: null, onsuccess: null, onerror: null };
@@ -50,7 +55,9 @@ function createFakeIndexedDB() {
         request.onsuccess?.();
       });
       return request;
-    }
+    },
+    releaseNextWrite: () => pendingCompletions.shift()?.(),
+    pendingWriteCount: () => pendingCompletions.length
   };
 }
 
@@ -165,6 +172,51 @@ await blocked.ready;
 assert.equal(blocked.durable, true);
 assert.equal(blocked.storage.getItem("llm-field-notes-knowledge-graph"), "updated", "blocked localStorage should still hydrate from IndexedDB");
 assert.equal(blocked.storageFailure, false);
+const interruptedWrite = getBrowserStorage({
+  localStorage: createLocalStorage({
+    "llm-field-notes-knowledge-graph": "interrupted-write",
+    [PENDING_WRITES_KEY]: JSON.stringify(["llm-field-notes-knowledge-graph"])
+  }),
+  indexedDB: fakeIndexedDB
+});
+await interruptedWrite.ready;
+assert.equal(interruptedWrite.storage.getItem("llm-field-notes-knowledge-graph"), "interrupted-write", "a pending synchronous mirror should win over stale IndexedDB state during hydration");
+await interruptedWrite.flush();
+const interruptedReload = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: fakeIndexedDB });
+await interruptedReload.ready;
+assert.equal(interruptedReload.storage.getItem("llm-field-notes-knowledge-graph"), "interrupted-write", "a recovered interrupted write should become durable after hydration");
+const preHydrationFlushDb = createFakeIndexedDB();
+const preHydrationFlush = getBrowserStorage({
+  localStorage: createLocalStorage(),
+  indexedDB: preHydrationFlushDb
+});
+preHydrationFlush.storage.setItem("llm-field-notes-knowledge-graph", "flushed-before-ready");
+await preHydrationFlush.flush();
+const preHydrationFlushReload = getBrowserStorage({
+  localStorage: createLocalStorage(),
+  indexedDB: preHydrationFlushDb
+});
+await preHydrationFlushReload.ready;
+assert.equal(preHydrationFlushReload.storage.getItem("llm-field-notes-knowledge-graph"), "flushed-before-ready", "flush should wait for hydration before resolving");
+const controlledIndexedDB = createFakeIndexedDB(true);
+const controlledLocalStorage = createLocalStorage();
+const rapidWrites = getBrowserStorage({ localStorage: controlledLocalStorage, indexedDB: controlledIndexedDB });
+await rapidWrites.ready;
+rapidWrites.storage.setItem("llm-field-notes-knowledge-graph", "first-write");
+rapidWrites.storage.setItem("llm-field-notes-knowledge-graph", "second-write");
+for (let attempt = 0; attempt < 20 && controlledIndexedDB.pendingWriteCount() === 0; attempt += 1) await Promise.resolve();
+assert.equal(controlledIndexedDB.pendingWriteCount(), 1, "the first rapid write should reach the durable queue");
+controlledIndexedDB.releaseNextWrite();
+for (let attempt = 0; attempt < 20 && controlledIndexedDB.pendingWriteCount() === 0; attempt += 1) await Promise.resolve();
+const pendingAfterOlderCommit = JSON.parse(controlledLocalStorage.getItem(PENDING_WRITES_KEY) || "{}");
+assert(pendingAfterOlderCommit["llm-field-notes-knowledge-graph"], "an older commit must not clear the newer pending-write generation");
+assert.equal(controlledIndexedDB.pendingWriteCount(), 1, "the second rapid write should remain queued after the first commit");
+controlledIndexedDB.releaseNextWrite();
+await rapidWrites.flush();
+assert.equal(controlledLocalStorage.getItem(PENDING_WRITES_KEY), null, "the newest successful commit should clear its pending-write generation");
+const rapidReload = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: controlledIndexedDB });
+await rapidReload.ready;
+assert.equal(rapidReload.storage.getItem("llm-field-notes-knowledge-graph"), "second-write", "rapid writes should persist the newest graph value");
 const failingOwner = {
   localStorage: createLocalStorage(),
   indexedDB: {

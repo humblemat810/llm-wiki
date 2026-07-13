@@ -40,6 +40,16 @@
       },
       "additionalProperties": false
     },
+    "feedbackTrust": {
+      "type": "object",
+      "required": ["maxUntrustedFeedback", "baselineUntrustedExamples", "candidateUntrustedExamples"],
+      "properties": {
+        "maxUntrustedFeedback": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "baselineUntrustedExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "candidateUntrustedExamples": { "type": "integer", "minimum": 0, "maximum": 15000 }
+      },
+      "additionalProperties": false
+    },
     "metrics": {
       "type": "array",
       "maxItems": 6,

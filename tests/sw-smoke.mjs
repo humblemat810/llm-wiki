@@ -20,15 +20,18 @@ const shellCache = {
   async put(request, response) {
     if (!cacheWritable) throw new Error("cache quota");
     entries.set(typeof request === "string" ? new URL(request, location).toString() : request.url, response);
+  },
+  async match(request) {
+    const cached = entries.get(typeof request === "string" ? new URL(request, location).toString() : request.url);
+    return cached?.clone?.() || cached || null;
   }
 };
 const cachesApi = {
   async open() {
     return shellCache;
   },
-  async match(request) {
-    const cached = entries.get(typeof request === "string" ? new URL(request, location).toString() : request.url);
-    return cached?.clone?.() || cached || null;
+  async match() {
+    return new Response("foreign-cache-response", { status: 200 });
   },
   async keys() {
     return ["llm-field-notes-v1", "llm-field-notes-v2", "llm-field-notes-v3", "llm-field-notes-v4", "llm-field-notes-v5", "llm-field-notes-v6", "llm-field-notes-v7", "llm-field-notes-v8", "llm-field-notes-v9", "other-application-cache", activeCache];
@@ -44,6 +47,7 @@ let networkStatus = 200;
 let networkCalls = 0;
 let lastFetchOptions = null;
 let claimCalls = 0;
+let skipWaitingCalls = 0;
 const context = {
   URL,
   Set,
@@ -70,11 +74,14 @@ const context = {
       handlers.set(type, handler);
     },
     clients: { claim: async () => { claimCalls += 1; } },
-    skipWaiting: async () => {}
+    skipWaiting: async () => { skipWaitingCalls += 1; }
   }
 };
 context.globalThis = context;
 vm.runInNewContext(source, context);
+
+handlers.get("message")({ data: { type: "SKIP_WAITING" } });
+assert.equal(skipWaitingCalls, 1, "the worker should accept an explicit user-approved activation message");
 
 const installWaits = [];
 handlers.get("install")({ waitUntil(promise) { installWaits.push(promise); } });

@@ -10,11 +10,12 @@ function isShellRequest(request) {
 }
 
 async function matchShellCache(request) {
-  const cached = await caches.match(request);
+  const cache = await caches.open(CACHE);
+  const cached = await cache.match(request);
   if (cached) return cached;
   const url = new URL(request.url);
   if (!url.search) return null;
-  return caches.match(new URL(url.pathname, self.location).toString());
+  return cache.match(new URL(url.pathname, self.location).toString());
 }
 
 async function fetchFresh(request) {
@@ -29,7 +30,10 @@ async function fetchFresh(request) {
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(APP_SHELL)));
-  self.skipWaiting();
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
@@ -62,7 +66,8 @@ self.addEventListener("fetch", (event) => {
     if (cached) return cached;
     if (networkResponse) return networkResponse;
     if (event.request.mode === "navigate") {
-      return (await caches.match(new URL("./index.html", self.location).toString())) || Response.error();
+      const cache = await caches.open(CACHE);
+      return (await cache.match(new URL("./index.html", self.location).toString())) || Response.error();
     }
     return Response.error();
   })());

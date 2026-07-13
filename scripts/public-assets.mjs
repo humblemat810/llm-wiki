@@ -1,3 +1,7 @@
+export const MAX_STATIC_ASSET_BYTES = 10 * 1024 * 1024;
+export const MAX_LEARNING_NOTE_ASSETS = 1000;
+export const MAX_PUBLIC_ASSET_BYTES = 100 * 1024 * 1024;
+
 export const CORE_SHELL_ASSETS = [
   "index.html",
   "styles.css",

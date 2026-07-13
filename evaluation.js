@@ -1,16 +1,16 @@
-import { GRAPH_SCHEMA, fingerprintFeedbackExamples, normalizeExtraction, slugify } from "./graph-core.js";
+import { GRAPH_SCHEMA, MAX_ID_CHARS, MAX_RELATION_LABEL_CHARS, REVIEW_STALE_DAYS, fingerprintFeedbackExamples, normalizeExtraction, slugify } from "./graph-core.js";
 
 export const EVALUATION_SCHEMA = "llm-field-notes/evaluation@1";
 export const MAX_EVALUATION_EXAMPLES = 15000;
 
 const reviewedStatuses = new Set(["accepted", "rejected"]);
 
-function asText(value) {
-  return typeof value === "string" ? value.trim() : "";
+function asText(value, limit = MAX_ID_CHARS) {
+  return typeof value === "string" ? value.trim().slice(0, limit) : "";
 }
 
-function normalized(value) {
-  return slugify(asText(value));
+function normalized(value, limit = MAX_ID_CHARS) {
+  return slugify(asText(value, limit));
 }
 
 function identity(value) {
@@ -19,6 +19,22 @@ function identity(value) {
 
 function boundedExamples(value) {
   return Array.isArray(value) ? value.slice(0, MAX_EVALUATION_EXAMPLES) : [];
+}
+
+function freshnessCounts(examples, now = Date.now()) {
+  return examples.reduce((counts, example) => {
+    const timestamp = typeof example.lastReviewedAt === "string"
+      ? Date.parse(example.lastReviewedAt)
+      : Number.NaN;
+    if (Number.isNaN(timestamp)) {
+      counts.undatedExamples += 1;
+    } else if (now - timestamp >= REVIEW_STALE_DAYS * 86400000) {
+      counts.staleExamples += 1;
+    } else {
+      counts.freshExamples += 1;
+    }
+    return counts;
+  }, { freshExamples: 0, staleExamples: 0, undatedExamples: 0 });
 }
 
 function feedbackIdentityKey(example) {
@@ -41,10 +57,11 @@ function feedbackKey(example) {
 }
 
 function conceptKeys(concept) {
+  const aliases = Array.isArray(concept.aliases) ? concept.aliases.slice(0, 20) : [];
   return new Set([
     identity(concept.id),
-    normalized(concept.label),
-    ...(Array.isArray(concept.aliases) ? concept.aliases.map(normalized) : [])
+    normalized(concept.label, 120),
+    ...aliases.map((alias) => normalized(alias, 120))
   ].filter(Boolean));
 }
 
@@ -152,6 +169,7 @@ export function evaluateExtraction(extraction, feedback = []) {
     seenFeedback.add(key);
     return true;
   });
+  const freshness = freshnessCounts(reviewed);
   const conceptExamples = reviewed.filter((example) => example.kind === "concept");
   const relationExamples = reviewed.filter((example) => example.kind === "relation");
   const feedbackStatuses = new Map();
@@ -204,6 +222,8 @@ export function evaluateExtraction(extraction, feedback = []) {
     feedback: {
       examples: reviewed.length,
       datasetFingerprint: fingerprintFeedbackExamples(reviewed),
+      ...freshness,
+      untrustedExamples: freshness.staleExamples + freshness.undatedExamples,
       conflicts,
       concepts: conceptMetrics,
       relations: relationMetrics

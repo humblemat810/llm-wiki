@@ -12,7 +12,13 @@ The default application is local-first:
   document, optional source URI, and bounded reviewed feedback are sent to that
   endpoint; deployers must protect and document that service separately.
 - The service worker only caches same-origin application assets.
+- Service-worker updates do not silently take over an active workbench tab;
+  later releases require an explicit reload, reducing mixed-version behavior
+  while a graph mutation is in progress.
 - The app does not accept API keys or credentials.
+- The optional extractor endpoint path is remembered locally only after
+  same-origin and embedded-credential validation; endpoint configuration never
+  stores a bearer token or provider secret.
 
 Treat downloaded graph JSON, backups, and Obsidian vaults as sensitive if the
 source documents are sensitive. They contain source text and derived evidence.
@@ -23,6 +29,9 @@ preserving reviewable graph structure. The `redacted`
 marker survives normalization and import so downstream tools can keep the
 privacy boundary visible; normalization also enforces the marker by scrubbing
 source text, URIs, and evidence if a marked payload was tampered with.
+The release smoke suite also scans complete redacted Markdown and vault
+payloads for the original source text and URI, guarding against leakage through
+non-source projection files.
 The compact feedback export is safer when only reviewed labels, aliases,
 statuses, and relation endpoints need to be shared.
 Ingesting a new full-text source into a redacted graph clears the marker so a
@@ -31,7 +40,8 @@ Source URI metadata is scheme-filtered at the graph boundary; dangerous
 schemes such as `javascript:` are discarded, ambiguous HTTP forms are rejected,
 embedded whitespace and HTTP(S)/file credentials are never retained in source
 metadata. The graph, diff, and extractor-request schemas enforce the same URI
-shape for external validators.
+shape for external validators. Browser Markdown and Obsidian projections reuse
+that canonical URI validator before making source links clickable.
 
 ## Reference server deployment
 
@@ -56,6 +66,17 @@ rather than being reflected into responses.
 The server also applies restrictive browser capability and cross-origin
 isolation headers plus legacy clickjacking protection to reduce the impact of
 accidental embedding or cross-origin data exposure.
+Early extraction rejections drain request bodies before responding, preserving
+keep-alive connection framing and preventing unread upload bytes from affecting
+the next request.
+When `PUBLIC_ORIGIN` is an HTTPS origin, the reference server also emits HSTS
+(`max-age=31536000; includeSubDomains`); local HTTP development does not receive
+that browser-persistent policy.
+Crawler-readable learning-note pages additionally enforce a response-level
+`script-src 'none'` policy and disable connections, workers, and manifests;
+the interactive workbench is a separate link rather than an executable part of
+the public note surface. Markdown links in those pages are independently
+restricted to HTTP(S) URLs without embedded credentials before rendering.
 The `/metrics` endpoint contains only aggregate operational counters and no
 document content or credentials. Set `METRICS_AUTH_TOKEN` for a simple
 single-instance guard, and restrict it at the gateway if traffic statistics
@@ -64,10 +85,18 @@ The reference extraction server compacts reviewed feedback at its trust
 boundary, forwarding only bounded labels, aliases, statuses, and relation
 endpoints; unrecognized fields such as evidence or source text are discarded
 before a provider call.
+When a browser sends an `Origin` header, the reference extraction endpoint
+requires it to match `PUBLIC_ORIGIN` (or the direct request origin when no
+public origin is configured), providing a same-origin CSRF boundary for
+deployments that place cookie-based identity at a trusted gateway. Requests
+without an `Origin` header remain available for server-to-server clients;
+public deployments should still enforce CSRF and identity policy at the proxy.
 Provider responses are normalized against the submitted document before they
 reach the browser: returned source titles, text, URIs, quality, review dates,
-fingerprints, and node/evidence source references cannot rewrite or escape the
-request's provenance envelope.
+identities, fingerprints, concept/relation IDs, review status/timestamps, and
+node/evidence source references cannot rewrite or escape the request's
+provenance envelope. Provider output is inference-only; human review remains
+the authority for accepted/rejected state.
 Provider diagnostic codes are also allowlisted and length-bounded before they
 reach structured logs.
 
@@ -87,6 +116,12 @@ Before exposing the reference server to real users:
 - Monitor `/readyz`, `/healthz`, and authenticated `/metrics`. Treat a failed
   readiness check as a deployment failure and retain request IDs when
   investigating extraction errors.
+- Readiness validation is coalesced and cached briefly to prevent repeated
+  unauthenticated probes from repeatedly rendering the entire learning-note
+  publication.
+- Keep the published asset footprint within the shared 100 MB aggregate budget
+  and the 10 MB per-asset limit; these checks protect both Pages publication
+  and runtime readiness from unbounded learning-note collections.
 - Export and verify graph backups before browser storage is cleared, a device
   is replaced, or an Obsidian vault is shared. Use redacted graph, vault, or
   JSON-LD exports for public examples and issue reports.

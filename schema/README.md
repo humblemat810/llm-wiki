@@ -17,8 +17,10 @@ traceability.
 request envelope.
 
 `evaluation.schema.json` describes bounded extractor metrics, including the
-reviewed-dataset fingerprint. `evaluation-comparison.schema.json` describes the
-promotion-gate result and refuses incomparable evaluation datasets.
+reviewed-dataset fingerprint and fresh/stale/undated feedback counts.
+`evaluation-comparison.schema.json` describes the promotion-gate result and
+refuses incomparable evaluation datasets. The evaluation CLI can additionally
+gate production promotion with `--max-untrusted-feedback`.
 
 New feedback exports carry a deterministic dataset fingerprint. The field is
 optional in the `feedback@1` schema so older reviewed datasets remain
@@ -28,9 +30,19 @@ CLI continue to verify legacy 32-bit fingerprints whenever they are present.
 `health.schema.json` describes the privacy-safe graph health report. New
 reports carry a deterministic fingerprint of the normalized graph plus bounded
 diagnostic counts and percentages, never source text or evidence. Health
-reports include stale reusable-learning counts, and automation can gate them
-with `--max-stale-learning-examples`. The fingerprint remains optional for
-backward compatibility with earlier `health@1` reports.
+reports include stale reusable-learning counts and bounded-import truncation
+counts, and automation can gate them with `--max-stale-learning-examples`,
+`--max-withheld-guidance`, `--max-truncated-items`, and `--max-dropped-items`.
+They also report how many extractor-guidance identities are withheld pending
+review. The CLI rejects threshold values above the corresponding schema maxima.
+The fingerprint remains
+optional for
+backward compatibility with earlier `health@1` reports. New reports also carry
+a bounded `appVersion` so operators can identify the producing build, plus
+a bounded `reviewQueue` containing stable IDs, labels, priorities, and reasons;
+it excludes source text, evidence text, and source URIs.
+Browser and CLI reports use the same `buildHealthReport()` domain helper; the
+CLI adds its optional quality gate without changing the shared envelope.
 
 `vault-manifest.schema.json` describes the identity envelope included in
 Obsidian vault exports. It binds the projection to a graph version and
@@ -58,6 +70,11 @@ extractors and external projections should emit the schema shape directly.
 Direct graph JSON exports may include an optional `graphFingerprint`; consumers
 should verify it against the normalized graph when present, while accepting
 older graph files that do not carry the field.
+
+When a graph import exceeds a bounded collection, the normalizer retains the
+partial graph but records the omitted counts in `integrity.truncated`; health
+projections repeat those counts so operators can restore the original export
+before editing.
 
 The contract is deliberately forward-compatible (`additionalProperties` is
 allowed). Consumers should ignore fields they do not understand and preserve

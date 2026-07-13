@@ -1,11 +1,13 @@
 import { fingerprintBackup, normalizeGraph } from "./graph-core.js";
 
 export const JSONLD_FORMAT = "llm-field-notes/jsonld@1";
+export const MAX_JSONLD_CANONICAL_DEPTH = 64;
 
-function canonicalize(value) {
+function canonicalize(value, depth = 0) {
+  if (depth > MAX_JSONLD_CANONICAL_DEPTH) throw new Error("JSON-LD projection nesting exceeds the safety limit.");
   if (Array.isArray(value)) {
     return value
-      .map(canonicalize)
+      .map((item) => canonicalize(item, depth + 1))
       .sort((left, right) => {
         const leftSerialized = JSON.stringify(left);
         const rightSerialized = JSON.stringify(right);
@@ -13,7 +15,7 @@ function canonicalize(value) {
       });
   }
   if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key], depth + 1)]));
 }
 
 export function buildJsonLd(graph) {
@@ -145,5 +147,9 @@ export function buildJsonLd(graph) {
 
 export function matchesJsonLdProjection(graph, projection) {
   if (!projection || typeof projection !== "object") return false;
-  return JSON.stringify(canonicalize(buildJsonLd(graph))) === JSON.stringify(canonicalize(projection));
+  try {
+    return JSON.stringify(canonicalize(buildJsonLd(graph))) === JSON.stringify(canonicalize(projection));
+  } catch {
+    return false;
+  }
 }

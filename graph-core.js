@@ -15,6 +15,8 @@ export const MAX_EVIDENCE_CHARS = 12000;
 export const MAX_SOURCE_REFERENCES = 200;
 export const MAX_ACTIVE_FEEDBACK_CONCEPTS = 100;
 export const MAX_FEEDBACK_EXAMPLES = 500;
+export const MAX_FEEDBACK_FINGERPRINT_EXAMPLES = 15000;
+export const MAX_REVIEW_QUEUE_ITEMS = 15000;
 export const REVIEW_STALE_DAYS = 180;
 export const MAX_AMBIGUOUS_SOURCE_IDS = 100;
 export const MAX_AMBIGUOUS_EDGE_IDS = 100;
@@ -25,6 +27,9 @@ export const MAX_GRAPH_VERSION = Number.MAX_SAFE_INTEGER;
 export const MAX_EXTRACTION_UNITS = 10000;
 export const MAX_WORDS_PER_UNIT = 5000;
 export const MAX_SEGMENTER_CHARS = 20000;
+export const MAX_PHRASE_CANDIDATES_PER_UNIT = 40;
+export const MAX_EXTRACTION_CANDIDATES = 20000;
+export const MAX_EXTRACTION_TERM_CANDIDATES = 18000;
 export const MAX_RELATION_LABEL_CHARS = 80;
 export const MAX_TIMESTAMP_CHARS = 128;
 export const MAX_SOURCE_URI_CHARS = 2048;
@@ -35,6 +40,8 @@ const isStaleLearningExample = (example, now = Date.now()) => {
   const timestamp = Date.parse(example.lastReviewedAt);
   return Number.isNaN(timestamp) || now - timestamp >= REVIEW_STALE_DAYS * 86400000;
 };
+const isStaleGuidanceItem = (item) => isStaleLearningExample(item);
+const includeGuidanceItem = (item, includeStale) => includeStale || !isStaleGuidanceItem(item);
 
 export function advanceGraphVersion(graph) {
   if (!graph || !Number.isSafeInteger(graph.version) || graph.version >= MAX_GRAPH_VERSION) return false;
@@ -55,7 +62,7 @@ The architecture removes recurrence and convolution, which makes training more p
 The model learns through gradient descent on a prediction loss.`
 };
 
-const stopWords = new Set("a an and are as at be because been being based between by can could creates depends entirely for from gives has have how if in into is it its learn may means more of on or other our removes requires same supports that the their them these this through to use uses using was what when which with you your".split(" "));
+const stopWords = new Set("a an and are as at be because been being based before between by can could catch catches caught create creates depends different during entirely each for from gather gathers gives has have here how if improve improves improved increases in into is it its itself learn learns lets make makes may means measures more need needs needed of on or other our over preserve preserves preserved reduces removes report reports reported represent represents represented requires same show shows showing supports than that the their them these this then there through to use uses using until was what when which while with without within you your allow allows after become becomes became control controls controlled guide guides guided map maps mapped reveal reveals revealed remain remains".split(" "));
 
 export const defaultGraph = () => ({
   schema: GRAPH_SCHEMA,
@@ -109,6 +116,12 @@ const relationLabelKey = (value) => String(value)
   .replace(/[`'"“”()[\]{}]/g, "")
   .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
   .replace(/^-|-$/g, "");
+const canonicalLabelKey = relationLabelKey;
+const stableLabelId = (value) => {
+  const key = canonicalLabelKey(value);
+  const base = slugify(value);
+  return key.length > 70 ? `${base.slice(0, 61)}-${identityDigest(key)}` : base;
+};
 const edgeKey = (source, target, label) => JSON.stringify([
   String(source),
   String(target),
@@ -138,18 +151,24 @@ const appendIdSuffix = (base, suffix) => {
 };
 const asConfidence = (value, fallback = .5) => Number.isFinite(Number(value)) ? Math.max(.01, Math.min(.99, Number(value))) : fallback;
 const asBoundedCounter = (value, fallback, minimum, maximum) => Number.isSafeInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
+const asTruncationCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+const asDroppedCount = asTruncationCount;
 const asDateTime = (value, fallback = null) => {
   if (typeof value !== "string" || value.length > MAX_TIMESTAMP_CHARS || !value.trim()) return fallback;
   const timestamp = Date.parse(value);
   return Number.isNaN(timestamp) ? fallback : new Date(timestamp).toISOString();
 };
 const newestTimestamp = (current, incoming) => incoming && (!current || Date.parse(incoming) > Date.parse(current)) ? incoming : current;
-const normalizeAliases = (value) => [...new Set(asBoundedArray(value, 20).filter((item) => typeof item === "string").map((item) => asLine(item).slice(0, 120)).filter(Boolean))].slice(0, 20);
+const oldestTimestamp = (current, incoming) => incoming && (!current || Date.parse(incoming) < Date.parse(current)) ? incoming : current;
+const normalizeAliases = (value) => [...new Set(asBoundedArray(value, 20).filter((item) => typeof item === "string").map((item) => asLine(item).slice(0, 120)).filter(Boolean))]
+  .sort(lexicalCompare)
+  .slice(0, 20);
 const SAFE_SOURCE_URI_SCHEMES = new Set(["http", "https", "file", "urn", "doi"]);
 export const normalizeSourceUri = (value) => {
   if (typeof value !== "string") return null;
-  const clean = value.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, MAX_SOURCE_URI_CHARS);
+  const clean = value.replace(/[\u0000-\u001f\u007f]/g, "").trim();
   if (!clean) return null;
+  if (clean.length > MAX_SOURCE_URI_CHARS) return null;
   if (/[\s<>]/.test(clean)) return null;
   const scheme = clean.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
   if (scheme && !SAFE_SOURCE_URI_SCHEMES.has(scheme)) return null;
@@ -167,24 +186,24 @@ export const normalizeSourceUri = (value) => {
 };
 
 function canonicalFeedbackExamples(value) {
-  return asArray(value)
+  return asBoundedArray(value, MAX_FEEDBACK_FINGERPRINT_EXAMPLES)
     .filter((example) => example && typeof example === "object" && (example.kind === "concept" || example.kind === "relation") && ["accepted", "rejected"].includes(example.status))
     .map((example) => example.kind === "concept"
       ? {
         kind: "concept",
-        id: asText(example.id),
-        label: asText(example.label),
-        aliases: asArray(example.aliases).filter((alias) => typeof alias === "string").map((alias) => alias.trim()).sort(),
+        id: asText(example.id).slice(0, MAX_ID_CHARS),
+        label: asText(example.label).slice(0, 120),
+        aliases: asBoundedArray(example.aliases, 20).filter((alias) => typeof alias === "string").map((alias) => alias.trim().slice(0, 120)).sort(),
         status: example.status
       }
       : {
         kind: "relation",
-        id: asText(example.id),
-        source: asText(example.source),
-        sourceLabel: asText(example.sourceLabel),
-        target: asText(example.target),
-        targetLabel: asText(example.targetLabel),
-        label: asText(example.label),
+        id: asText(example.id).slice(0, MAX_ID_CHARS),
+        source: asText(example.source).slice(0, MAX_ID_CHARS),
+        sourceLabel: asText(example.sourceLabel).slice(0, 120),
+        target: asText(example.target).slice(0, MAX_ID_CHARS),
+        targetLabel: asText(example.targetLabel).slice(0, 120),
+        label: asText(example.label).slice(0, MAX_RELATION_LABEL_CHARS),
         status: example.status
       })
     .sort((left, right) => {
@@ -263,6 +282,34 @@ function learningExampleKey(example) {
     : `relation|${example.id}`;
 }
 
+function feedbackContextStatsForGraph(graph, { includeStale = true } = {}) {
+  const reusableExamples = graph.learning.examples.filter((example) => includeGuidanceItem(example, includeStale));
+  const allKeys = new Set(graph.learning.examples.map(learningExampleKey));
+  const keys = new Set(reusableExamples.map(learningExampleKey));
+  graph.nodes
+    .filter((node) => node.status === "accepted" || node.status === "rejected")
+    .forEach((node) => {
+      allKeys.add(`concept|${node.id}`);
+      if (includeGuidanceItem(node, includeStale)) keys.add(`concept|${node.id}`);
+    });
+  graph.edges
+    .filter((edge) => edge.status === "accepted" || edge.status === "rejected")
+    .forEach((edge) => {
+      allKeys.add(`relation|${edge.id}`);
+      if (includeGuidanceItem(edge, includeStale)) keys.add(`relation|${edge.id}`);
+    });
+  return {
+    available: keys.size,
+    retained: Math.min(keys.size, MAX_FEEDBACK_EXAMPLES),
+    truncated: keys.size > MAX_FEEDBACK_EXAMPLES,
+    excluded: Math.max(0, allKeys.size - keys.size)
+  };
+}
+
+export function feedbackContextStats(value, options) {
+  return feedbackContextStatsForGraph(normalizeGraph(value), options);
+}
+
 function learningExamplesEquivalent(left, right) {
   if (!left || !right || left.kind !== right.kind || left.status !== right.status) return false;
   if (left.kind === "concept") {
@@ -276,12 +323,44 @@ function learningExamplesEquivalent(left, right) {
     && slugify(left.label) === slugify(right.label);
 }
 
+function learningExampleTieBreak(example) {
+  return [
+    example.status === "rejected" ? "1" : example.status === "accepted" ? "0" : "2",
+    example.kind,
+    example.id,
+    example.source || "",
+    example.target || "",
+    slugify(example.label),
+    (example.aliases || []).map(slugify).sort().join("\u0000"),
+    example.status
+  ].join("\u0001");
+}
+
 export function preferLearningExample(existing, incoming) {
+  if (!existing) return incoming;
+  if (existing.status === "inferred" && ["accepted", "rejected"].includes(incoming.status)) return incoming;
+  const existingTime = existing.lastReviewedAt ? Date.parse(existing.lastReviewedAt) : Number.NaN;
+  const incomingTime = incoming.lastReviewedAt ? Date.parse(incoming.lastReviewedAt) : Number.NaN;
+  if (Number.isNaN(incomingTime)) {
+    if (!Number.isNaN(existingTime)) return existing;
+    return learningExampleTieBreak(incoming) >= learningExampleTieBreak(existing) ? incoming : existing;
+  }
+  if (Number.isNaN(existingTime) || incomingTime > existingTime) return incoming;
+  if (incomingTime === existingTime) {
+    return learningExampleTieBreak(incoming) >= learningExampleTieBreak(existing) ? incoming : existing;
+  }
+  return existing;
+}
+
+function preferImportedDecision(existing, incoming) {
   if (!existing) return incoming;
   const existingTime = existing.lastReviewedAt ? Date.parse(existing.lastReviewedAt) : Number.NaN;
   const incomingTime = incoming.lastReviewedAt ? Date.parse(incoming.lastReviewedAt) : Number.NaN;
   if (Number.isNaN(incomingTime)) return Number.isNaN(existingTime) ? incoming : existing;
-  if (Number.isNaN(existingTime) || incomingTime >= existingTime) return incoming;
+  if (Number.isNaN(existingTime) || incomingTime > existingTime) return incoming;
+  if (incomingTime === existingTime) {
+    return learningExampleTieBreak(incoming) >= learningExampleTieBreak(existing) ? incoming : existing;
+  }
   return existing;
 }
 
@@ -322,11 +401,7 @@ function fingerprintText(text) {
   return `fnv64-${(primary >>> 0).toString(16).padStart(8, "0")}${(secondary >>> 0).toString(16).padStart(8, "0")}-${canonical.length}`;
 }
 
-export function fingerprintBackup(graph, history = []) {
-  const serialized = JSON.stringify({
-    graph: normalizeGraph(graph),
-    history: asArray(history).map((item) => normalizeGraph(item))
-  });
+const fingerprintDigest = (serialized) => {
   let primary = 2166136261;
   let secondary = 2654435761;
   for (let index = 0; index < serialized.length; index += 1) {
@@ -337,10 +412,69 @@ export function fingerprintBackup(graph, history = []) {
     secondary = Math.imul(secondary, 2246822519);
   }
   return `fnv64-${(primary >>> 0).toString(16).padStart(8, "0")}${(secondary >>> 0).toString(16).padStart(8, "0")}-${serialized.length}`;
+};
+
+const legacyFingerprintBackup = (graph, history = []) => fingerprintDigest(JSON.stringify({
+  graph: normalizeGraph(graph),
+  history: asBoundedArray(history, MAX_GRAPH_REVISIONS).map((item) => normalizeGraph(item))
+}));
+
+const canonicalizeEvidenceForFingerprint = (value) => asArray(value)
+  .map((evidence) => ({
+    ...evidence,
+    sources: [...asArray(evidence.sources)].sort(lexicalCompare)
+  }))
+  .sort((left, right) => lexicalCompare(
+    `${left.text}\u0000${left.sources.join("\u0000")}`,
+    `${right.text}\u0000${right.sources.join("\u0000")}`
+  ));
+
+const canonicalizeGraphForFingerprint = (value) => {
+  const graph = normalizeGraph(value);
+  return {
+    ...graph,
+    // Documents, nodes, and edges are sets from the graph's point of view.
+    // Their array order can change during JSON/Obsidian round-trips without
+    // changing the represented knowledge. Revision and learning order remain
+    // untouched because they carry chronology and bounded recency semantics.
+    documents: [...graph.documents].sort((left, right) => lexicalCompare(`${left.id}\u0000${left.fingerprint}`, `${right.id}\u0000${right.fingerprint}`)),
+    nodes: [...graph.nodes].sort((left, right) => lexicalCompare(left.id, right.id)).map((node) => ({
+      ...node,
+      aliases: [...(node.aliases || [])].sort(lexicalCompare),
+      sources: [...node.sources].sort(lexicalCompare),
+      evidence: canonicalizeEvidenceForFingerprint(node.evidence)
+    })),
+    edges: [...graph.edges].sort((left, right) => lexicalCompare(
+      `${relationSemanticKey(left.source, left.target, left.label)}\u0000${left.id}`,
+      `${relationSemanticKey(right.source, right.target, right.label)}\u0000${right.id}`
+    )).map((edge) => ({
+      ...edge,
+      sources: [...edge.sources].sort(lexicalCompare),
+      evidence: canonicalizeEvidenceForFingerprint(edge.evidence)
+    })),
+    integrity: {
+      ...graph.integrity,
+      ambiguousSourceIds: [...graph.integrity.ambiguousSourceIds].sort(lexicalCompare),
+      ambiguousEdgeIds: [...graph.integrity.ambiguousEdgeIds].sort(lexicalCompare)
+    }
+  };
+};
+
+export function fingerprintBackup(graph, history = []) {
+  const serialized = JSON.stringify({
+    graph: canonicalizeGraphForFingerprint(graph),
+    // Undo history is ordered: the last entry is the next state to restore.
+    history: asBoundedArray(history, MAX_GRAPH_REVISIONS).map(canonicalizeGraphForFingerprint)
+  });
+  return fingerprintDigest(serialized);
 }
 
 export function matchesGraphFingerprint(graph, graphFingerprint, history = []) {
-  return typeof graphFingerprint !== "string" || graphFingerprint === fingerprintBackup(graph, history);
+  return typeof graphFingerprint !== "string"
+    || graphFingerprint === fingerprintBackup(graph, history)
+    // Accept fingerprints emitted before canonical collection ordering was
+    // introduced so existing backups and vaults remain importable.
+    || graphFingerprint === legacyFingerprintBackup(graph, history);
 }
 
 function normalizeEvidence(value, fallbackSources = []) {
@@ -362,7 +496,9 @@ function normalizeEvidence(value, fallbackSources = []) {
 const normalizeSourceIds = (value, fallback = []) => [...new Set([...asBoundedArray(fallback, MAX_SOURCE_REFERENCES), ...asBoundedArray(value, MAX_SOURCE_REFERENCES)]
   .filter((item) => typeof item === "string")
   .map((item) => normalizeId(item))
-  .filter(Boolean))].slice(0, MAX_SOURCE_REFERENCES);
+  .filter(Boolean))]
+  .sort(lexicalCompare)
+  .slice(0, MAX_SOURCE_REFERENCES);
 const mergeSourceIds = (...values) => normalizeSourceIds(values.flat());
 
 function mergeEvidence(current, incoming) {
@@ -377,13 +513,24 @@ function mergeEvidence(current, incoming) {
 }
 
 function makeUniqueEdgeIds(edges) {
+  const assigned = new Map();
   const used = new Set();
-  return edges.map((edge) => {
-    const base = normalizeId(edge.id) || "edge";
+  const ordered = edges.map((edge) => ({
+    edge,
+    base: normalizeId(edge.id) || "edge"
+  })).sort((left, right) => lexicalCompare(
+    `${left.base}\u0000${relationSemanticKey(left.edge.source, left.edge.target, left.edge.label)}\u0000${left.edge.source}\u0000${left.edge.target}\u0000${left.edge.label}`,
+    `${right.base}\u0000${relationSemanticKey(right.edge.source, right.edge.target, right.edge.label)}\u0000${right.edge.source}\u0000${right.edge.target}\u0000${right.edge.label}`
+  ));
+  ordered.forEach(({ edge, base }) => {
     let id = base;
     let suffix = 2;
     while (used.has(id)) id = appendIdSuffix(base, suffix++);
     used.add(id);
+    assigned.set(edge, id);
+  });
+  return edges.map((edge) => {
+    const id = assigned.get(edge);
     return id === edge.id ? edge : { ...edge, id };
   });
 }
@@ -391,6 +538,9 @@ function makeUniqueEdgeIds(edges) {
 export function normalizeExtraction(value, fallbackTitle = "Untitled document", fallbackText = "") {
   const input = value && typeof value === "object" ? value : {};
   const inputSource = input.source && typeof input.source === "object" ? input.source : {};
+  // Reuse an explicit source timestamp for generated item timestamps; otherwise
+  // preserve normal current-time chronology for newly extracted material.
+  const normalizationTimestamp = asDateTime(inputSource.addedAt, new Date().toISOString());
   const sourceText = asText(inputSource.text, fallbackText).slice(0, MAX_DOCUMENT_CHARS);
   const sourceId = normalizeId(inputSource.id) || `doc-${fingerprintText(sourceText)}`;
   const source = {
@@ -399,7 +549,7 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
     text: sourceText,
     fingerprint: normalizeId(inputSource.fingerprint) || fingerprintText(sourceText),
     uri: normalizeSourceUri(inputSource.uri),
-    addedAt: asDateTime(inputSource.addedAt, new Date().toISOString()),
+    addedAt: asDateTime(inputSource.addedAt, normalizationTimestamp),
     quality: SOURCE_QUALITIES.has(inputSource.quality) ? inputSource.quality : "unknown",
     lastReviewedAt: asDateTime(inputSource.lastReviewedAt)
   };
@@ -418,11 +568,11 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
   const normalizedNodes = asArray(input.nodes).slice(0, MAX_GRAPH_NODES).map((node) => {
     const label = asLine(node?.label, asLine(node?.name, "Unnamed concept")).slice(0, 120);
     const rawInputId = asText(node?.id).trim();
-    const rawId = normalizeId(rawInputId) || slugify(label) || makeId("concept");
-    const id = rawInputId ? rawId : slugify(rawId) || rawId;
+    const rawId = normalizeId(rawInputId) || stableLabelId(label) || makeId("concept");
+    const id = rawInputId ? rawId : stableLabelId(label) || rawId;
     if (rawInputId) setIdMap(rawInputId, id);
     setIdMap(rawId, id);
-    setIdMap(slugify(label), id);
+    setIdMap(canonicalLabelKey(label), id);
     const sources = normalizeSourceIds(node?.sources, [sourceId]);
     return {
       id,
@@ -435,8 +585,8 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
       status: ["inferred", "accepted", "rejected"].includes(node?.status) ? node.status : "inferred",
       sources,
       evidence: normalizeEvidence(node?.evidence, sources),
-      createdAt: asDateTime(node?.createdAt, new Date().toISOString()),
-      updatedAt: asDateTime(node?.updatedAt, new Date().toISOString()),
+      createdAt: asDateTime(node?.createdAt, normalizationTimestamp),
+      updatedAt: asDateTime(node?.updatedAt, normalizationTimestamp),
       lastReviewedAt: asDateTime(node?.lastReviewedAt)
     };
   });
@@ -447,8 +597,16 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
       nodesById.set(node.id, node);
       return;
     }
-    if (existing.label !== node.label) existing.aliases = [...new Set([...existing.aliases, node.label])].slice(0, 20);
-    existing.aliases = [...new Set([...existing.aliases, ...node.aliases])].slice(0, 20);
+    const labels = [...new Set([existing.label, node.label, ...existing.aliases, ...node.aliases])];
+    const existingUpdatedAt = Date.parse(existing.updatedAt);
+    const incomingUpdatedAt = Date.parse(node.updatedAt);
+    const incomingIsCanonical = incomingUpdatedAt > existingUpdatedAt
+      || (incomingUpdatedAt === existingUpdatedAt && lexicalCompare(node.label, existing.label) < 0);
+    if (incomingIsCanonical) {
+      existing.label = node.label;
+      existing.type = node.type;
+    }
+    existing.aliases = labels.filter((label) => slugify(label) !== slugify(existing.label)).sort(lexicalCompare).slice(0, 20);
     existing.sources = mergeSourceIds(existing.sources, node.sources);
     existing.evidence = mergeEvidence(existing.evidence, node.evidence);
     existing.mentions = Math.min(MAX_NODE_MENTIONS, existing.mentions + node.mentions);
@@ -458,14 +616,15 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
     if (existing.status === "inferred" && node.status === "rejected") existing.status = "rejected";
     existing.lastReviewedAt = newestTimestamp(existing.lastReviewedAt, node.lastReviewedAt);
     existing.updatedAt = newestTimestamp(existing.updatedAt, node.updatedAt);
+    existing.createdAt = oldestTimestamp(existing.createdAt, node.createdAt);
   });
   const nodes = [...nodesById.values()];
   const nodeIds = new Set(nodes.map((node) => node.id));
   const normalizedEdges = asArray(input.edges).slice(0, MAX_GRAPH_EDGES).map((edge) => {
     const rawSource = asText(edge?.source);
     const rawTarget = asText(edge?.target);
-    const source = idMap.get(rawSource) || idMap.get(normalizeId(rawSource)) || idMap.get(slugify(rawSource)) || rawSource;
-    const target = idMap.get(rawTarget) || idMap.get(normalizeId(rawTarget)) || idMap.get(slugify(rawTarget)) || rawTarget;
+    const source = idMap.get(rawSource) || idMap.get(normalizeId(rawSource)) || idMap.get(canonicalLabelKey(rawSource)) || rawSource;
+    const target = idMap.get(rawTarget) || idMap.get(normalizeId(rawTarget)) || idMap.get(canonicalLabelKey(rawTarget)) || rawTarget;
     const label = asLine(edge?.label, "related to").slice(0, MAX_RELATION_LABEL_CHARS);
     if (!nodeIds.has(source) || !nodeIds.has(target)) return null;
     const sources = normalizeSourceIds(edge?.sources, [sourceId]);
@@ -490,13 +649,34 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
       edgesByKey.set(key, edge);
       return;
     }
-    existing.sources = mergeSourceIds(existing.sources, edge.sources);
-    existing.evidence = mergeEvidence(existing.evidence, edge.evidence);
-    existing.confidence = Math.max(existing.confidence, edge.confidence);
-    existing.feedback = Math.max(-MAX_FEEDBACK_COUNT, Math.min(MAX_FEEDBACK_COUNT, existing.feedback + edge.feedback));
-    if (existing.status !== "accepted" && edge.status === "accepted") existing.status = "accepted";
-    if (existing.status === "inferred" && edge.status === "rejected") existing.status = "rejected";
-    existing.lastReviewedAt = newestTimestamp(existing.lastReviewedAt, edge.lastReviewedAt);
+    const directionalRepresentative = edge.confidence > existing.confidence
+      ? edge
+      : existing.confidence > edge.confidence
+        ? existing
+        : [existing.source, existing.target].sort(lexicalCompare)[0] === existing.source
+          ? existing
+          : edge;
+    const source = directionalRepresentative.source;
+    const target = directionalRepresentative.target;
+    const ids = [existing.id, edge.id].sort(lexicalCompare);
+    const labels = [existing.label, edge.label].sort((left, right) => lexicalCompare(left.toLowerCase(), right.toLowerCase()) || lexicalCompare(left, right));
+    edgesByKey.set(key, {
+      ...existing,
+      id: ids[0],
+      source,
+      target,
+      label: labels[0],
+      sources: mergeSourceIds(existing.sources, edge.sources),
+      evidence: mergeEvidence(existing.evidence, edge.evidence),
+      confidence: Math.max(existing.confidence, edge.confidence),
+      feedback: Math.max(-MAX_FEEDBACK_COUNT, Math.min(MAX_FEEDBACK_COUNT, existing.feedback + edge.feedback)),
+      status: existing.status === "accepted" || edge.status === "accepted"
+        ? "accepted"
+        : existing.status === "rejected" || edge.status === "rejected"
+          ? "rejected"
+          : "inferred",
+      lastReviewedAt: newestTimestamp(existing.lastReviewedAt, edge.lastReviewedAt)
+    });
   });
   const edges = makeUniqueEdgeIds([...edgesByKey.values()]);
   return { source, nodes, edges };
@@ -509,10 +689,55 @@ export function normalizeExtractionForDocument(value, { title, text, uri } = {})
   const inputSource = input.source && typeof input.source === "object" && !Array.isArray(input.source)
     ? input.source
     : {};
+  if (Array.isArray(input.nodes) && input.nodes.length > MAX_GRAPH_NODES) {
+    throw Object.assign(new Error(`Extractor response exceeds the ${MAX_GRAPH_NODES}-concept limit.`), { code: "EXTRACTION_NODES_TOO_LARGE" });
+  }
+  if (Array.isArray(input.edges) && input.edges.length > MAX_GRAPH_EDGES) {
+    throw Object.assign(new Error(`Extractor response exceeds the ${MAX_GRAPH_EDGES}-relation limit.`), { code: "EXTRACTION_EDGES_TOO_LARGE" });
+  }
+  const providerNodeLabels = new Map();
+  const ambiguousProviderNodeIds = new Set();
+  asArray(input.nodes).slice(0, MAX_GRAPH_NODES).forEach((node) => {
+    const id = asText(node?.id).trim();
+    const label = asLine(node?.label, asLine(node?.name, ""));
+    if (!id || !label || ambiguousProviderNodeIds.has(id)) return;
+    const previous = providerNodeLabels.get(id);
+    if (previous && previous !== label) {
+      providerNodeLabels.delete(id);
+      ambiguousProviderNodeIds.add(id);
+      return;
+    }
+    providerNodeLabels.set(id, label);
+  });
+  const canonicalNodes = Array.isArray(input.nodes)
+    ? input.nodes.slice(0, MAX_GRAPH_NODES).map((node) => ({
+      ...node,
+      id: null,
+      status: "inferred",
+      feedback: 0,
+      createdAt: null,
+      updatedAt: null,
+      lastReviewedAt: null
+    }))
+    : input.nodes;
+  const canonicalEdges = Array.isArray(input.edges)
+    ? input.edges.slice(0, MAX_GRAPH_EDGES).map((edge) => ({
+      ...edge,
+      id: null,
+      status: "inferred",
+      feedback: 0,
+      lastReviewedAt: null,
+      source: ambiguousProviderNodeIds.has(asText(edge?.source).trim()) ? "" : providerNodeLabels.get(asText(edge?.source).trim()) || edge?.source,
+      target: ambiguousProviderNodeIds.has(asText(edge?.target).trim()) ? "" : providerNodeLabels.get(asText(edge?.target).trim()) || edge?.target
+    }))
+    : input.edges;
   const normalized = normalizeExtraction({
     ...input,
+    nodes: canonicalNodes,
+    edges: canonicalEdges,
     source: {
       ...inputSource,
+      id: null,
       title: boundedTitle,
       text: boundedText,
       fingerprint: null,
@@ -551,7 +776,52 @@ export function normalizeGraph(value) {
     .filter((id) => typeof id === "string")
     .map((id) => normalizeId(id))
     .filter(Boolean));
-  const normalizedDocuments = asBoundedArray(value.documents, MAX_GRAPH_DOCUMENTS).filter((doc) => doc && typeof doc === "object").map((doc) => {
+  const truncated = {
+    documents: Math.max(
+      asTruncationCount(value.integrity?.truncated?.documents),
+      Array.isArray(value.documents) ? Math.max(0, value.documents.length - MAX_GRAPH_DOCUMENTS) : 0
+    ),
+    nodes: Math.max(
+      asTruncationCount(value.integrity?.truncated?.nodes),
+      Array.isArray(value.nodes) ? Math.max(0, value.nodes.length - MAX_GRAPH_NODES) : 0
+    ),
+    edges: Math.max(
+      asTruncationCount(value.integrity?.truncated?.edges),
+      Array.isArray(value.edges) ? Math.max(0, value.edges.length - MAX_GRAPH_EDGES) : 0
+    ),
+    revisions: Math.max(
+      asTruncationCount(value.integrity?.truncated?.revisions),
+      Array.isArray(value.revisions) ? Math.max(0, value.revisions.length - MAX_GRAPH_REVISIONS) : 0
+    ),
+    learningExamples: Math.max(
+      asTruncationCount(value.integrity?.truncated?.learningExamples),
+      Array.isArray(value.learning?.examples) ? Math.max(0, value.learning.examples.length - MAX_FEEDBACK_EXAMPLES) : 0
+    )
+  };
+  const boundedDocuments = asBoundedArray(value.documents, MAX_GRAPH_DOCUMENTS);
+  const boundedNodes = asBoundedArray(value.nodes, MAX_GRAPH_NODES);
+  const boundedRevisions = asBoundedArray(value.revisions, MAX_GRAPH_REVISIONS);
+  const boundedLearningExamples = asBoundedArray(value.learning?.examples, MAX_FEEDBACK_EXAMPLES);
+  const dropped = {
+    documents: Math.max(
+      asDroppedCount(value.integrity?.dropped?.documents),
+      boundedDocuments.filter((document) => !document || typeof document !== "object").length
+    ),
+    nodes: Math.max(
+      asDroppedCount(value.integrity?.dropped?.nodes),
+      boundedNodes.filter((node) => !node || typeof node !== "object" || !asText(node.id).trim()).length
+    ),
+    edges: asDroppedCount(value.integrity?.dropped?.edges),
+    revisions: Math.max(
+      asDroppedCount(value.integrity?.dropped?.revisions),
+      boundedRevisions.filter((revision) => !revision || typeof revision !== "object").length
+    ),
+    learningExamples: Math.max(
+      asDroppedCount(value.integrity?.dropped?.learningExamples),
+      boundedLearningExamples.filter((example) => !normalizeLearningExample(example)).length
+    )
+  };
+  const normalizedDocuments = boundedDocuments.filter((doc) => doc && typeof doc === "object").map((doc) => {
     const text = asText(doc.text).slice(0, MAX_DOCUMENT_CHARS);
     const fingerprint = normalizeId(doc.fingerprint) || fingerprintText(text);
     return {
@@ -565,8 +835,21 @@ export function normalizeGraph(value) {
       lastReviewedAt: asDateTime(doc.lastReviewedAt)
     };
   });
-  const documentsById = new Map();
+  const orderedDocuments = [];
+  const seenDocumentIds = new Set();
   normalizedDocuments.forEach((document) => {
+    if (seenDocumentIds.has(document.id)) return;
+    seenDocumentIds.add(document.id);
+    const collisionGroup = normalizedDocuments
+      .filter((candidate) => candidate.id === document.id)
+      .sort((left, right) => lexicalCompare(
+        `${left.fingerprint}\u0000${left.text}\u0000${left.title}`,
+        `${right.fingerprint}\u0000${right.text}\u0000${right.title}`
+      ));
+    orderedDocuments.push(...collisionGroup);
+  });
+  const documentsById = new Map();
+  orderedDocuments.forEach((document) => {
     let documentId = document.id;
     let existing = documentsById.get(documentId);
     const sameContent = existing && (
@@ -586,11 +869,18 @@ export function normalizeGraph(value) {
       documentsById.set(documentId, document);
       return;
     }
-    if (existing.title === "Untitled document" && document.title !== "Untitled document") existing.title = document.title;
+    const titles = [existing.title, document.title].filter((title) => title && title !== "Untitled document");
+    if (titles.length) existing.title = titles.sort(lexicalCompare)[0];
     if (!existing.text && document.text) existing.text = document.text;
     if (!existing.fingerprint && document.fingerprint) existing.fingerprint = document.fingerprint;
-    if (!existing.uri && document.uri) existing.uri = document.uri;
-    if (existing.quality === "unknown" && document.quality !== "unknown") existing.quality = document.quality;
+    const uris = [existing.uri, document.uri].filter(Boolean).sort(lexicalCompare);
+    if (uris.length) existing.uri = uris[0];
+    const qualityRank = (quality) => ({ primary: 4, secondary: 3, tertiary: 2, unknown: 1 }[quality] || 0);
+    if (qualityRank(document.quality) > qualityRank(existing.quality)
+      || (qualityRank(document.quality) === qualityRank(existing.quality) && document.quality < existing.quality)) {
+      existing.quality = document.quality;
+    }
+    existing.addedAt = oldestTimestamp(existing.addedAt, document.addedAt);
     if (document.lastReviewedAt && (!existing.lastReviewedAt || Date.parse(document.lastReviewedAt) > Date.parse(existing.lastReviewedAt))) {
       existing.lastReviewedAt = document.lastReviewedAt;
     }
@@ -598,9 +888,11 @@ export function normalizeGraph(value) {
   graph.documents = [...documentsById.values()];
   graph.integrity = {
     ambiguousSourceIds: [...ambiguousSourceIds].slice(0, MAX_AMBIGUOUS_SOURCE_IDS),
-    ambiguousEdgeIds: [...ambiguousEdgeIds].slice(0, MAX_AMBIGUOUS_EDGE_IDS)
+    ambiguousEdgeIds: [...ambiguousEdgeIds].slice(0, MAX_AMBIGUOUS_EDGE_IDS),
+    ...(Object.values(truncated).some((count) => count > 0) ? { truncated } : {}),
+    ...(Object.values(dropped).some((count) => count > 0) ? { dropped } : {})
   };
-  const normalizedNodes = asBoundedArray(value.nodes, MAX_GRAPH_NODES).filter((node) => node && typeof node === "object" && asText(node.id).trim()).map((node) => ({
+  const normalizedNodes = boundedNodes.filter((node) => node && typeof node === "object" && asText(node.id).trim()).map((node) => ({
     id: normalizeId(node.id),
     label: asLine(node.label, "Unnamed concept").slice(0, 120),
     aliases: normalizeAliases(node.aliases),
@@ -622,8 +914,16 @@ export function normalizeGraph(value) {
       nodesById.set(node.id, node);
       return;
     }
-    if (existing.label !== node.label) existing.aliases = [...new Set([...existing.aliases, node.label])].slice(0, 20);
-    existing.aliases = [...new Set([...existing.aliases, ...node.aliases])].slice(0, 20);
+    const labels = [...new Set([existing.label, node.label, ...existing.aliases, ...node.aliases])];
+    const existingUpdatedAt = Date.parse(existing.updatedAt);
+    const incomingUpdatedAt = Date.parse(node.updatedAt);
+    const incomingIsCanonical = incomingUpdatedAt > existingUpdatedAt
+      || (incomingUpdatedAt === existingUpdatedAt && lexicalCompare(node.label, existing.label) < 0);
+    if (incomingIsCanonical) {
+      existing.label = node.label;
+      existing.type = node.type;
+    }
+    existing.aliases = labels.filter((label) => slugify(label) !== slugify(existing.label)).sort(lexicalCompare).slice(0, 20);
     existing.sources = mergeSourceIds(existing.sources, node.sources);
     existing.evidence = mergeEvidence(existing.evidence, node.evidence);
     existing.mentions = Math.min(MAX_NODE_MENTIONS, existing.mentions + node.mentions);
@@ -633,10 +933,16 @@ export function normalizeGraph(value) {
     if (existing.status === "inferred" && node.status === "rejected") existing.status = "rejected";
     existing.lastReviewedAt = newestTimestamp(existing.lastReviewedAt, node.lastReviewedAt);
     existing.updatedAt = newestTimestamp(existing.updatedAt, node.updatedAt);
+    existing.createdAt = oldestTimestamp(existing.createdAt, node.createdAt);
   });
   graph.nodes = [...nodesById.values()];
   const nodeIds = new Set(graph.nodes.map((node) => node.id));
-  const normalizedEdges = asBoundedArray(value.edges, MAX_GRAPH_EDGES).filter((edge) => edge && typeof edge === "object" && nodeIds.has(normalizeId(edge.source)) && nodeIds.has(normalizeId(edge.target))).map((edge) => ({
+  const boundedEdges = asBoundedArray(value.edges, MAX_GRAPH_EDGES);
+  dropped.edges = Math.max(
+    dropped.edges,
+    boundedEdges.filter((edge) => !edge || typeof edge !== "object" || !nodeIds.has(normalizeId(edge.source)) || !nodeIds.has(normalizeId(edge.target))).length
+  );
+  const normalizedEdges = boundedEdges.filter((edge) => edge && typeof edge === "object" && nodeIds.has(normalizeId(edge.source)) && nodeIds.has(normalizeId(edge.target))).map((edge) => ({
     id: normalizeId(edge.id) || makeEdgeId(normalizeId(edge.source), normalizeId(edge.target), asText(edge.label, "related-to")),
     source: normalizeId(edge.source),
     target: normalizeId(edge.target),
@@ -649,7 +955,7 @@ export function normalizeGraph(value) {
     lastReviewedAt: asDateTime(edge.lastReviewedAt)
   }));
   const edgesByKey = new Map();
-  const edgeIdAliases = new Map();
+  const edgeIdAliasKeys = new Map();
   const edgeIdOwners = new Map();
   normalizedEdges.forEach((edge) => {
     const key = relationSemanticKey(edge.source, edge.target, edge.label);
@@ -662,19 +968,34 @@ export function normalizeGraph(value) {
       edgesByKey.set(key, edge);
       return;
     }
-    if (edge.id !== existing.id || edge.source !== existing.source || edge.target !== existing.target) {
-      edgeIdAliases.set(edge.id, existing);
-    }
-    existing.sources = mergeSourceIds(existing.sources, edge.sources);
-    existing.evidence = mergeEvidence(existing.evidence, edge.evidence);
-    existing.feedback = Math.max(-MAX_FEEDBACK_COUNT, Math.min(MAX_FEEDBACK_COUNT, existing.feedback + edge.feedback));
-    existing.confidence = Math.max(existing.confidence, edge.confidence);
-    if (existing.status !== "accepted" && edge.status === "accepted") existing.status = "accepted";
-    if (existing.status === "inferred" && edge.status === "rejected") existing.status = "rejected";
-    existing.lastReviewedAt = newestTimestamp(existing.lastReviewedAt, edge.lastReviewedAt);
+    const [source, target] = [existing.source, existing.target].sort(lexicalCompare);
+    const ids = [existing.id, edge.id].sort(lexicalCompare);
+    const labels = [existing.label, edge.label].sort((left, right) => lexicalCompare(left.toLowerCase(), right.toLowerCase()) || lexicalCompare(left, right));
+    const canonical = {
+      ...existing,
+      id: ids[0],
+      source,
+      target,
+      label: labels[0],
+      sources: mergeSourceIds(existing.sources, edge.sources),
+      evidence: mergeEvidence(existing.evidence, edge.evidence),
+      feedback: Math.max(-MAX_FEEDBACK_COUNT, Math.min(MAX_FEEDBACK_COUNT, existing.feedback + edge.feedback)),
+      confidence: Math.max(existing.confidence, edge.confidence),
+      status: existing.status === "accepted" || edge.status === "accepted"
+        ? "accepted"
+        : existing.status === "rejected" || edge.status === "rejected"
+          ? "rejected"
+          : "inferred",
+      lastReviewedAt: newestTimestamp(existing.lastReviewedAt, edge.lastReviewedAt)
+    };
+    const aliases = edgeIdAliasKeys.get(key) || new Set();
+    [existing.id, edge.id].forEach((id) => aliases.add(id));
+    edgeIdAliasKeys.set(key, aliases);
+    edgesByKey.set(key, canonical);
   });
   graph.edges = makeUniqueEdgeIds([...edgesByKey.values()]);
   graph.integrity.ambiguousEdgeIds = [...ambiguousEdgeIds].slice(0, MAX_AMBIGUOUS_EDGE_IDS);
+  if (Object.values(dropped).some((count) => count > 0)) graph.integrity.dropped = dropped;
   graph.revisions = asBoundedArray(value.revisions, MAX_GRAPH_REVISIONS).filter((revision) => revision && typeof revision === "object").map((revision, index) => ({
     id: normalizeId(revision.id) || `rev-${graph.version}-${index}`,
     version: Number.isSafeInteger(revision.version) && revision.version >= 0 ? revision.version : 0,
@@ -684,12 +1005,24 @@ export function normalizeGraph(value) {
     edges: Number.isInteger(revision.edges) ? Math.max(0, Math.min(MAX_GRAPH_EDGES, revision.edges)) : graph.edges.length
   }));
   graph.learning = normalizeLearning(value.learning);
+  const edgeIdAliases = new Map();
+  const canonicalEdgesByKey = new Map(graph.edges.map((edge) => [relationSemanticKey(edge.source, edge.target, edge.label), edge]));
+  edgeIdAliasKeys.forEach((ids, key) => {
+    const canonical = canonicalEdgesByKey.get(key);
+    if (!canonical) return;
+    ids.forEach((id) => {
+      edgeIdAliases.set(id, canonical);
+    });
+  });
   if (edgeIdAliases.size) {
     graph.learning = normalizeLearning({
       examples: graph.learning.examples.map((example) => (
-        example.kind === "relation" && edgeIdAliases.has(example.id)
+        example.kind === "relation"
           ? (() => {
-            const canonical = edgeIdAliases.get(example.id);
+            const canonical = !ambiguousEdgeIds.has(example.id)
+              ? edgeIdAliases.get(example.id)
+              : canonicalEdgesByKey.get(relationSemanticKey(example.source, example.target, example.label));
+            if (!canonical) return example;
             return {
               ...example,
               id: canonical.id,
@@ -702,6 +1035,23 @@ export function normalizeGraph(value) {
           })()
           : example
       ))
+    });
+  } else if (ambiguousEdgeIds.size) {
+    graph.learning = normalizeLearning({
+      examples: graph.learning.examples.map((example) => {
+        if (example.kind !== "relation" || !ambiguousEdgeIds.has(example.id)) return example;
+        const canonical = canonicalEdgesByKey.get(relationSemanticKey(example.source, example.target, example.label));
+        if (!canonical) return example;
+        return {
+          ...example,
+          id: canonical.id,
+          source: canonical.source,
+          sourceLabel: graph.nodes.find((node) => node.id === canonical.source)?.label || canonical.source,
+          target: canonical.target,
+          targetLabel: graph.nodes.find((node) => node.id === canonical.target)?.label || canonical.target,
+          label: canonical.label
+        };
+      })
     });
   }
   if (wasMigrated) {
@@ -732,7 +1082,7 @@ export function normalizeGraph(value) {
 
 const cleanPhrase = (value) => value.replace(/^#+\s*/, "").replace(/[`"'“”()[\]{}]/g, "").replace(/\s+/g, " ").trim().replace(/^(the|a|an)\s+/i, "").replace(/[.,;:!?]+$/, "");
 const wordSegmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
-  ? new Intl.Segmenter(undefined, { granularity: "word" })
+  ? new Intl.Segmenter("und", { granularity: "word" })
   : null;
 const wordsIn = (value) => {
   const normalized = value.normalize("NFKC");
@@ -819,11 +1169,12 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
     .split(/(?<=[.!?])\s+/)
     .map((item) => item.trim())
     .filter((item) => item.length > 25);
+  const isHeadingUnit = (raw) => /^#{1,3}\s+/.test(raw);
   const punctuatedUnits = [
-    ...splitPunctuated(markdownLines.filter(({ raw }) => !isMarkdownUnit(raw)).map(({ raw }) => raw).join(" ")),
+    ...splitPunctuated(markdownLines.filter(({ raw }) => !isMarkdownUnit(raw) && !isHeadingUnit(raw)).map(({ raw }) => raw).join(" ")),
     ...markdownLines.filter(({ raw }) => isMarkdownUnit(raw)).flatMap(({ text }) => splitPunctuated(text))
   ];
-  const markdownLineUnits = markdownLines.filter(({ text }) => text.length > 25).map(({ text }) => text);
+  const markdownLineUnits = markdownLines.filter(({ raw, text }) => text.length > 25 && !isHeadingUnit(raw)).map(({ text }) => text);
   const supplementalLineUnits = punctuatedUnits.length
     ? markdownLines.filter(({ raw, text }) => text.length > 25 && isMarkdownUnit(raw)).map(({ text }) => text)
     : markdownLineUnits;
@@ -842,15 +1193,18 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
     const hint = hints.concepts.get(rawId);
     const id = hint?.id || rawId;
     if (rejectedConcepts.has(id) || hint?.status === "rejected") return;
-    const existing = candidates.get(id) || { id, label: hint?.label || label, kind, mentions: 0, evidence: [] };
-    existing.mentions = Math.min(MAX_NODE_MENTIONS, existing.mentions + 1);
-    if (sentence && !existing.evidence.includes(sentence)) existing.evidence.push(sentence);
-    if (kind === "heading" || kind === "quoted") existing.kind = kind;
+    const existing = candidates.get(id);
+    const candidateLimit = kind === "term" ? MAX_EXTRACTION_TERM_CANDIDATES : MAX_EXTRACTION_CANDIDATES;
+    if (!existing && candidates.size >= candidateLimit) return;
+    const candidate = existing || { id, label: hint?.label || label, kind, mentions: 0, evidence: [] };
+    candidate.mentions = Math.min(MAX_NODE_MENTIONS, candidate.mentions + 1);
+    if (sentence && candidate.evidence.length < 8 && !candidate.evidence.includes(sentence)) candidate.evidence.push(sentence);
+    if (kind === "heading" || kind === "quoted") candidate.kind = kind;
     if (hint?.status === "accepted") {
-      existing.feedback = "accepted";
-      existing.aliases = [...new Set([...(existing.aliases || []), ...hint.aliases, label].filter((item) => item !== existing.label))].slice(0, 20);
+      candidate.feedback = "accepted";
+      candidate.aliases = [...new Set([...(candidate.aliases || []), ...hint.aliases, label].filter((item) => item !== candidate.label))].slice(0, 20);
     }
-    candidates.set(id, existing);
+    candidates.set(id, candidate);
   };
   const searchableText = ` ${boundedText.toLowerCase().normalize("NFKC").replace(/[^\p{Letter}\p{Number}]+/gu, " ").replace(/\s+/g, " ")} `;
   [...hints.concepts.values()]
@@ -874,10 +1228,63 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
   sentences.forEach((sentence) => {
     (sentence.match(/\b[A-Z][a-zA-Z0-9-]*(?:\s+[A-Z][a-zA-Z0-9-]*){0,3}\b/g) || []).forEach((term) => addCandidate(term, "phrase", sentence));
     wordsIn(sentence).forEach((word) => addCandidate(word, "term", sentence));
+    const phraseWords = [...sentence.normalize("NFKC").matchAll(/\p{Letter}[\p{Letter}\p{Number}_-]*/gu)]
+      .map((match) => match[0]);
+    let phraseCount = 0;
+    for (let index = 0; index < phraseWords.length - 1 && phraseCount < MAX_PHRASE_CANDIDATES_PER_UNIT; index += 1) {
+      const left = phraseWords[index];
+      const right = phraseWords[index + 1];
+      const sentenceInitialCapital = index === 0 && left !== left.toLowerCase();
+      if (
+        left.length < 3
+        || right.length < 3
+        || (left !== left.toLowerCase() && !sentenceInitialCapital)
+        || right !== right.toLowerCase()
+        || stopWords.has(left.toLowerCase())
+        || stopWords.has(right.toLowerCase())
+      ) continue;
+      addCandidate(`${left} ${right}`, "phrase", sentence);
+      phraseCount += 1;
+    }
   });
   const allCandidates = [...candidates.values()];
-  const meaningfulCandidates = allCandidates.filter((item) => item.kind !== "term" || item.mentions > 1 || item.label.length >= 8);
-  const ranked = (meaningfulCandidates.length >= 4 ? meaningfulCandidates : allCandidates).sort((a, b) => {
+  const reviewedEndpointKeys = new Set(
+    hints.relations
+      .filter((hint) => hint.status === "accepted")
+      .flatMap((hint) => [hint.source, hint.target, hint.sourceLabel, hint.targetLabel])
+      .filter(Boolean)
+      .map((value) => slugify(value))
+  );
+  // A one-off lowercase token is usually context vocabulary, not a durable
+  // concept. Keep it only when the document is too sparse to produce a useful
+  // graph; repeated terms, phrases, headings, quoted code, and reviewed
+  // feedback endpoints remain eligible for the normal ranked representation.
+  const meaningfulCandidates = allCandidates.filter((item) => (
+    item.kind !== "term"
+    || item.mentions > 1
+    || reviewedEndpointKeys.has(item.id)
+    || reviewedEndpointKeys.has(slugify(item.label))
+  ));
+  const phrasesByPrefix = new Map();
+  meaningfulCandidates
+    .filter((item) => item.label.includes(" "))
+    .forEach((item) => {
+      const prefix = item.label.toLowerCase().split(/\s+/, 1)[0];
+      const phrases = phrasesByPrefix.get(prefix) || [];
+      phrases.push(item);
+      phrasesByPrefix.set(prefix, phrases);
+    });
+  const rankedCandidates = meaningfulCandidates.filter((item) => {
+    if (item.kind === "heading" || item.kind === "quoted" || item.kind === "feedback" || item.label.includes(" ")) return true;
+    if (reviewedEndpointKeys.has(item.id) || reviewedEndpointKeys.has(slugify(item.label))) return true;
+    return !(phrasesByPrefix.get(item.label.toLowerCase()) || []).some((other) => (
+      other !== item
+      && other.label.includes(" ")
+      && other.evidence.length >= item.evidence.length
+      && item.evidence.every((evidence) => other.evidence.includes(evidence))
+    ));
+  });
+  const ranked = (rankedCandidates.length ? rankedCandidates : meaningfulCandidates.length ? meaningfulCandidates : allCandidates).sort((a, b) => {
     const kindScore = (item) => item.kind === "heading" ? 10 : item.kind === "quoted" ? 7 : item.label.includes(" ") ? 4 : 0;
     return (b.mentions * 3 + kindScore(b)) - (a.mentions * 3 + kindScore(a));
   }).slice(0, 18);
@@ -897,6 +1304,7 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
     updatedAt: new Date().toISOString()
   }));
   const edges = [];
+  const relationVerbPattern = "is|are|uses|enables|requires|contains|depends on|allows|supports|creates|gives|removes|means|improves|preserves|reduces|increases|measures|catches|guides|models|mixes|connects|organizes|remains";
   const matchesHintEndpoint = (hint, item, endpoint) => {
     const labelKey = endpoint === "source" ? "sourceLabel" : "targetLabel";
     return hint[endpoint] === item.id
@@ -912,13 +1320,55 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
       .filter((entry, index, entries) => index === entries.findIndex((candidate) => candidate.start === entry.start))
       .slice(0, 5)
       .map((entry) => entry.item);
+    const presentPositions = present.map((item) => ({
+      item,
+      start: lowerSentence.indexOf(item.label.toLowerCase())
+    }));
+    const addExplicitRelation = (source, target, label) => {
+      if (!source || !target || source.id === target.id) return;
+      const relationHints = hints.relations.filter((hint) => (
+        (matchesHintEndpoint(hint, source, "source") && matchesHintEndpoint(hint, target, "target"))
+        || (matchesHintEndpoint(hint, source, "target") && matchesHintEndpoint(hint, target, "source"))
+      ));
+      if (relationHints.some((hint) => hint.status === "rejected")) return;
+      const acceptedRelation = relationHints.find((hint) => hint.status === "accepted");
+      const resolvedLabel = acceptedRelation?.label || label;
+      edges.push({
+        source: source.id,
+        target: target.id,
+        label: resolvedLabel,
+        id: makeEdgeId(source.id, target.id, resolvedLabel),
+        confidence: Math.min(.96, .56 + Math.min(.35, (source.mentions + target.mentions) * .04) + (acceptedRelation ? .14 : 0)),
+        feedback: 0,
+        evidence: [{ text: sentence, sources: [sourceId] }],
+        sources: [sourceId],
+        status: "inferred"
+      });
+    };
+    let previousExplicitRelation = null;
+    for (const match of lowerSentence.matchAll(new RegExp(`\\b(${relationVerbPattern})\\b`, "gi"))) {
+      const verbStart = match.index ?? -1;
+      const verbEnd = verbStart + match[0].length;
+      const textSincePreviousVerb = previousExplicitRelation
+        ? lowerSentence.slice(previousExplicitRelation.verbEnd, verbStart)
+        : "";
+      const sharedSubject = previousExplicitRelation?.source
+        && /\b(?:and|but)\s*$/i.test(textSincePreviousVerb);
+      const source = sharedSubject
+        ? previousExplicitRelation.source
+        : presentPositions.filter(({ start }) => start >= 0 && start < verbStart).at(-1)?.item;
+      const target = presentPositions.find(({ start }) => start >= verbEnd)?.item;
+      addExplicitRelation(source, target, match[1].toLowerCase());
+      previousExplicitRelation = { source, verbEnd };
+    }
     for (let index = 0; index < present.length - 1; index += 1) {
       const left = present[index];
       const right = present[index + 1];
       const leftEnd = lowerSentence.indexOf(left.label.toLowerCase()) + left.label.length;
       const rightStart = lowerSentence.indexOf(right.label.toLowerCase(), leftEnd);
       const between = rightStart >= leftEnd ? sentence.slice(leftEnd, rightStart) : "";
-      const relationMatch = between.match(/\b(is|are|uses|enables|requires|contains|depends on|allows|supports|creates|gives|removes|means)\b/i);
+      const relationMatch = between.match(new RegExp(`\\b(${relationVerbPattern})\\b`, "i"));
+      if (relationMatch && /\b(and|while|but)\b/i.test(between)) continue;
       const relationHints = hints.relations.filter((hint) => (
         (matchesHintEndpoint(hint, left, "source") && matchesHintEndpoint(hint, right, "target"))
         || (matchesHintEndpoint(hint, left, "target") && matchesHintEndpoint(hint, right, "source"))
@@ -988,7 +1438,15 @@ export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
       nodes: [],
       edges: []
     }).source.id;
-    if (graph.documents.some((document) => document.id === repairedSourceId)) repairedSourceId = makeId("doc");
+    if (graph.documents.some((document) => document.id === repairedSourceId)) {
+      const collisionDigest = identityDigest(`${extraction.source.id}\u0000${extraction.source.fingerprint}\u0000${extraction.source.text}`);
+      const collisionBase = repairedSourceId;
+      let collisionIndex = 1;
+      do {
+        repairedSourceId = appendIdSuffix(collisionBase, `${collisionDigest}-${collisionIndex}`);
+        collisionIndex += 1;
+      } while (graph.documents.some((document) => document.id === repairedSourceId));
+    }
     const rebindSources = (sources) => [...new Set(sources.map((sourceId) => sourceId === extraction.source.id ? repairedSourceId : sourceId))];
     extraction = {
       ...extraction,
@@ -1031,7 +1489,7 @@ export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
   const knownNodeAliases = new Map();
   const ambiguousNodeAliases = new Set();
   const indexNodeAlias = (label, node) => {
-    const key = slugify(label);
+    const key = canonicalLabelKey(label);
     if (!key || ambiguousNodeAliases.has(key)) return;
     const previous = knownNodeAliases.get(key);
     if (previous && previous.id !== node.id) {
@@ -1046,14 +1504,18 @@ export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
   });
   const incomingToKnown = new Map();
   extraction.nodes.forEach((incoming) => {
-    const existing = knownNodes.get(incoming.id) || knownNodeAliases.get(incoming.id);
+    const existing = knownNodes.get(incoming.id)
+      || knownNodeAliases.get(incoming.id)
+      || knownNodeAliases.get(canonicalLabelKey(incoming.label));
     incomingToKnown.set(incoming.id, existing?.id || incoming.id);
     if (existing) {
       existing.mentions = Math.min(MAX_NODE_MENTIONS, existing.mentions + incoming.mentions);
       existing.confidence = existing.status === "rejected"
         ? Math.max(.05, existing.confidence + Math.min(0, existing.feedback) * .02)
         : Math.min(.99, (existing.confidence + incoming.confidence) / 2 + .03 + Math.max(0, existing.feedback) * .015);
-      existing.aliases = [...new Set([...(existing.aliases || []), ...(incoming.aliases || [])])].slice(0, 20);
+      existing.aliases = [...new Set([...(existing.aliases || []), ...(incoming.aliases || [])])]
+        .sort(lexicalCompare)
+        .slice(0, 20);
       existing.sources = mergeSourceIds(existing.sources, incoming.sources);
       existing.evidence = mergeEvidence(existing.evidence, incoming.evidence);
       existing.lastReviewedAt = newestTimestamp(existing.lastReviewedAt, incoming.lastReviewedAt);
@@ -1333,7 +1795,10 @@ export function mergeConcepts(value, sourceId, targetId) {
     ...(target.aliases || []),
     source.label,
     ...(source.aliases || [])
-  ])].filter((alias) => slugify(alias) !== slugify(target.label)).slice(0, 20);
+  ])]
+    .filter((alias) => slugify(alias) !== slugify(target.label))
+    .sort(lexicalCompare)
+    .slice(0, 20);
   target.sources = mergeSourceIds(target.sources, source.sources);
   target.evidence = mergeEvidence(target.evidence, source.evidence);
   target.mentions = Math.min(MAX_NODE_MENTIONS, target.mentions + source.mentions);
@@ -1514,6 +1979,13 @@ export function applyFeedbackDataset(value, examples) {
   const preferredExamples = new Map();
   const statusesByKey = new Map();
   const conflictingKeys = new Set();
+  const portableFeedbackKey = (example) => example.kind === "concept"
+    ? `concept|${slugify(example.label) || example.id}`
+    : `relation|${relationSemanticKey(
+      slugify(example.sourceLabel || example.source),
+      slugify(example.targetLabel || example.target),
+      example.label
+    )}`;
   let remembered = new Map(graph.learning.examples.map((example) => [learningExampleKey(example), example]));
   const initialLearning = new Map(remembered);
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -1594,14 +2066,15 @@ export function applyFeedbackDataset(value, examples) {
       item
     };
   };
-  asArray(examples).slice(0, 15000).forEach((example) => {
+  asArray(examples).slice(0, MAX_FEEDBACK_FINGERPRINT_EXAMPLES).forEach((example) => {
     const normalizedExample = normalizeLearningExample(example);
     if (!normalizedExample) {
       skipped += 1;
       return;
     }
-    const canonical = canonicalizeFeedbackExample(normalizedExample).example;
-    const memoryKey = learningExampleKey(canonical);
+    const canonicalized = canonicalizeFeedbackExample(normalizedExample);
+    const canonical = canonicalized.example;
+    const memoryKey = canonicalized.item ? learningExampleKey(canonical) : portableFeedbackKey(canonical);
     const existingStatus = statusesByKey.get(memoryKey);
     if (existingStatus && existingStatus !== canonical.status) conflictingKeys.add(memoryKey);
     statusesByKey.set(memoryKey, canonical.status);
@@ -1609,6 +2082,14 @@ export function applyFeedbackDataset(value, examples) {
     preferredExamples.set(memoryKey, preferred);
   });
   normalizedExamples.push(...preferredExamples.values());
+  normalizedExamples.sort((left, right) => {
+    const leftTime = left.lastReviewedAt ? Date.parse(left.lastReviewedAt) : Number.NaN;
+    const rightTime = right.lastReviewedAt ? Date.parse(right.lastReviewedAt) : Number.NaN;
+    if (Number.isNaN(leftTime) && !Number.isNaN(rightTime)) return -1;
+    if (!Number.isNaN(leftTime) && Number.isNaN(rightTime)) return 1;
+    if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+    return lexicalCompare(learningExampleTieBreak(left), learningExampleTieBreak(right));
+  });
   normalizedExamples.forEach((normalizedExample) => {
     if (!canAdvanceGraphVersion(graph)) return;
     const kind = normalizedExample.kind === "relation" ? "edge" : "node";
@@ -1648,7 +2129,7 @@ export function applyFeedbackDataset(value, examples) {
         status: item.status,
         lastReviewedAt: item.lastReviewedAt
       };
-    const preferredDecision = preferLearningExample(currentDecision, normalizedExample);
+    const preferredDecision = preferImportedDecision(currentDecision, normalizedExample);
     const relationEndpointsMatch = kind === "edge" && (
       (item.source === normalizedExample.source && item.target === normalizedExample.target)
       || (item.source === normalizedExample.target && item.target === normalizedExample.source)
@@ -1708,11 +2189,11 @@ export function applyFeedbackDataset(value, examples) {
   return { graph, updates, learned, skipped, conflicts: conflictingKeys.size, changed: updates > 0 || learned > 0 };
 }
 
-export function buildExtractorFeedback(value) {
+export function buildExtractorFeedback(value, { includeStale = true } = {}) {
   const graph = normalizeGraph(value);
   const nodeLabels = new Map(graph.nodes.map((node) => [node.id, node.label]));
   const concepts = graph.nodes
-      .filter((node) => node.status === "accepted" || node.status === "rejected")
+      .filter((node) => (node.status === "accepted" || node.status === "rejected") && includeGuidanceItem(node, includeStale))
       .map((node) => ({
         kind: "concept",
         id: node.id,
@@ -1720,9 +2201,10 @@ export function buildExtractorFeedback(value) {
         aliases: node.aliases || [],
         status: node.status,
         lastReviewedAt: node.lastReviewedAt || null
-      }));
+      }))
+      .sort((left, right) => lexicalCompare(`${left.id}\u0000${slugify(left.label)}`, `${right.id}\u0000${slugify(right.label)}`));
   const relations = graph.edges
-      .filter((edge) => edge.status === "accepted" || edge.status === "rejected")
+      .filter((edge) => (edge.status === "accepted" || edge.status === "rejected") && includeGuidanceItem(edge, includeStale))
       .map((edge) => ({
         kind: "relation",
         id: edge.id,
@@ -1733,7 +2215,11 @@ export function buildExtractorFeedback(value) {
         label: edge.label,
         status: edge.status,
         lastReviewedAt: edge.lastReviewedAt || null
-      }));
+      }))
+      .sort((left, right) => lexicalCompare(
+        `${relationSemanticKey(left.source, left.target, left.label)}\u0000${left.id}`,
+        `${relationSemanticKey(right.source, right.target, right.label)}\u0000${right.id}`
+      ));
   const feedback = [];
   const seen = new Set();
   const add = (example) => {
@@ -1747,12 +2233,18 @@ export function buildExtractorFeedback(value) {
     seen.add(key);
     feedback.push(example);
   };
-  graph.learning.examples.forEach(add);
+  graph.learning.examples
+    .filter((example) => includeGuidanceItem(example, includeStale))
+    .forEach(add);
   for (let index = 0; feedback.length < MAX_FEEDBACK_EXAMPLES && (index < concepts.length || index < relations.length); index += 1) {
     if (concepts[index]) add(concepts[index]);
     if (relations[index]) add(relations[index]);
   }
-  return feedback.map(({ lastReviewedAt, ...example }) => example);
+  return feedback.map((example) => {
+    const output = { ...example };
+    delete output.lastReviewedAt;
+    return output;
+  });
 }
 
 export function clearLearningMemory(value) {
@@ -1871,6 +2363,29 @@ export function inspectGraph(value) {
     return !Number.isNaN(timestamp) && Date.now() - timestamp < REVIEW_STALE_DAYS * 86400000;
   }).length;
   const staleLearningExamples = graph.learning.examples.filter((example) => isStaleLearningExample(example)).length;
+  const feedbackContext = feedbackContextStatsForGraph(graph, { includeStale: false });
+  const truncation = graph.integrity.truncated || {};
+  const dropped = graph.integrity.dropped || {};
+  const truncatedItems = [
+    truncation.documents,
+    truncation.nodes,
+    truncation.edges,
+    truncation.revisions,
+    truncation.learningExamples
+  ].reduce((total, count) => Math.min(
+    Number.MAX_SAFE_INTEGER,
+    total + (Number.isSafeInteger(count) && count > 0 ? count : 0)
+  ), 0);
+  const droppedItems = [
+    dropped.documents,
+    dropped.nodes,
+    dropped.edges,
+    dropped.revisions,
+    dropped.learningExamples
+  ].reduce((total, count) => Math.min(
+    Number.MAX_SAFE_INTEGER,
+    total + (Number.isSafeInteger(count) && count > 0 ? count : 0)
+  ), 0);
   const hasValidSource = (item) => item.sources.some((sourceId) => documentIds.has(sourceId) && !ambiguousSourceIds.has(sourceId));
   const evidenceHasValidSource = (item) => item.evidence.some((evidence) => evidence.sources.some((sourceId) => documentIds.has(sourceId) && !ambiguousSourceIds.has(sourceId)));
   const activeNodes = graph.nodes.filter((node) => node.status !== "rejected");
@@ -1894,7 +2409,7 @@ export function inspectGraph(value) {
     ...graph.edges.flatMap((edge) => edge.sources),
     ...evidenceRecords.flatMap((evidence) => evidence.sources)
   ].filter((sourceId) => ambiguousSourceIds.has(sourceId)).length;
-  const reviewCandidates = buildReviewQueue(graph, 15000);
+  const reviewCandidates = buildReviewQueue(graph, MAX_REVIEW_QUEUE_ITEMS);
   return {
     documents: graph.documents.length,
     nodes: graph.nodes.length,
@@ -1907,7 +2422,26 @@ export function inspectGraph(value) {
     reviewedEdges,
     reviewCandidates: reviewCandidates.length,
     staleReviewCandidates: reviewCandidates.filter((candidate) => candidate.stale).length,
+    newEvidenceReviewCandidates: reviewCandidates.filter((candidate) => candidate.newEvidence).length,
     learningExamples: graph.learning.examples.length,
+    feedbackContextAvailable: feedbackContext.available,
+    feedbackContextRetained: feedbackContext.retained,
+    feedbackContextTruncated: feedbackContext.truncated,
+    feedbackContextExcluded: feedbackContext.excluded,
+    truncated: truncatedItems > 0,
+    truncatedItems,
+    truncatedDocuments: truncation.documents || 0,
+    truncatedNodes: truncation.nodes || 0,
+    truncatedEdges: truncation.edges || 0,
+    truncatedRevisions: truncation.revisions || 0,
+    truncatedLearningExamples: truncation.learningExamples || 0,
+    dropped: droppedItems > 0,
+    droppedItems,
+    droppedDocuments: dropped.documents || 0,
+    droppedNodes: dropped.nodes || 0,
+    droppedEdges: dropped.edges || 0,
+    droppedRevisions: dropped.revisions || 0,
+    droppedLearningExamples: dropped.learningExamples || 0,
     staleLearningExamples,
     acceptedItems,
     rejectedItems,
@@ -1933,6 +2467,7 @@ export function inspectGraph(value) {
 
 function buildReviewQueue(graph, limit = 20) {
   const documentIds = new Set(graph.documents.map((document) => document.id));
+  const documentsById = new Map(graph.documents.map((document) => [document.id, document]));
   const ambiguousSourceIds = new Set(graph.integrity.ambiguousSourceIds);
   const hasValidSource = (item) => item.sources.some((sourceId) => documentIds.has(sourceId) && !ambiguousSourceIds.has(sourceId))
     || item.evidence.some((evidence) => evidence.sources.some((sourceId) => documentIds.has(sourceId) && !ambiguousSourceIds.has(sourceId)));
@@ -1944,6 +2479,19 @@ function buildReviewQueue(graph, limit = 20) {
   };
   const isStaleReview = (item) => item.status !== "inferred"
     && (reviewAgeDays(item) === null || reviewAgeDays(item) >= REVIEW_STALE_DAYS);
+  const hasNewEvidenceSinceReview = (item) => {
+    if (!item.lastReviewedAt) return false;
+    const reviewedAt = Date.parse(item.lastReviewedAt);
+    if (Number.isNaN(reviewedAt)) return false;
+    const sourceIds = new Set([
+      ...item.sources,
+      ...item.evidence.flatMap((evidence) => evidence.sources || [])
+    ]);
+    return [...sourceIds].some((sourceId) => {
+      const sourceAddedAt = Date.parse(documentsById.get(sourceId)?.addedAt || "");
+      return !Number.isNaN(sourceAddedAt) && sourceAddedAt > reviewedAt;
+    });
+  };
   const staleReason = (item) => {
     const age = reviewAgeDays(item);
     return age === null ? "review timestamp missing" : `review stale by ${age} day${age === 1 ? "" : "s"}`;
@@ -1973,24 +2521,26 @@ function buildReviewQueue(graph, limit = 20) {
       evidence: edge.evidence.length,
       supported: hasValidSource(edge)
     })),
-    ...graph.nodes.filter(isStaleReview).map((node) => ({
+    ...graph.nodes.filter((node) => node.status !== "inferred" && (isStaleReview(node) || hasNewEvidenceSinceReview(node))).map((node) => ({
       kind: "node",
       id: node.id,
       label: node.label,
       confidence: node.confidence,
       evidence: node.evidence.length,
       supported: hasValidSource(node),
-      stale: true,
+      stale: isStaleReview(node),
+      newEvidence: hasNewEvidenceSinceReview(node),
       staleReason: staleReason(node)
     })),
-    ...graph.edges.filter(isStaleReview).map((edge) => ({
+    ...graph.edges.filter((edge) => edge.status !== "inferred" && (isStaleReview(edge) || hasNewEvidenceSinceReview(edge))).map((edge) => ({
       kind: "edge",
       id: edge.id,
       label: edge.label,
       confidence: edge.confidence,
       evidence: edge.evidence.length,
       supported: hasValidSource(edge),
-      stale: true,
+      stale: isStaleReview(edge),
+      newEvidence: hasNewEvidenceSinceReview(edge),
       staleReason: staleReason(edge)
     })),
     ...graph.documents
@@ -2016,21 +2566,64 @@ function buildReviewQueue(graph, limit = 20) {
         : (1 - candidate.confidence) * 100
           + (candidate.evidence ? 0 : 25)
           + (candidate.supported ? 0 : 35)
-          + (candidate.stale ? 20 : 0)).toFixed(2)),
+          + (candidate.stale ? 20 : 0)
+          + (candidate.newEvidence ? 30 : 0)).toFixed(2)),
       reason: candidate.kind === "source"
         ? [
           candidate.sourceQuality === "unknown" ? "source quality unknown" : "",
           candidate.sourceReviewed ? "" : "source not reviewed",
           candidate.sourceReviewed && candidate.stale ? candidate.staleReason : ""
         ].filter(Boolean).join(" · ")
+        : candidate.newEvidence
+          ? `new evidence since review${candidate.stale ? ` · ${candidate.staleReason}` : ""}`
         : candidate.stale
           ? candidate.staleReason
           : describePriority(candidate)
     }))
-    .sort((left, right) => right.priority - left.priority || left.confidence - right.confidence || left.evidence - right.evidence || lexicalCompare(left.label, right.label))
-    .slice(0, Math.max(0, Math.min(Number(limit) || 0, 15000)));
+    .sort((left, right) => right.priority - left.priority
+      || left.confidence - right.confidence
+      || left.evidence - right.evidence
+      || lexicalCompare(left.label, right.label)
+      || lexicalCompare(left.kind, right.kind)
+      || lexicalCompare(left.id, right.id))
+    .slice(0, Math.max(0, Math.min(Number(limit) || 0, MAX_REVIEW_QUEUE_ITEMS)));
 }
 
 export function reviewQueue(value, limit = 20) {
   return buildReviewQueue(normalizeGraph(value), limit);
+}
+
+export function reviewQueueExport(value, limit = MAX_REVIEW_QUEUE_ITEMS) {
+  return reviewQueue(value, limit).map((candidate) => ({
+    kind: candidate.kind,
+    id: candidate.id,
+    label: candidate.label,
+    priority: candidate.priority,
+    confidence: candidate.confidence,
+    evidence: candidate.evidence,
+    supported: candidate.supported,
+    reason: candidate.reason,
+    ...(candidate.stale ? { stale: true } : {}),
+    ...(candidate.newEvidence ? { newEvidence: true } : {}),
+    ...(candidate.sourceQuality ? { sourceQuality: candidate.sourceQuality } : {}),
+    ...(candidate.sourceReviewed ? { sourceReviewed: true } : {})
+  }));
+}
+
+export function buildHealthReport(value, {
+  appVersion = "unknown",
+  inspectedAt = new Date().toISOString()
+} = {}) {
+  const graph = normalizeGraph(value);
+  const fallbackInspectionTime = new Date().toISOString();
+  return {
+    format: HEALTH_FORMAT,
+    graphSchema: GRAPH_SCHEMA,
+    graphVersion: graph.version,
+    graphFingerprint: fingerprintBackup(graph),
+    appVersion: typeof appVersion === "string" && appVersion.trim() ? appVersion.trim().slice(0, 64) : "unknown",
+    inspectedAt: asDateTime(inspectedAt, fallbackInspectionTime),
+    health: inspectGraph(graph),
+    reviewQueue: reviewQueueExport(graph, MAX_REVIEW_QUEUE_ITEMS)
+  };
 }

@@ -1,11 +1,84 @@
-import { advanceGraphVersion, GRAPH_SCHEMA, matchesGraphFingerprint, MAX_GRAPH_DOCUMENTS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_GRAPH_REVISIONS, MAX_GRAPH_VERSION, MAX_ID_CHARS, MAX_RELATION_LABEL_CHARS, MAX_TIMESTAMP_CHARS, normalizeGraph, normalizeSourceUri, rememberLearningItem, SOURCE_QUALITIES, slugify, syncLearningRelationLabels, VAULT_FORMAT } from "./graph-core.js";
+import { advanceGraphVersion, GRAPH_SCHEMA, matchesGraphFingerprint, MAX_GRAPH_DOCUMENTS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_GRAPH_REVISIONS, MAX_GRAPH_VERSION, MAX_ID_CHARS, MAX_RELATION_LABEL_CHARS, MAX_SOURCE_URI_CHARS, MAX_TIMESTAMP_CHARS, normalizeGraph, normalizeSourceUri, rememberLearningItem, SOURCE_QUALITIES, slugify, syncLearningRelationLabels, VAULT_FORMAT } from "./graph-core.js";
 import { JSONLD_FORMAT, matchesJsonLdProjection } from "./jsonld-projection.js";
 
 const STATUSES = new Set(["inferred", "accepted", "rejected"]);
 const GRAPH_FINGERPRINT_PATTERN = /^fnv64-[0-9a-f]{16}-[0-9]+$/;
 export const MAX_ZIP_FILES = MAX_GRAPH_DOCUMENTS + MAX_GRAPH_NODES + MAX_GRAPH_EDGES + 100;
 export const MAX_ZIP_BYTES = 50 * 1024 * 1024;
+export const MAX_VAULT_MANIFEST_CHARS = 64 * 1024;
 export const MAX_FEEDBACK_NOTE_CHARS = 1 * 1024 * 1024;
+const MAX_DIRECT_FEEDBACK_ITEMS = MAX_ZIP_FILES;
+
+const boundedFeedbackText = (value, limit) => typeof value === "string" ? value.trim().slice(0, limit) : "";
+const fitsFeedbackText = (value, limit) => value === undefined || value === null
+  || (typeof value === "string" && value.length <= limit);
+const boundedFeedbackAliases = (value) => Array.isArray(value)
+  ? value.slice(0, 20).filter((alias) => typeof alias === "string").map((alias) => alias.replace(/\s+/g, " ").trim().slice(0, 120)).filter(Boolean)
+  : [];
+function normalizeFeedbackTimestamp(value, present) {
+  if (!present) return { valid: true, value: null };
+  if (value === "") return { valid: true, value: null };
+  if (typeof value !== "string" || value.length > MAX_TIMESTAMP_CHARS || Number.isNaN(Date.parse(value))) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: new Date(Date.parse(value)).toISOString() };
+}
+function boundFeedbackMutation(value) {
+  if (!value || typeof value !== "object" || !["concept", "relation", "source"].includes(value.type)) return null;
+  if (!fitsFeedbackText(value.id, MAX_ID_CHARS)) return null;
+  if (value.type === "source" && (
+    !fitsFeedbackText(value.title, 200)
+    || !fitsFeedbackText(value.uri, MAX_SOURCE_URI_CHARS)
+    || !fitsFeedbackText(value.fingerprint, MAX_ID_CHARS)
+  )) return null;
+  if (value.type !== "source" && (
+    !fitsFeedbackText(value.label, value.type === "relation" ? MAX_RELATION_LABEL_CHARS : 120)
+    || (value.type === "relation" && (!fitsFeedbackText(value.source, MAX_ID_CHARS) || !fitsFeedbackText(value.target, MAX_ID_CHARS)))
+  )) return null;
+  if (value.aliases !== undefined && (
+    !Array.isArray(value.aliases)
+    || value.aliases.length > 20
+    || value.aliases.some((alias) => typeof alias !== "string" || alias.replace(/\s+/g, " ").trim().length > 120)
+  )) return null;
+  const bounded = {
+    type: value.type,
+    id: boundedFeedbackText(value.id, MAX_ID_CHARS)
+  };
+  if (!bounded.id) return null;
+  if (value.type === "source") {
+    const hasUri = value.hasUri === true || (value.hasUri === undefined && Object.hasOwn(value, "uri"));
+    const hasLastReviewedAt = value.hasLastReviewedAt === true || (value.hasLastReviewedAt === undefined && Object.hasOwn(value, "lastReviewedAt"));
+    const reviewedAt = normalizeFeedbackTimestamp(value.lastReviewedAt, hasLastReviewedAt);
+    if (!reviewedAt.valid) return null;
+    const rawUri = value.uri;
+    const normalizedUri = typeof rawUri === "string" && rawUri.trim() ? normalizeSourceUri(rawUri) : null;
+    if (hasUri && rawUri !== undefined && rawUri !== null
+      && (typeof rawUri !== "string" || (rawUri.trim() && !normalizedUri))) return null;
+    return {
+      ...bounded,
+      title: boundedFeedbackText(value.title, 200),
+      uri: normalizedUri,
+      fingerprint: boundedFeedbackText(value.fingerprint, MAX_ID_CHARS) || undefined,
+      quality: SOURCE_QUALITIES.has(value.quality) ? value.quality : null,
+      lastReviewedAt: reviewedAt.value,
+      hasUri,
+      hasLastReviewedAt
+    };
+  }
+  const hasLastReviewedAt = value.hasLastReviewedAt === true || (value.hasLastReviewedAt === undefined && Object.hasOwn(value, "lastReviewedAt"));
+  const reviewedAt = normalizeFeedbackTimestamp(value.lastReviewedAt, hasLastReviewedAt);
+  if (!reviewedAt.valid) return null;
+  return {
+    ...bounded,
+    label: boundedFeedbackText(value.label, 120),
+    ...(value.type === "relation" && Object.hasOwn(value, "source") ? { source: boundedFeedbackText(value.source, MAX_ID_CHARS) } : {}),
+    ...(value.type === "relation" && Object.hasOwn(value, "target") ? { target: boundedFeedbackText(value.target, MAX_ID_CHARS) } : {}),
+    aliases: boundedFeedbackAliases(value.aliases),
+    status: STATUSES.has(value.status) ? value.status : null,
+    lastReviewedAt: reviewedAt.value,
+    hasLastReviewedAt
+  };
+}
 
 function parseValue(value) {
   const trimmed = value.trim();
@@ -42,7 +115,11 @@ export function parseObsidianFeedback(markdown) {
   if (duplicateField) return null;
   if (!["concept", "relation", "source"].includes(fields.type) || typeof fields.id !== "string" || !fields.id.trim() || fields.id.trim().length > MAX_ID_CHARS) return null;
   if (Object.hasOwn(fields, "status") && !STATUSES.has(fields.status)) return null;
-  if (Object.hasOwn(fields, "aliases") && (!Array.isArray(fields.aliases) || fields.aliases.some((alias) => typeof alias !== "string"))) return null;
+  if (Object.hasOwn(fields, "aliases") && (
+    !Array.isArray(fields.aliases)
+    || fields.aliases.length > 20
+    || fields.aliases.some((alias) => typeof alias !== "string" || alias.replace(/\s+/g, " ").trim().length > 120)
+  )) return null;
   const hasProjectionMetadata = Object.hasOwn(fields, "graph_version") || Object.hasOwn(fields, "graph_fingerprint");
   const projectionMetadataValid = !hasProjectionMetadata || (
     Number.isSafeInteger(fields.graph_version)
@@ -57,6 +134,7 @@ export function parseObsidianFeedback(markdown) {
     projectionMetadataError: projectionMetadataValid ? null : "Projection metadata is invalid."
   };
   const heading = markdown.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim();
+  if (typeof heading === "string" && heading.length > 200) return null;
   const hasReviewDate = Object.hasOwn(fields, "last_reviewed");
   if (hasReviewDate && (
     typeof fields.last_reviewed !== "string"
@@ -66,7 +144,11 @@ export function parseObsidianFeedback(markdown) {
     const hasUri = Object.hasOwn(fields, "uri");
     const hasQuality = Object.hasOwn(fields, "quality");
     const hasFingerprint = Object.hasOwn(fields, "fingerprint");
-    if (hasUri && (typeof fields.uri !== "string" || (fields.uri.trim() && !normalizeSourceUri(fields.uri)))) return null;
+    if (hasUri && (
+      typeof fields.uri !== "string"
+      || fields.uri.length > MAX_SOURCE_URI_CHARS
+      || (fields.uri.trim() && !normalizeSourceUri(fields.uri))
+    )) return null;
     if (hasQuality && !SOURCE_QUALITIES.has(fields.quality)) return null;
     if (hasFingerprint && (typeof fields.fingerprint !== "string" || !fields.fingerprint.trim() || fields.fingerprint.length > MAX_ID_CHARS)) return null;
     return {
@@ -75,7 +157,7 @@ export function parseObsidianFeedback(markdown) {
       id: fields.id.trim(),
       fingerprint: hasFingerprint ? fields.fingerprint.trim() : undefined,
       hasUri,
-      title: typeof heading === "string" && heading ? heading.slice(0, 200) : undefined,
+      title: typeof heading === "string" && heading ? heading : undefined,
       uri: normalizeSourceUri(fields.uri),
       quality: SOURCE_QUALITIES.has(fields.quality) ? fields.quality : null,
       lastReviewedAt: typeof fields.last_reviewed === "string" && fields.last_reviewed.length <= MAX_TIMESTAMP_CHARS && !Number.isNaN(Date.parse(fields.last_reviewed)) ? new Date(Date.parse(fields.last_reviewed)).toISOString() : null,
@@ -87,11 +169,13 @@ export function parseObsidianFeedback(markdown) {
   if (fields.type === "relation" && hasRelationEndpoints
     && (typeof fields.source !== "string" || !fields.source.trim() || typeof fields.target !== "string" || !fields.target.trim())) return null;
   const aliases = Array.isArray(fields.aliases)
-    ? fields.aliases.filter((alias) => typeof alias === "string").map((alias) => alias.replace(/\s+/g, " ").trim().slice(0, 120)).filter(Boolean).slice(0, 20)
+    ? fields.aliases.map((alias) => alias.replace(/\s+/g, " ").trim()).filter(Boolean)
     : [];
   const label = fields.type === "concept"
     ? (heading || fields.label)
-    : (typeof fields.label === "string" && fields.label.trim() ? fields.label.trim().slice(0, MAX_RELATION_LABEL_CHARS) : heading?.slice(0, MAX_RELATION_LABEL_CHARS));
+    : (typeof fields.label === "string" && fields.label.trim() ? fields.label.trim() : heading);
+  const labelLimit = fields.type === "concept" ? 120 : MAX_RELATION_LABEL_CHARS;
+  if (typeof label === "string" && label.trim().length > labelLimit) return null;
   const parsedLastReviewedAt = typeof fields.last_reviewed === "string"
     && fields.last_reviewed.length <= MAX_TIMESTAMP_CHARS
     && !Number.isNaN(Date.parse(fields.last_reviewed))
@@ -101,7 +185,7 @@ export function parseObsidianFeedback(markdown) {
     ...projectionMetadata,
     type: fields.type,
     id: fields.id.trim(),
-    label: typeof label === "string" ? label.trim().slice(0, 120) : undefined,
+    label: typeof label === "string" ? label.trim() : undefined,
     ...(fields.type === "relation" && hasRelationEndpoints ? { source: fields.source.trim(), target: fields.target.trim() } : {}),
     aliases,
     status: STATUSES.has(fields.status) ? fields.status : null,
@@ -116,22 +200,22 @@ function feedbackMutationFingerprint(feedback) {
       || (feedback.hasUri === undefined && Object.hasOwn(feedback, "uri"));
     return JSON.stringify({
       type: feedback.type,
-      id: feedback.id,
-      title: feedback.title || null,
+      id: boundedFeedbackText(feedback.id, MAX_ID_CHARS),
+      title: boundedFeedbackText(feedback.title, 200) || null,
       hasUri,
-      uri: feedback.uri || null,
-      fingerprint: feedback.fingerprint || null,
+      uri: boundedFeedbackText(feedback.uri, MAX_ID_CHARS) || null,
+      fingerprint: boundedFeedbackText(feedback.fingerprint, MAX_ID_CHARS) || null,
       quality: feedback.quality || null,
       lastReviewedAt: feedback.hasLastReviewedAt ? feedback.lastReviewedAt : null
     });
   }
   return JSON.stringify({
     type: feedback.type,
-    id: feedback.id,
-    label: feedback.label || null,
-    source: feedback.source || null,
-    target: feedback.target || null,
-    aliases: [...(feedback.aliases || [])].sort(),
+    id: boundedFeedbackText(feedback.id, MAX_ID_CHARS),
+    label: boundedFeedbackText(feedback.label, 120) || null,
+    source: boundedFeedbackText(feedback.source, MAX_ID_CHARS) || null,
+    target: boundedFeedbackText(feedback.target, MAX_ID_CHARS) || null,
+    aliases: boundedFeedbackAliases(feedback.aliases).sort(),
     status: feedback.status || null,
     lastReviewedAt: feedback.hasLastReviewedAt ? feedback.lastReviewedAt : null
   });
@@ -142,12 +226,17 @@ export function applyObsidianFeedback(value, feedbacks) {
   if (!Number.isSafeInteger(graph.version) || graph.version >= MAX_GRAPH_VERSION) {
     return { graph, changed: false, updates: 0, skipped: 0, conflicts: 0, limited: "version" };
   }
+  const rawFeedbacks = Array.isArray(feedbacks) ? feedbacks : [];
+  if (rawFeedbacks.length > MAX_DIRECT_FEEDBACK_ITEMS) {
+    return { graph, changed: false, updates: 0, skipped: 0, conflicts: 0, limited: "feedback-items" };
+  }
   let changed = 0;
   let memoryChanged = false;
   let skipped = 0;
   const groupedFeedback = new Map();
-  for (const feedback of Array.isArray(feedbacks) ? feedbacks : []) {
-    if (!feedback || !["concept", "relation", "source"].includes(feedback.type)) continue;
+  for (const rawFeedback of rawFeedbacks) {
+    const feedback = boundFeedbackMutation(rawFeedback);
+    if (!feedback) continue;
     const key = `${feedback.type}|${feedback.id}`;
     const group = groupedFeedback.get(key) || { fingerprints: new Set(), feedback: null };
     group.fingerprints.add(feedbackMutationFingerprint(feedback));
@@ -221,8 +310,9 @@ export function applyObsidianFeedback(value, feedbacks) {
         humanCorrection = true;
       }
     }
-    if (feedback.type === "concept" && feedback.aliases.length) {
-      const aliases = [...new Set([...(item.aliases || []), ...feedback.aliases])].slice(0, 20);
+    const feedbackAliases = boundedFeedbackAliases(feedback.aliases);
+    if (feedback.type === "concept" && feedbackAliases.length) {
+      const aliases = [...new Set([...(item.aliases || []), ...feedbackAliases])].slice(0, 20);
       if (aliases.length !== (item.aliases || []).length || aliases.some((alias, index) => alias !== item.aliases[index])) {
         item.aliases = aliases;
         changed += 1;
@@ -371,24 +461,28 @@ export function parseObsidianVault(input) {
   let manifest = null;
   let manifestError = null;
   if (manifestFile) {
-    try {
-      const candidate = JSON.parse(manifestFile.text);
-      const valid = candidate
-        && candidate.format === VAULT_FORMAT
-        && candidate.graphSchema === GRAPH_SCHEMA
-        && Number.isSafeInteger(candidate.graphVersion)
-        && candidate.graphVersion >= 0
-        && typeof candidate.graphFingerprint === "string"
-        && candidate.graphFingerprint.length <= 128
-        && /^fnv64-[0-9a-f]{16}-[0-9]+$/.test(candidate.graphFingerprint)
-        && typeof candidate.redacted === "boolean"
-        && typeof candidate.generatedAt === "string"
-        && candidate.generatedAt.length <= MAX_TIMESTAMP_CHARS
-        && !Number.isNaN(Date.parse(candidate.generatedAt));
-      if (valid) manifest = candidate;
-      else manifestError = "Vault manifest metadata is invalid.";
-    } catch {
-      manifestError = "Vault manifest JSON could not be parsed.";
+    if (manifestFile.text.length > MAX_VAULT_MANIFEST_CHARS) {
+      manifestError = "Vault manifest metadata exceeds the safety limit.";
+    } else {
+      try {
+        const candidate = JSON.parse(manifestFile.text);
+        const valid = candidate
+          && candidate.format === VAULT_FORMAT
+          && candidate.graphSchema === GRAPH_SCHEMA
+          && Number.isSafeInteger(candidate.graphVersion)
+          && candidate.graphVersion >= 0
+          && typeof candidate.graphFingerprint === "string"
+          && candidate.graphFingerprint.length <= 128
+          && /^fnv64-[0-9a-f]{16}-[0-9]+$/.test(candidate.graphFingerprint)
+          && typeof candidate.redacted === "boolean"
+          && typeof candidate.generatedAt === "string"
+          && candidate.generatedAt.length <= MAX_TIMESTAMP_CHARS
+          && !Number.isNaN(Date.parse(candidate.generatedAt));
+        if (valid) manifest = candidate;
+        else manifestError = "Vault manifest metadata is invalid.";
+      } catch {
+        manifestError = "Vault manifest JSON could not be parsed.";
+      }
     }
   }
   const graphFile = files.find((file) => file.name === "graph.json");
@@ -444,5 +538,34 @@ export function parseObsidianVault(input) {
       jsonLdError = "Embedded JSON-LD could not be parsed.";
     }
   }
-  return { files, feedbacks, feedbackFileCount: feedbackCandidates.length, invalidFeedbackFiles, manifest, manifestError, graphError, jsonLdError };
+  const unverifiedFeedbackFiles = parsedFeedbacks
+    .filter(({ feedback }) => feedback && (
+      feedback.projectionMetadataError
+      || !Number.isSafeInteger(feedback.graphVersion)
+      || typeof feedback.graphFingerprint !== "string"
+    ))
+    .map(({ file }) => file.name);
+  const staleFeedbackFiles = manifest
+    ? parsedFeedbacks
+      .filter(({ feedback }) => feedback
+        && Number.isSafeInteger(feedback.graphVersion)
+        && typeof feedback.graphFingerprint === "string"
+        && (
+          feedback.graphVersion !== manifest.graphVersion
+          || feedback.graphFingerprint !== manifest.graphFingerprint
+        ))
+      .map(({ file }) => file.name)
+    : [];
+  return {
+    files,
+    feedbacks,
+    feedbackFileCount: feedbackCandidates.length,
+    invalidFeedbackFiles,
+    unverifiedFeedbackFiles,
+    staleFeedbackFiles,
+    manifest,
+    manifestError,
+    graphError,
+    jsonLdError
+  };
 }

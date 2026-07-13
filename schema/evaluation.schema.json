@@ -20,10 +20,14 @@
     },
     "feedback": {
       "type": "object",
-      "required": ["examples", "datasetFingerprint", "conflicts", "concepts", "relations"],
+      "required": ["examples", "datasetFingerprint", "freshExamples", "staleExamples", "undatedExamples", "untrustedExamples", "conflicts", "concepts", "relations"],
       "properties": {
         "examples": { "type": "integer", "minimum": 0 },
         "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}(?:[0-9a-f]{8})?$" },
+        "freshExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "staleExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "undatedExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "untrustedExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "conflicts": { "type": "integer", "minimum": 0 },
         "concepts": { "$ref": "#/$defs/category" },
         "relations": { "$ref": "#/$defs/category" }

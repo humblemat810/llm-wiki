@@ -1,6 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
 import { GRAPH_SCHEMA } from "../graph-core.js";
-import { EVALUATION_SCHEMA } from "../evaluation.js";
+import { EVALUATION_SCHEMA, MAX_EVALUATION_EXAMPLES } from "../evaluation.js";
+import { readBoundedTextFile } from "./bounded-file.mjs";
 
 export const EVALUATION_COMPARISON_FORMAT = "llm-field-notes/evaluation-comparison@1";
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
@@ -22,10 +22,10 @@ const OPTIONAL_METRICS = [
 ];
 
 async function readEvaluation(path) {
-  const metadata = await stat(path);
-  if (!metadata.isFile()) throw new Error(`Evaluation input is not a file: ${path}`);
-  if (metadata.size > MAX_INPUT_BYTES) throw new Error(`Evaluation input exceeds the ${MAX_INPUT_BYTES / (1024 * 1024)} MB safety limit: ${path}`);
-  const value = JSON.parse(await readFile(path, "utf8"));
+  const value = JSON.parse(await readBoundedTextFile(path, MAX_INPUT_BYTES, {
+    label: "Evaluation input",
+    tooLargeMessage: `Evaluation input exceeds the ${MAX_INPUT_BYTES / (1024 * 1024)} MB safety limit: ${path}`
+  }));
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Evaluation input is not an object: ${path}`);
   if (value.schema !== EVALUATION_SCHEMA) throw new Error(`Evaluation input must declare ${EVALUATION_SCHEMA}: ${path}`);
   if (value.graphSchema !== GRAPH_SCHEMA) throw new Error(`Evaluation input must declare ${GRAPH_SCHEMA}: ${path}`);
@@ -53,6 +53,26 @@ function parseTolerance(value) {
   return tolerance;
 }
 
+function parseMaxUntrustedFeedback(value) {
+  if (value === undefined || value === null) return null;
+  const maximum = Number(value);
+  if (!Number.isSafeInteger(maximum) || maximum < 0 || maximum > MAX_EVALUATION_EXAMPLES) {
+    throw new Error(`Untrusted-feedback threshold must be an integer from 0 to ${MAX_EVALUATION_EXAMPLES}.`);
+  }
+  return maximum;
+}
+
+function enforceFeedbackFreshness(evaluation, path, maximum) {
+  if (maximum === null) return;
+  const count = evaluation.feedback?.untrustedExamples;
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`Evaluation input must include freshness diagnostics when --max-untrusted-feedback is used: ${path}`);
+  }
+  if (count > maximum) {
+    throw new Error(`untrusted feedback examples ${count} exceed ${maximum}: ${path}`);
+  }
+}
+
 function readMetric(evaluation, name, getter) {
   const value = Number(getter(evaluation));
   if (!Number.isFinite(value) || value < 0 || value > 1) {
@@ -61,8 +81,11 @@ function readMetric(evaluation, name, getter) {
   return value;
 }
 
-export function compareEvaluations(baseline, candidate, { tolerance = 0 } = {}) {
+export function compareEvaluations(baseline, candidate, { tolerance = 0, maxUntrustedFeedback = null } = {}) {
   const normalizedTolerance = parseTolerance(tolerance);
+  const normalizedMaxUntrustedFeedback = parseMaxUntrustedFeedback(maxUntrustedFeedback);
+  enforceFeedbackFreshness(baseline, "baseline", normalizedMaxUntrustedFeedback);
+  enforceFeedbackFreshness(candidate, "candidate", normalizedMaxUntrustedFeedback);
   const baselineFingerprint = baseline.feedback.datasetFingerprint;
   const candidateFingerprint = candidate.feedback.datasetFingerprint;
   if (baselineFingerprint !== candidateFingerprint) {
@@ -99,6 +122,13 @@ export function compareEvaluations(baseline, candidate, { tolerance = 0 } = {}) 
       examples: candidate.feedback?.examples ?? null,
       datasetFingerprint: candidateFingerprint
     },
+    ...(normalizedMaxUntrustedFeedback === null ? {} : {
+      feedbackTrust: {
+        maxUntrustedFeedback: normalizedMaxUntrustedFeedback,
+        baselineUntrustedExamples: baseline.feedback.untrustedExamples,
+        candidateUntrustedExamples: candidate.feedback.untrustedExamples
+      }
+    }),
     metrics,
     passed: regressions.length === 0,
     regressions
@@ -107,17 +137,29 @@ export function compareEvaluations(baseline, candidate, { tolerance = 0 } = {}) 
 
 const [baselinePath, candidatePath, ...options] = process.argv.slice(2);
 if (!baselinePath || !candidatePath) {
-  console.error("Usage: node experiments/compare-evaluations.mjs <baseline.json> <candidate.json> [--max-regression <0..1>]");
+  console.error("Usage: node experiments/compare-evaluations.mjs <baseline.json> <candidate.json> [--max-regression <0..1>] [--max-untrusted-feedback <integer>]");
   process.exitCode = 1;
 } else {
   try {
-    const toleranceIndex = options.indexOf("--max-regression");
-    const tolerance = toleranceIndex < 0 ? 0 : options[toleranceIndex + 1];
-    if (toleranceIndex >= 0 && tolerance === undefined) throw new Error("--max-regression requires a value.");
+    let tolerance = 0;
+    let maxUntrustedFeedback = null;
+    for (let index = 0; index < options.length; index += 1) {
+      const option = options[index];
+      const value = options[++index];
+      if (option === "--max-regression") {
+        if (value === undefined) throw new Error("--max-regression requires a value.");
+        tolerance = value;
+      } else if (option === "--max-untrusted-feedback") {
+        if (value === undefined) throw new Error("--max-untrusted-feedback requires a value.");
+        maxUntrustedFeedback = value;
+      } else {
+        throw new Error(`Unknown option: ${option}`);
+      }
+    }
     const result = compareEvaluations(
       await readEvaluation(baselinePath),
       await readEvaluation(candidatePath),
-      { tolerance }
+      { tolerance, maxUntrustedFeedback }
     );
     console.log(JSON.stringify(result, null, 2));
     if (!result.passed) process.exitCode = 1;

@@ -6,6 +6,240 @@ All notable changes to LLM Field Notes are documented here.
 
 ### Added
 
+- Equal-timestamp learning conflicts now use a stable canonical tie-break instead
+  of depending on import order.
+- Canonicalized live reviewed-concept and relation ordering in extractor
+  guidance so graph round-trips cannot change bounded feedback payloads.
+- Made untimestamped contradictory feedback resolve deterministically, matching
+  the order-independent dataset fingerprint contract.
+- Made source replacement reject over-limit filename-derived titles consistently
+  for local and remote extraction.
+- Replaced random source-ID collision repairs with deterministic bounded IDs, so
+  equivalent provider imports preserve provenance identity.
+- Made duplicate relation-ID suffixes follow stable semantic ordering instead of
+  imported array order.
+- Made relation-ID repair avoid collisions between explicit IDs and generated
+  suffixes such as `edge` and `edge-2`.
+- Remapped ambiguous relation learning references by verified endpoints and
+  labels, avoiding unsafe ID-only attachment after malformed imports.
+- Canonicalized concept alias ordering across imports, merges, and concept
+  consolidation so alias reordering cannot drift graph identity.
+- Canonicalized node and evidence provenance-reference ordering while preserving
+  the order of evidence records themselves.
+- Canonicalized evidence record ordering only for graph fingerprints, preserving
+  display context while preventing equivalent imports from changing identity.
+- Canonicalized live reviewed-item ordering in feedback exports so graph
+  round-trips cannot change bounded training data behind one dataset fingerprint.
+- Made feedback imports apply distinct learning examples in stable recency order
+  before the bounded memory window is retained.
+- Preserved timestamp-free human corrections when they intentionally replace an
+  equally undated rejected or accepted graph decision.
+- Added freshness diagnostics to extractor evaluation reports, separating fresh,
+  stale, and undated reviewed examples, plus an opt-in
+  `--max-untrusted-feedback` promotion gate.
+- Extended the evaluation comparison promotion gate with
+  `--max-untrusted-feedback`, failing closed on stale, undated, or legacy
+  reports without freshness diagnostics.
+- Recorded applied feedback-trust thresholds and evaluated counts in gated
+  comparison artifacts for auditable promotion decisions.
+- Made oversized editable Obsidian aliases, labels, source titles, and URIs
+  fail closed instead of silently changing the imported correction.
+- Rejected oversized direct Obsidian feedback batches instead of partially
+  applying only their bounded prefix.
+- Rejected oversized direct Obsidian correction identities and fields instead
+  of truncating them into potentially different graph targets.
+- Added a specific browser message for feedback batches rejected by the
+  projection safety bound.
+- Short-circuited Markdown evidence rendering after its bounded preview budget
+  is exhausted, reducing avoidable work on large graphs.
+- Made canonical source-URI normalization reject over-limit values instead of
+  truncating provenance metadata into a potentially different URI.
+- Updated browser ingestion and source editing to reject invalid or oversized
+  source URIs before extraction or persistence instead of truncating them.
+- Made direct Obsidian source-feedback mutations reject unsafe URI values
+  instead of silently clearing existing provenance metadata.
+- Made browser-side and reference-server extraction requests reject unsafe
+  source URI metadata before provider work instead of silently dropping it.
+- Made remote extraction reject over-limit document titles before sending a
+  provider request, matching the reference-server contract.
+- Made local browser ingestion reject over-limit document titles too, keeping
+  local and remote provenance behavior identical.
+- Made multi-file ingestion reject over-limit filename-derived titles instead
+  of allowing local and remote batch modes to diverge.
+- Made non-streaming remote extractor responses fail closed before JSON parsing
+  when they do not declare a bounded response size.
+- Made remote extractor responses require an explicit `application/json` media
+  type before consuming provider output.
+- Made response-size guards reject malformed `Content-Length` metadata instead
+  of treating negative or fractional values as trusted bounds.
+- Rejected provider node and edge collections above graph limits before
+  normalization, preventing overproductive responses from silently losing
+  model output or bypassing resource limits.
+- Made revised-graph Obsidian vault exports reproducible by deriving manifest
+  generation time from the graph revision timestamp.
+- Kept stale reusable learning memory available for audit and export while
+  excluding it from new extraction guidance until it is reviewed again.
+- Aligned health guidance counts with the fresh-only extractor context so stale
+  learning is not reported as active guidance.
+- Applied the same stale-review boundary to accepted or rejected live concepts
+  and relations before they re-enter extractor guidance.
+- Required valid review timestamps before stale or undated memory can re-enter
+  extractor guidance.
+- Exposed the count of guidance identities withheld pending review in health
+  and Markdown projections.
+- Added a `--max-withheld-guidance` CI gate so stale or undated learning cannot
+  silently accumulate in an automated extraction pipeline.
+- Made health CLI thresholds reject values above their published schema bounds,
+  preventing invalid gate artifacts from entering CI.
+- Hardened public learning-note link rendering to allow only credential-free
+  HTTP(S) URLs.
+- Reused canonical source-URI validation in browser Markdown and Obsidian link
+  projections, preventing credential-bearing graph metadata from becoming
+  clickable links.
+- Normalized Markdown guidance diagnostics so capped and withheld context
+  statuses remain readable when both conditions occur.
+- Made remote extraction source IDs deterministic from submitted content,
+  preventing provider metadata from changing graph provenance identity.
+- Canonicalized remote concept and relation IDs from labels and endpoints,
+  keeping standalone provider extraction payloads reproducible.
+- Made duplicate provider endpoint IDs fail closed instead of choosing an
+  arbitrary concept during relation normalization.
+- Made remote extraction responses inference-only so providers cannot fabricate
+  human-approved status, feedback counts, or review timestamps.
+- Made duplicate graph normalization order-independent: canonical labels,
+  relation orientation, representative IDs, metadata, and learning aliases
+  now remain stable when imported records are reordered.
+- Made conflicting duplicate source-ID repairs order-independent, preserving
+  stable canonical provenance while retaining the ambiguity diagnostic.
+- Applied the same deterministic duplicate collapse at the extractor boundary,
+  while preserving the strongest directional relation evidence.
+- Canonicalized unmatched cross-workspace feedback by concept labels or
+  relation endpoints before storing learning memory, preventing contradictory
+  portable hints from teaching the extractor both sides of one decision.
+- Discarded request bodies for early extraction rejections so keep-alive
+  connections cannot carry unread POST bytes into a subsequent request.
+- Added request IDs to every HTTP response and preserved them through remote
+  extraction failures, making support traces correlate cleanly across logs.
+- Added bounded runtime file reads so assets that grow after an initial stat
+  check cannot bypass the per-file memory and response safety limit.
+- Bounded early rejection draining for oversized uploads, preserving keep-alive
+  reuse for normal requests while terminating untrusted excess bodies safely.
+- Closed the non-streaming browser response fallback so note and release
+  metadata reads require a declared size before using `response.text()`.
+- Added a same-origin `Origin` check to the reference extractor endpoint,
+  reducing CSRF risk for cookie-authenticated gateway deployments while
+  preserving server-to-server requests without an `Origin` header.
+- Also reject explicit `Sec-Fetch-Site: cross-site` metadata, covering modern
+  browser requests whose `Origin` header is absent.
+- Fixed oversized JSON request handling to return the documented `413` response
+  for both declared and chunked bodies without invoking an undefined drain path.
+- Removed dead browser and learning-feedback code paths identified by the
+  runtime lint audit, keeping the extraction contract and audits exact.
+- Required a declared response size for non-streaming remote extractor
+  fallbacks, preventing `response.json()` from bypassing the 10 MB bound.
+- Fixed missing `Content-Length` handling so absent headers are not coerced to
+  zero and cannot bypass browser or remote response-size guards.
+- Coalesced and briefly cached readiness validation so repeated health probes
+  cannot repeatedly reread and render the full public learning-note set.
+- Added `Retry-After: 5` to cached readiness failures so orchestrators avoid
+  retry storms while a deployment is unavailable.
+- Added a dedicated pre-parse size limit for Obsidian vault manifests, keeping
+  deployment metadata validation independent from larger graph export limits.
+- Added race-resistant bounded file reads to graph inspection, evaluation,
+  comparison, and JSON-LD verification CLIs.
+- Made bounded readers fail closed on invalid or infinite size limits instead
+  of silently degrading into unbounded reads.
+- Bounded Pages build file concurrency and made learning-note metadata reads
+  deterministic, preventing large publications from exhausting descriptors.
+- Unified Obsidian timestamp validation across parsed notes and direct feedback
+  mutations, preventing malformed review dates from entering learning memory.
+- Added bounded transient retries with `Retry-After` support to the remote
+  extractor, while keeping permanent failures and cancellation fail-fast.
+- Added release-metadata validation and bounded streaming at browser startup,
+  preventing malformed or oversized deployment metadata from blocking boot.
+- Added a shared binary export size guard so every download surface enforces
+  the same 50 MB safety limit.
+- Added a workbench mutation lock covering source replacement and graph builds,
+  preventing overlapping operations from corrupting cancellation state.
+- Centralized browser and CLI health-report construction so graph fingerprints,
+  build provenance, review queues, and privacy bounds cannot drift between
+  export surfaces.
+- Added user-approved service-worker upgrades so open workbench tabs are not
+  silently taken over by mixed-version assets during a graph mutation.
+- Added application build provenance to health reports so shared diagnostics
+  identify the release that produced them.
+- Enforced the 10 MB public-asset budget during Pages builds, including
+  origin-rewritten shell output, and aligned Node sitemaps with Pages by
+  publishing canonical HTML landing pages alongside source Markdown.
+- Enforced the strict no-script CSP for Node-served note pages at the HTTP
+  response boundary and made the no-JavaScript curriculum links use canonical
+  crawler-readable note landing pages.
+- Extended Node readiness checks to validate rendered learning-note pages, so
+  an oversized crawler projection cannot pass health checks merely because its
+  source Markdown is within the raw asset budget.
+- Added a bounded browser pending-write journal so an interrupted IndexedDB
+  commit preserves the newest synchronous graph mirror across reload.
+- Escaped curriculum metadata at browser `innerHTML` boundaries so future
+  note-catalog edits cannot turn presentation data into executable markup.
+- Aligned Node Atom feed summaries with the note-derived Pages feed summaries,
+  keeping crawler and subscription projections consistent across deployments.
+- Preserved the strict note-page CSP on conditional `304` responses as well as
+  normal and `HEAD` responses.
+- Centralized the 10 MB public-asset limit in the deployment manifest so
+  runtime serving, Pages builds, readiness, and release checks share one bound.
+- Bounded note-summary extraction to 20,000 characters in both Node and Pages
+  feeds with a true bounded runtime file read, so deployment metadata cannot
+  require loading an entire large note.
+- Added a shared 1,000-note publication ceiling so runtime discovery, Pages
+  builds, and release validation cannot scale learning-note work indefinitely.
+- Fixed browser startup ordering so curriculum escaping is initialized before
+  the first note render.
+- Bounded feedback fingerprint canonicalization before alias sorting and
+  serialization, preventing oversized evaluation inputs from forcing unbounded
+  intermediate allocations.
+- Bounded backup fingerprint history before normalizing imported snapshots,
+  keeping malformed restore artifacts within the revision contract.
+- Bounded evaluator feedback aliases and identity fields before comparison,
+  keeping extractor promotion inputs within their schema limits.
+- Added a depth guard to JSON-LD canonical verification so malformed nested
+  projections fail closed instead of risking recursive stack exhaustion.
+- Removed the final duplicated note metadata window so runtime title and
+  summary extraction share one bounded configuration.
+- Corrected dynamic note-route error handling so missing assets return `404`
+  while unexpected rendering failures are logged and return `500`.
+- Bounded direct Obsidian feedback mutation inputs before fingerprinting and
+  alias merging, matching the vault parser’s safety limits.
+- Normalized direct Obsidian feedback mutation fields before graph updates, so
+  callers outside the ZIP parser receive the same bounded label, endpoint,
+  source-metadata, and review-date contract.
+- Added a shared 100 MB aggregate public-asset budget across release checks,
+  Pages bundles, and runtime readiness so many individually valid learning
+  notes cannot create an unbounded deployment footprint.
+- Prioritized accepted or rejected concepts and relations when newer source
+  evidence arrives after their last review, making representation drift visible
+  before the time-based stale window.
+- Exposed extractor-guidance context capacity and truncation in health,
+  Markdown, and the workbench so bounded self-learning remains inspectable.
+- Stream-bounded learning-note fetches during Obsidian vault export so an
+  oversized public note cannot be fully buffered before the browser rejects it.
+- Added direct canonical viewer links beside raw Markdown links on learning-map
+  cards, improving shared reading without removing the forkable source path.
+- Replaced raw `<pre>` note landing pages with dependency-free escaped Markdown
+  rendering for headings, lists, quotes, paragraphs, and code blocks.
+- Made HTTP(S) links in public learning notes clickable while leaving unsafe
+  URL schemes as inert escaped text.
+- Canonicalized graph fingerprints across unordered document, concept, relation,
+  and integrity collections so Obsidian and JSON round-trips remain stable when
+  external tools reorder arrays.
+- Added explicit truncation diagnostics for oversized graph imports, surfaced
+  in health exports, Markdown projections, and the workbench warning.
+- Added `--max-truncated-items` to the graph health CLI so CI and release
+  checks can reject partial graph imports instead of merely reporting them.
+- Added malformed-entry drop diagnostics and `--max-dropped-items`, covering
+  invalid nodes, dangling relations, malformed revisions, and invalid learning
+  examples at the graph and health boundaries.
+- Aligned the health schema with the CLI's bounded eleven-threshold gate so
+  simultaneous quality violations remain representable in automation reports.
 - Added a dependency-free JSON-LD verification CLI for CI and artifact
   pipelines, sharing the graph-input and deterministic projection boundaries
   used by the exporter and browser.
@@ -57,6 +291,62 @@ All notable changes to LLM Field Notes are documented here.
   order and runnable experiment outputs remain reproducible across hosts.
 - Made Pages feed ordering and browser merge-target ordering locale-independent
   to avoid host-specific public artifacts and review controls.
+- Made Unicode word segmentation use an explicit locale-neutral segmenter so
+  multilingual extraction does not inherit the host's default locale.
+- Made extraction merges fall back to unambiguous canonical concept labels when
+  provider IDs change, while still refusing ambiguous label matches.
+- Prevented long concept labels from collapsing into one generated identity by
+  adding deterministic digest suffixes beyond the label slug bound.
+- Extended graph search to index bounded source document text, making the
+  underlying evidence corpus discoverable even when extracted evidence is
+  sparse.
+- Added a bounded source-document list so every ingested document remains
+  inspectable even when extraction produces no concepts.
+- Made remote source replacement cancellable, with cancellation preserving the
+  existing graph representation.
+- Added an inspectable prioritized review-queue panel with bounded candidate
+  reasons and direct navigation into the relevant inspector item.
+- Coalesced graph search rendering per animation frame to keep large-workspace
+  filtering responsive.
+- Cached fingerprinted graph diagnostics, review candidates, and Markdown
+  previews across search-only rerenders.
+- Added crawler-readable note landing pages with note-specific canonical and
+  social metadata for more reliable shared links.
+- Added safe schema.org Article JSON-LD to public learning-note pages so search
+  and sharing systems can understand each note without enabling page scripts.
+- Added Atom feed alternate links to every public learning-note page, making
+  the curriculum discoverable from any shared note.
+- Reduced local extraction noise by preferring repeated or structurally
+  explicit concepts over isolated generic vocabulary when ranking candidates.
+- Added bounded adjacent-phrase extraction for lower-case multi-word concepts,
+  improving coverage of ideas such as weighted lookup and positional encoding.
+- Kept Markdown headings out of prose extraction units to prevent duplicated
+  heading artifacts from entering the graph.
+- Filtered common verb fragments from adjacent phrase extraction so inferred
+  relations favor durable noun phrases over sentence mechanics and common
+  preposition fragments.
+- Persisted the validated same-origin extractor path locally across reloads
+  without allowing embedded credentials or cross-origin endpoints.
+- Added per-note projection identity checks for Obsidian vault imports so stale
+  or unverifiable individual edits are disclosed before application.
+- Preserved common explicit relation verbs and sentence-initial domain phrases
+  in the heuristic extractor instead of degrading them to generic co-occurrence.
+- Bound multi-clause relation verbs to their shared subject when a sentence
+  uses the common `X verb Y and verb Z` construction.
+- Kept sparse documents on the noise-filtered candidate ranking path so
+  one-off terms do not return as incidental graph nodes.
+- Preserved one-off endpoints named by accepted relation feedback so the
+  learning loop remains effective on short follow-up documents.
+- Removed evidence-subsumed one-word duplicates such as `Positional` beside
+  `Positional encoding` while preserving repeated and reviewed concepts.
+- Added global candidate and per-candidate evidence budgets to cap extractor
+  pre-normalization memory and phrase-ranking work on large inputs.
+- Reserved candidate capacity for structural and multi-word phrases so large
+  generic vocabularies cannot crowd out higher-value concepts.
+- Added conditional HSTS for HTTPS public origins without changing local HTTP
+  development behavior.
+- Added generated note landing pages to the Pages service-worker shell for
+  offline shared-note access.
 - Made the local extractor Unicode-aware so non-Latin concept labels, IDs, and
   feedback matching survive normalization and multilingual documents produce
   useful candidate graphs.
@@ -405,6 +695,12 @@ All notable changes to LLM Field Notes are documented here.
 
 - Counted failed bearer authentication attempts against the extraction rate
   limit to bound credential probing.
+- Rejected malformed or schema-incompatible provider extraction responses with
+  controlled `502` errors instead of silently normalizing invalid data.
+- Scoped service-worker fallback reads to the application cache, preventing
+  unrelated same-origin caches from supplying stale or foreign assets.
+- Preserved accessible graph-node keyboard navigation by exposing SVG nodes as
+  interactive controls within the graph group.
 - Added a privacy-safe Prometheus counter for bearer authentication failures.
 - Explicitly carries same-origin browser credentials so gateway-managed
   sessions can protect remote extraction without exposing provider tokens.

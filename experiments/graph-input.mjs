@@ -1,13 +1,13 @@
-import { readFile, stat } from "node:fs/promises";
 import { BACKUP_FORMAT, GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, matchesGraphFingerprint, normalizeGraph } from "../graph-core.js";
+import { readBoundedTextFile } from "./bounded-file.mjs";
 
 export const MAX_GRAPH_INPUT_BYTES = 10 * 1024 * 1024;
 
 export async function readGraphInput(path, { label = "Graph input" } = {}) {
-  const metadata = await stat(path);
-  if (!metadata.isFile()) throw new Error(`${label} is not a file: ${path}`);
-  if (metadata.size > MAX_GRAPH_INPUT_BYTES) throw new Error(`${label} exceeds ${MAX_GRAPH_INPUT_BYTES / (1024 * 1024)} MB: ${path}`);
-  const value = JSON.parse(await readFile(path, "utf8"));
+  const value = JSON.parse(await readBoundedTextFile(path, MAX_GRAPH_INPUT_BYTES, {
+    label,
+    tooLargeMessage: `${label} exceeds ${MAX_GRAPH_INPUT_BYTES / (1024 * 1024)} MB: ${path}`
+  }));
   if (value?.format === BACKUP_FORMAT) {
     if (!value.graph || ![GRAPH_SCHEMA, ...LEGACY_GRAPH_SCHEMAS].includes(value.graph.schema)) {
       throw new Error(`Backup input must contain ${GRAPH_SCHEMA}: ${path}`);
