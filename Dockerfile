@@ -11,6 +11,6 @@ USER node
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 8000) + '/readyz').then((r) => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"
+  CMD node -e "const configured = Number(process.env.PORT); const port = Number.isInteger(configured) && configured > 0 && configured <= 65535 ? configured : 8000; fetch('http://127.0.0.1:' + port + '/readyz').then((r) => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"
 
 CMD ["node", "server.mjs"]

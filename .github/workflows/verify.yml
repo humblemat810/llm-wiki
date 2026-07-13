@@ -23,5 +23,66 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Run smoke checks
         run: npm test
+      - name: Smoke test npm start
+        run: |
+          set -e
+          PORT=18001 HOST=127.0.0.1 npm start >/tmp/llm-field-notes-start.log 2>&1 &
+          pid=$!
+          cleanup() {
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+            wait "$pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18001/readyz >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/llm-field-notes-start.log
+            exit 1
+          fi
+          curl --fail --silent http://127.0.0.1:18001/metrics | grep llm_field_notes_http_requests_total
+          kill -TERM "$pid"
+          if wait "$pid"; then
+            :
+          else
+            status=$?
+            test "$status" -eq 143
+          fi
+          trap - EXIT
       - name: Build container
         run: docker build --tag llm-field-notes:ci .
+      - name: Smoke test container readiness
+        run: |
+          trap 'docker rm --force llm-field-notes-smoke >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name llm-field-notes-smoke --publish 18000:8000 llm-field-notes:ci
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/readyz; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs llm-field-notes-smoke
+            exit 1
+          fi
+          healthy=0
+          for attempt in $(seq 1 30); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' llm-field-notes-smoke)" = "healthy" ]; then
+              healthy=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$healthy" -ne 1 ]; then
+            docker inspect --format '{{json .State.Health}}' llm-field-notes-smoke
+            exit 1
+          fi
+          docker stop --time 5 llm-field-notes-smoke
+          test "$(docker inspect --format '{{.State.ExitCode}}' llm-field-notes-smoke)" = "0"

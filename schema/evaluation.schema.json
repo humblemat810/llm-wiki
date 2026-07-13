@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/evaluation@1",
+  "title": "LLM Field Notes extractor evaluation",
+  "description": "Bounded metrics for comparing an extraction against reviewed feedback.",
+  "type": "object",
+  "required": ["schema", "graphSchema", "evaluatedAt", "extraction", "feedback", "overall"],
+  "properties": {
+    "schema": { "const": "llm-field-notes/evaluation@1" },
+    "graphSchema": { "const": "llm-field-notes/graph@1" },
+    "evaluatedAt": { "type": "string", "format": "date-time" },
+    "extraction": {
+      "type": "object",
+      "required": ["concepts", "relations"],
+      "properties": {
+        "concepts": { "type": "integer", "minimum": 0 },
+        "relations": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "feedback": {
+      "type": "object",
+      "required": ["examples", "datasetFingerprint", "conflicts", "concepts", "relations"],
+      "properties": {
+        "examples": { "type": "integer", "minimum": 0 },
+        "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}$" },
+        "conflicts": { "type": "integer", "minimum": 0 },
+        "concepts": { "$ref": "#/$defs/category" },
+        "relations": { "$ref": "#/$defs/category" }
+      },
+      "additionalProperties": false
+    },
+    "overall": {
+      "type": "object",
+      "required": ["accepted", "rejected"],
+      "properties": {
+        "accepted": { "$ref": "#/$defs/acceptedMetric" },
+        "rejected": { "$ref": "#/$defs/rejectedMetric" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "acceptedMetric": {
+      "type": "object",
+      "required": ["expected", "found", "missed", "recall"],
+      "properties": {
+        "expected": { "type": "integer", "minimum": 0 },
+        "found": { "type": "integer", "minimum": 0 },
+        "missed": { "type": "integer", "minimum": 0 },
+        "recall": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "rejectedMetric": {
+      "type": "object",
+      "required": ["expected", "suppressed", "present", "suppressionRate"],
+      "properties": {
+        "expected": { "type": "integer", "minimum": 0 },
+        "suppressed": { "type": "integer", "minimum": 0 },
+        "present": { "type": "integer", "minimum": 0 },
+        "suppressionRate": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "category": {
+      "type": "object",
+      "required": ["accepted", "rejected"],
+      "properties": {
+        "accepted": { "$ref": "#/$defs/acceptedMetric" },
+        "rejected": { "$ref": "#/$defs/rejectedMetric" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.example/schema/vault-manifest.schema.json",
+  "title": "LLM Field Notes vault manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "graphSchema", "graphVersion", "graphFingerprint", "redacted", "generatedAt"],
+  "properties": {
+    "format": { "const": "llm-field-notes/vault@1" },
+    "graphSchema": { "const": "llm-field-notes/graph@1" },
+    "graphVersion": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "graphFingerprint": { "type": "string", "maxLength": 128, "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$" },
+    "redacted": { "type": "boolean" },
+    "generatedAt": { "type": "string", "format": "date-time", "maxLength": 128 }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/health@1",
+  "title": "LLM Field Notes graph health report",
+  "description": "Privacy-safe diagnostics for a normalized graph representation.",
+  "type": "object",
+  "required": ["format", "graphSchema", "graphVersion", "inspectedAt", "health"],
+  "properties": {
+    "format": { "const": "llm-field-notes/health@1" },
+    "graphSchema": { "const": "llm-field-notes/graph@1" },
+    "graphVersion": { "type": "integer", "minimum": 0 },
+    "graphFingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$" },
+    "inspectedAt": { "type": "string", "format": "date-time" },
+    "health": {
+      "type": "object",
+      "description": "Bounded counts and percentages only; source text and evidence are never included.",
+      "properties": {
+        "reviewCandidates": { "type": "integer", "minimum": 0, "maximum": 15000 }
+        ,"staleReviewCandidates": { "type": "integer", "minimum": 0, "maximum": 15000 }
+      },
+      "additionalProperties": true
+    },
+    "gate": {
+      "type": "object",
+      "required": ["passed", "violations", "thresholds"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "violations": { "type": "array", "maxItems": 3, "items": { "type": "string", "maxLength": 200 } },
+        "thresholds": {
+          "type": "object",
+          "required": ["minProvenance", "maxOrphaned", "maxAmbiguous"],
+          "properties": {
+            "minProvenance": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+            "maxOrphaned": { "type": ["integer", "null"], "minimum": 0 },
+            "maxAmbiguous": { "type": ["integer", "null"], "minimum": 0 },
+            "maxReviewCandidates": { "type": ["integer", "null"], "minimum": 0, "maximum": 15000 },
+            "maxStaleReviewCandidates": { "type": ["integer", "null"], "minimum": 0, "maximum": 15000 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -11,11 +11,17 @@
     },
     "version": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
     "updatedAt": {
       "type": ["string", "null"],
-      "format": "date-time"
+      "format": "date-time",
+      "maxLength": 128
+    },
+    "redacted": {
+      "type": "boolean",
+      "description": "True when source text, evidence quotes, and source URIs were intentionally removed."
     },
     "documents": {
       "type": "array",
@@ -34,7 +40,39 @@
     },
     "revisions": {
       "type": "array",
+      "maxItems": 20,
       "items": { "$ref": "#/$defs/revision" }
+    },
+    "learning": {
+      "type": "object",
+      "required": ["examples"],
+      "properties": {
+        "examples": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "$ref": "#/$defs/learningExample" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["ambiguousSourceIds", "ambiguousEdgeIds"],
+      "properties": {
+        "ambiguousSourceIds": {
+          "type": "array",
+          "maxItems": 100,
+        "items": { "type": "string", "maxLength": 200 },
+          "uniqueItems": true
+        },
+        "ambiguousEdgeIds": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "maxLength": 200 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
     }
   },
   "$defs": {
@@ -42,10 +80,11 @@
       "type": "object",
       "required": ["text", "sources"],
       "properties": {
-        "text": { "type": "string" },
+        "text": { "type": "string", "maxLength": 12000 },
         "sources": {
           "type": "array",
-          "items": { "type": "string" },
+          "maxItems": 200,
+          "items": { "type": "string", "maxLength": 200 },
           "uniqueItems": true
         }
       },
@@ -55,11 +94,14 @@
       "type": "object",
       "required": ["id", "title", "text", "fingerprint", "addedAt"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
-        "text": { "type": "string" },
-        "fingerprint": { "type": "string", "minLength": 1 },
-        "addedAt": { "type": "string", "format": "date-time" }
+        "text": { "type": "string", "maxLength": 300000 },
+        "fingerprint": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "uri": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^(?:(?:https?|file|urn|doi):|[^:]+$)" },
+        "addedAt": { "type": "string", "format": "date-time", "maxLength": 128 },
+        "quality": { "enum": ["unknown", "primary", "secondary", "tertiary"] },
+        "lastReviewedAt": { "type": ["string", "null"], "format": "date-time", "maxLength": 128 }
       },
       "additionalProperties": true
     },
@@ -67,18 +109,19 @@
       "type": "object",
       "required": ["id", "label", "aliases", "type", "confidence", "mentions", "feedback", "status", "sources", "evidence", "createdAt", "updatedAt"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
         "label": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "aliases": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "type": { "type": "string", "minLength": 1 },
+        "aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "uniqueItems": true },
+        "type": { "type": "string", "minLength": 1, "maxLength": 30 },
         "confidence": { "type": "number", "minimum": 0.01, "maximum": 0.99 },
-        "mentions": { "type": "integer", "minimum": 1 },
-        "feedback": { "type": "integer" },
+        "mentions": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "feedback": { "type": "integer", "minimum": -1000000, "maximum": 1000000 },
         "status": { "enum": ["inferred", "accepted", "rejected"] },
-        "sources": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" }
+        "sources": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 200 }, "uniqueItems": true },
+        "evidence": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/evidence" } },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 128 },
+        "lastReviewedAt": { "type": ["string", "null"], "format": "date-time", "maxLength": 128 }
       },
       "additionalProperties": true
     },
@@ -86,15 +129,16 @@
       "type": "object",
       "required": ["id", "source", "target", "label", "confidence", "evidence", "sources", "status"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "source": { "type": "string", "minLength": 1 },
-        "target": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 200 },
         "label": { "type": "string", "minLength": 1, "maxLength": 80 },
         "confidence": { "type": "number", "minimum": 0.01, "maximum": 0.99 },
-        "feedback": { "type": "integer" },
-        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
-        "sources": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "status": { "enum": ["inferred", "accepted", "rejected"] }
+        "feedback": { "type": "integer", "minimum": -1000000, "maximum": 1000000 },
+        "evidence": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/evidence" } },
+        "sources": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 200 }, "uniqueItems": true },
+        "status": { "enum": ["inferred", "accepted", "rejected"] },
+        "lastReviewedAt": { "type": ["string", "null"], "format": "date-time", "maxLength": 128 }
       },
       "additionalProperties": true
     },
@@ -102,12 +146,29 @@
       "type": "object",
       "required": ["id", "version", "timestamp", "reason", "nodes", "edges"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "version": { "type": "integer", "minimum": 0 },
-        "timestamp": { "type": "string", "format": "date-time" },
-        "reason": { "type": "string" },
-        "nodes": { "type": "integer", "minimum": 0 },
-        "edges": { "type": "integer", "minimum": 0 }
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "version": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "timestamp": { "type": "string", "format": "date-time", "maxLength": 128 },
+        "reason": { "type": "string", "maxLength": 200 },
+        "nodes": { "type": "integer", "minimum": 0, "maximum": 5000 },
+        "edges": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      },
+      "additionalProperties": true
+    },
+    "learningExample": {
+      "type": "object",
+      "required": ["kind", "id", "status"],
+      "properties": {
+        "kind": { "enum": ["concept", "relation"] },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "uniqueItems": true },
+        "source": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "sourceLabel": { "type": "string", "maxLength": 120 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "targetLabel": { "type": "string", "maxLength": 120 },
+        "status": { "enum": ["accepted", "rejected"] },
+        "lastReviewedAt": { "type": ["string", "null"], "format": "date-time", "maxLength": 128 }
       },
       "additionalProperties": true
     }

@@ -8,6 +8,7 @@
   "properties": {
     "format": { "const": "llm-field-notes/backup@1" },
     "exportedAt": { "type": "string", "format": "date-time" },
+    "graphFingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$" },
     "graph": { "$ref": "graph.schema.json" },
     "history": {
       "type": "array",

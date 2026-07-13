@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/diff@1",
+  "title": "LLM Field Notes graph diff",
+  "description": "Bounded, inspectable changes between two normalized graph revisions.",
+  "type": "object",
+  "required": ["format", "graphSchema", "exportedAt", "fromVersion", "toVersion", "documents", "nodes", "edges", "learning", "integrity", "redaction", "summary", "changed"],
+  "properties": {
+    "format": { "const": "llm-field-notes/diff@1" },
+    "graphSchema": { "const": "llm-field-notes/graph@1" },
+    "exportedAt": { "type": "string", "format": "date-time" },
+    "fromVersion": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "toVersion": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "changed": { "type": "boolean" },
+    "summary": {
+      "type": "object",
+      "required": ["added", "removed", "changed"],
+      "properties": {
+        "added": { "type": "integer", "minimum": 0 },
+        "removed": { "type": "integer", "minimum": 0 },
+        "changed": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "documents": { "$ref": "#/$defs/collection" },
+    "nodes": { "$ref": "#/$defs/collection" },
+    "edges": { "$ref": "#/$defs/collection" },
+    "learning": { "$ref": "#/$defs/collection" },
+    "redaction": {
+      "type": "object",
+      "required": ["before", "after", "changed"],
+      "properties": {
+        "before": { "type": "boolean" },
+        "after": { "type": "boolean" },
+        "changed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["ambiguousSourceIds", "ambiguousEdgeIds"],
+      "properties": {
+        "ambiguousSourceIds": { "$ref": "#/$defs/stringSet" },
+        "ambiguousEdgeIds": { "$ref": "#/$defs/stringSet" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "enum": ["concept", "relation"] },
+        "identity": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "title": { "type": "string", "maxLength": 200 },
+        "label": { "type": "string", "maxLength": 120 },
+        "aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 } },
+        "fingerprint": { "type": "string", "maxLength": 200 },
+        "uri": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^(?:(?:https?|file|urn|doi):|[^:]+$)" },
+        "source": { "type": "string", "maxLength": 200 },
+        "target": { "type": "string", "maxLength": 200 },
+        "status": { "enum": ["inferred", "accepted", "rejected"] },
+        "quality": { "enum": ["unknown", "primary", "secondary", "tertiary"] },
+        "lastReviewedAt": { "type": ["string", "null"], "maxLength": 128 },
+        "addedAt": { "type": "string", "maxLength": 128 },
+        "confidence": { "type": "number", "minimum": 0.01, "maximum": 0.99 },
+        "mentions": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "feedback": { "type": "integer", "minimum": -1000000, "maximum": 1000000 },
+        "sources": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 200 } },
+        "evidenceCount": { "type": "integer", "minimum": 0, "maximum": 8 }
+      },
+      "additionalProperties": false
+    },
+    "change": {
+      "type": "object",
+      "required": ["id", "before", "after"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "before": { "$ref": "#/$defs/item" },
+        "after": { "$ref": "#/$defs/item" }
+      },
+      "additionalProperties": false
+    },
+    "collection": {
+      "type": "object",
+      "required": ["added", "removed", "changed"],
+      "properties": {
+        "added": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/item" } },
+        "removed": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/item" } },
+        "changed": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/change" } }
+      },
+      "additionalProperties": false
+    },
+    "stringSet": {
+      "type": "object",
+      "required": ["added", "removed"],
+      "properties": {
+        "added": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 200 } },
+        "removed": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 200 } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,11 +1,33 @@
 {
+  "id": "./",
   "name": "LLM Field Notes",
   "short_name": "LLM Notes",
   "description": "Turn documents into an inspectable, evolving knowledge graph.",
-  "start_url": "./",
+  "lang": "en",
+  "dir": "ltr",
+  "start_url": "./#workbench",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#151513",
   "theme_color": "#10100f",
+  "categories": ["education", "productivity", "developer"],
+  "shortcuts": [
+    {
+      "name": "Open workbench",
+      "short_name": "Workbench",
+      "url": "./#workbench"
+    },
+    {
+      "name": "Open learning map",
+      "short_name": "Learning map",
+      "url": "./#map"
+    },
+    {
+      "name": "Try a sample graph",
+      "short_name": "Try sample",
+      "url": "./#sample"
+    }
+  ],
   "icons": [
     {
       "src": "icon.svg",

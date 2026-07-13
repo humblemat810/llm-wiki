@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/evaluation-comparison@1",
+  "title": "LLM Field Notes evaluation comparison",
+  "description": "A bounded regression-gate result comparing two versioned evaluation reports.",
+  "type": "object",
+  "required": [
+    "format",
+    "evaluationSchema",
+    "graphSchema",
+    "tolerance",
+    "baseline",
+    "candidate",
+    "metrics",
+    "passed",
+    "regressions"
+  ],
+  "properties": {
+    "format": { "const": "llm-field-notes/evaluation-comparison@1" },
+    "evaluationSchema": { "const": "llm-field-notes/evaluation@1" },
+    "graphSchema": { "const": "llm-field-notes/graph@1" },
+    "tolerance": { "type": "number", "minimum": 0, "maximum": 1 },
+    "baseline": {
+      "type": "object",
+      "required": ["evaluatedAt", "examples", "datasetFingerprint"],
+      "properties": {
+        "evaluatedAt": { "type": ["string", "null"] },
+        "examples": { "type": ["integer", "null"], "minimum": 0 },
+        "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}$" }
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["evaluatedAt", "examples", "datasetFingerprint"],
+      "properties": {
+        "evaluatedAt": { "type": ["string", "null"] },
+        "examples": { "type": ["integer", "null"], "minimum": 0 },
+        "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}$" }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": ["name", "baseline", "candidate", "delta", "regression"],
+        "properties": {
+          "name": { "type": "string" },
+          "baseline": { "type": "number", "minimum": 0, "maximum": 1 },
+          "candidate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "delta": { "type": "number" },
+          "regression": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "passed": { "type": "boolean" },
+    "regressions": {
+      "type": "array",
+      "maxItems": 6,
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { FIXED_PUBLIC_ASSETS, LEARNING_NOTE_ASSETS } from "../scripts/public-assets.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const assets = ["index.html", "styles.css", "app.js", "graph-core.js", "graph-store.js", "extractor-adapter.js", "projection-adapter.js", "manifest.webmanifest", "sw.js", "icon.svg", "schema/graph.schema.json", "schema/feedback.schema.json", "schema/backup.schema.json", "schema/extractor-request.schema.json"];
+const fixedAssets = FIXED_PUBLIC_ASSETS;
+const noteAssets = (await readdir(join(root, "notes"))).filter((file) => file.endsWith(".md")).map((file) => `notes/${file}`);
+const assets = [...fixedAssets, ...noteAssets];
 const server = createServer(async (request, response) => {
   const requested = request.url === "/" ? "index.html" : request.url.slice(1);
   if (!assets.includes(requested)) {

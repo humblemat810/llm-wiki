@@ -1,0 +1,35 @@
+---
+id: production
+title: Ship the boring parts
+category: shipping
+---
+
+# Ship the boring parts
+
+> What survives contact with users?
+
+## The short version
+
+A production system is a set of promises: response time, cost, availability,
+data handling, and behavior when the model is wrong or unavailable. The
+fallbacks and observability are part of the product.
+
+## Build it
+
+Create a redacted request log with latency, token counts, model version,
+outcome, and trace ID. Add one fallback and one human escape hatch. Test
+timeouts, retries, and partial failure deliberately.
+
+## Failure modes
+
+Retries can multiply cost, logs can become a data leak, and a fallback can
+silently change the user contract. “Works on my prompt” is not an SLO.
+
+## Sources
+
+- Sculley et al., “Hidden Technical Debt in Machine Learning Systems.”
+
+## Try it yourself
+
+Ask a real person to use the system without narration. Every question they ask
+is a missing product surface.
