@@ -1,4 +1,4 @@
-import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_FEEDBACK_EXAMPLES, normalizeExtraction, normalizeSourceUri } from "./graph-core.js";
+import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_FEEDBACK_EXAMPLES, normalizeExtractionForDocument, normalizeSourceUri } from "./graph-core.js";
 
 export const MAX_FEEDBACK_CHARS = 500000;
 export const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
@@ -161,9 +161,7 @@ export function createRemoteExtractor({
       if (!extraction || typeof extraction !== "object" || Array.isArray(extraction)) {
         throw new ExtractorAdapterError("Extractor returned an invalid extraction shape.", { code: "INVALID_RESPONSE" });
       }
-      const normalized = normalizeExtraction(extraction, title, text);
-      if (uri && !normalized.source.uri) normalized.source.uri = uri;
-      return normalized;
+      return normalizeExtractionForDocument(extraction, { title, text, uri });
     } catch (error) {
       if (error instanceof ExtractorAdapterError) throw error;
       if (signal?.aborted) throw new ExtractorAdapterError("Extractor request was canceled.", { code: "CANCELED", cause: error });

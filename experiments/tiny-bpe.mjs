@@ -1,4 +1,5 @@
 const pairKey = (left, right) => JSON.stringify([left, right]);
+const lexicalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 
 function applyMerge(tokens, merge) {
   const output = [];
@@ -29,7 +30,7 @@ export function trainBpe(text, { maxMerges = 20, minFrequency = 2 } = {}) {
     }
     const best = [...counts.values()]
       .filter((pair) => pair.count >= minFrequency)
-      .sort((left, right) => right.count - left.count || left.left.localeCompare(right.left) || left.right.localeCompare(right.right))[0];
+      .sort((left, right) => right.count - left.count || lexicalCompare(left.left, right.left) || lexicalCompare(left.right, right.right))[0];
     if (!best) break;
     const merge = [best.left, best.right];
     merges.push(merge);

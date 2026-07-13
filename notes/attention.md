@@ -35,5 +35,9 @@ relationship.
 
 ## Try it yourself
 
+Print one causal attention row before and after masking. Explain which
+positions can influence the next token, then change one input token and record
+which output positions move.
+
 Remove the scale factor, then increase sequence length. Measure both numerical
 behavior and runtime.

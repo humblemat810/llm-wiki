@@ -1,9 +1,13 @@
 .git
 .github
+dist
 .env
 .env.*
 tests
 node_modules
+experiments/*.mjs
+scripts/build-pages.mjs
+scripts/check-release.mjs
 *.log
 llm-field-notes-*.json
 llm-field-notes-*.zip

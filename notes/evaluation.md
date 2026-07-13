@@ -32,4 +32,8 @@ without making it more useful.
 
 ## Try it yourself
 
+Write ten accepted and ten rejected examples for one narrow task. Score a
+baseline and a changed system, inspect every disagreement, and report one
+metric that improved and one failure the aggregate hid.
+
 Investigate scorer disagreement before adding more examples.

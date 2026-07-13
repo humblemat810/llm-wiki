@@ -26,7 +26,7 @@
       "properties": {
         "evaluatedAt": { "type": ["string", "null"] },
         "examples": { "type": ["integer", "null"], "minimum": 0 },
-        "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}$" }
+        "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}(?:[0-9a-f]{8})?$" }
       },
       "additionalProperties": false
     },
@@ -36,7 +36,7 @@
       "properties": {
         "evaluatedAt": { "type": ["string", "null"] },
         "examples": { "type": ["integer", "null"], "minimum": 0 },
-        "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}$" }
+        "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}(?:[0-9a-f]{8})?$" }
       },
       "additionalProperties": false
     },

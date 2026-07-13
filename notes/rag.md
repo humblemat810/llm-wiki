@@ -32,5 +32,9 @@ needed evidence.
 
 ## Try it yourself
 
+Ask a question whose answer appears in exactly one of ten documents. Compare
+the answer with and without retrieval, and require every claim in the
+retrieval-backed answer to cite a returned span.
+
 Create questions whose answers span two chunks. Check whether both pieces are
 retrieved before changing the generator.

@@ -31,5 +31,9 @@ the prompt.
 
 ## Try it yourself
 
+Build a loop with two read-only tools and a five-step limit. Log the chosen
+tool, arguments, result, and stop reason; then inject one malformed tool result
+and verify the loop refuses to treat it as trusted instructions.
+
 Ask a person to approve the plan before the first side effect. Record which
 approval details were missing.

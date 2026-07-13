@@ -6,6 +6,7 @@ export const CORE_SHELL_ASSETS = [
   "graph-store.js",
   "extractor-adapter.js",
   "projection-adapter.js",
+  "jsonld-projection.js",
   "storage-adapter.js",
   "evaluation.js",
   "manifest.webmanifest",
@@ -21,6 +22,7 @@ export const FIXED_PUBLIC_ASSETS = [
   "README.md",
   "ARCHITECTURE.md",
   "CHANGELOG.md",
+  "llms.txt",
   "LICENSE",
   "SECURITY.md",
   "CODE_OF_CONDUCT.md",
@@ -32,6 +34,7 @@ export const FIXED_PUBLIC_ASSETS = [
   "schema/diff.schema.json",
   "schema/evaluation-comparison.schema.json",
   "schema/health.schema.json",
+  "schema/jsonld.schema.json",
   "schema/vault-manifest.schema.json",
   "schema/extractor-request.schema.json",
   "schema/evaluation.schema.json"
@@ -62,6 +65,7 @@ export const OFFLINE_SHELL_ASSETS = [
   "README.md",
   "ARCHITECTURE.md",
   "CHANGELOG.md",
+  "llms.txt",
   "SECURITY.md",
   "CONTRIBUTING.md",
   "CODE_OF_CONDUCT.md",
@@ -74,5 +78,6 @@ export const OFFLINE_SHELL_ASSETS = [
   "schema/evaluation.schema.json",
   "schema/evaluation-comparison.schema.json",
   "schema/health.schema.json",
+  "schema/jsonld.schema.json",
   ...LEARNING_NOTE_ASSETS
 ];

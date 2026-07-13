@@ -31,5 +31,9 @@ silently change the user contract. “Works on my prompt” is not an SLO.
 
 ## Try it yourself
 
+Define a small SLO for a real workflow, then run it through a timeout, a
+provider failure, and a redacted-log path. Check that each outcome has a
+request ID, latency, safe error, and human escape hatch.
+
 Ask a real person to use the system without narration. Every question they ask
 is a missing product surface.

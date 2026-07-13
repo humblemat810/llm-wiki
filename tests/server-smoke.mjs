@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -345,7 +346,21 @@ try {
           edges: []
         };
       }
-      providerCalls.push({ document, feedbackCount: feedback.length, requestId });
+      if (document.title === "Provider metadata") {
+        return {
+          source: {
+            title: "Untrusted provider title",
+            text: "untrusted provider source text",
+            fingerprint: "untrusted-provider-fingerprint",
+            uri: "https://provider.example.test/private",
+            quality: "primary",
+            lastReviewedAt: "2020-01-01T00:00:00.000Z"
+          },
+          nodes: [{ label: "Attention", sources: ["untrusted-provider-source"], evidence: [{ text: "untrusted provider evidence", sources: ["untrusted-provider-source"] }] }],
+          edges: []
+        };
+      }
+      providerCalls.push({ document, feedback, feedbackCount: feedback.length, requestId });
       return extractGraph(document.title, document.text, { feedback });
     }
   });
@@ -359,7 +374,15 @@ try {
         operation: "extract-graph",
         schema: "llm-field-notes/graph@1",
         feedbackFormat: "llm-field-notes/feedback@1",
-        feedback: [{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }],
+        feedback: [{
+          kind: "concept",
+          id: "attention",
+          label: "Attention",
+          status: "accepted",
+          evidence: [{ text: "private source evidence" }],
+          sources: ["private-source"],
+          unexpected: "must be stripped"
+        }],
         document: { title: "Provider test", text: "Attention uses context to create a useful graph representation for review." }
       })
     });
@@ -367,7 +390,37 @@ try {
     assert.equal((await providerResponse.json()).schema, "llm-field-notes/graph@1");
     assert.equal(providerCalls.length, 1);
     assert.equal(providerCalls[0].feedbackCount, 1);
+    assert.deepEqual(providerCalls[0].feedback, [{
+      kind: "concept",
+      id: "attention",
+      label: "Attention",
+      status: "accepted"
+    }], "the server should strip untrusted feedback fields before invoking an extractor");
     assert.match(providerCalls[0].requestId, /^[0-9a-f-]{36}$/);
+    const providerMetadataResponse = await fetch(`http://127.0.0.1:${providerPort}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: {
+          title: "Provider metadata",
+          uri: "https://example.org/submitted-source",
+          text: "Attention uses context to create a useful graph representation for review."
+        }
+      })
+    });
+    assert.equal(providerMetadataResponse.status, 200);
+    const providerMetadataPayload = await providerMetadataResponse.json();
+    assert.equal(providerMetadataPayload.extraction.source.title, "Provider metadata", "server extraction must preserve the submitted document title");
+    assert.equal(providerMetadataPayload.extraction.source.text, "Attention uses context to create a useful graph representation for review.", "server extraction must preserve the submitted document text");
+    assert.equal(providerMetadataPayload.extraction.source.uri, "https://example.org/submitted-source", "server extraction must preserve the submitted source URI");
+    assert.equal(providerMetadataPayload.extraction.source.quality, "unknown", "provider output must not assign source quality");
+    assert.notEqual(providerMetadataPayload.extraction.source.fingerprint, "untrusted-provider-fingerprint", "server extraction must derive source fingerprints from submitted text");
+    assert.deepEqual(providerMetadataPayload.extraction.nodes[0].sources, [providerMetadataPayload.extraction.source.id], "server extraction must bind node provenance to the submitted source");
+    assert.deepEqual(providerMetadataPayload.extraction.nodes[0].evidence[0].sources, [providerMetadataPayload.extraction.source.id], "server extraction must bind evidence provenance to the submitted source");
     const oversizedResponse = await fetch(`http://127.0.0.1:${providerPort}/api/extract-graph`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -385,6 +438,9 @@ try {
     providerServer.close();
   }
   const failingServer = createAppServer({
+    logger: (entry) => {
+      if (entry.error) entry.loggedError = entry.error;
+    },
     extractor: async () => {
       throw Object.assign(new Error("provider unavailable"), { code: "UPSTREAM_DOWN" });
     }
@@ -407,6 +463,33 @@ try {
     assert.match(await failureResponse.text(), /configured extractor failed/);
   } finally {
     failingServer.close();
+  }
+  const unsafeCodeLogs = [];
+  const unsafeCodeServer = createAppServer({
+    logger: (entry) => unsafeCodeLogs.push(entry),
+    extractor: async () => {
+      throw Object.assign(new Error("provider unavailable"), { code: "private document text should not be logged" });
+    }
+  });
+  await new Promise((resolve) => unsafeCodeServer.listen(0, "127.0.0.1", resolve));
+  const unsafeCodePort = unsafeCodeServer.address().port;
+  try {
+    const unsafeCodeResponse = await fetch(`http://127.0.0.1:${unsafeCodePort}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Unsafe diagnostic", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(unsafeCodeResponse.status, 502);
+    assert(unsafeCodeLogs.every((entry) => entry.error !== "private document text should not be logged"), "untrusted diagnostic codes should not be written to logs");
+    assert(unsafeCodeLogs.some((entry) => entry.error === "EXTRACTOR_FAILURE"), "unsafe diagnostic codes should fall back to a bounded code");
+  } finally {
+    unsafeCodeServer.close();
   }
   const timeoutLogs = [];
   const timeoutServer = createAppServer({
@@ -514,7 +597,8 @@ try {
       })
     });
     await drainStarted;
-    drainServer.abortActiveExtractors();
+    assert.equal(drainServer.beginDrain(), true, "programmatic shutdown should enter draining mode once");
+    assert.equal(drainServer.beginDrain(), false, "shutdown entry should be idempotent");
     const drainResponse = await drainRequest;
     assert.equal(drainResponse.status, 502);
     assert(drainAborted, "shutdown should abort active provider work");
@@ -596,6 +680,8 @@ try {
   assert.equal(unsupportedType.status, 415);
   const traversal = await fetch(`http://127.0.0.1:${port}/%2e%2e/%2e%2e/etc/passwd`);
   assert.equal(traversal.status, 404);
+  const malformedPathEncoding = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
+  assert.equal(malformedPathEncoding.status, 400, "malformed path encoding should be a client error");
   const privateAsset = await fetch(`http://127.0.0.1:${port}/package.json`);
   assert.equal(privateAsset.status, 404);
   assert.equal(privateAsset.headers.get("cache-control"), "no-store");
@@ -708,12 +794,30 @@ try {
     const metricsMissingToken = await fetch(`http://127.0.0.1:${protectedMetricsPort}/metrics`);
     assert.equal(metricsMissingToken.status, 401, "metrics authentication should reject missing credentials when configured");
     assert.equal(metricsMissingToken.headers.get("www-authenticate"), "Bearer");
+    const metricsMissingTokenHead = await fetch(`http://127.0.0.1:${protectedMetricsPort}/metrics`, { method: "HEAD" });
+    assert.equal(metricsMissingTokenHead.status, 401, "protected metrics should preserve authentication failures for HEAD probes");
+    assert.equal(await metricsMissingTokenHead.text(), "", "protected metrics HEAD failures should not contain a body");
     const metricsWithToken = await fetch(`http://127.0.0.1:${protectedMetricsPort}/metrics`, {
       headers: { authorization: "Bearer metrics-secret-token" }
     });
     assert.equal(metricsWithToken.status, 200, "metrics authentication should accept its configured bearer token");
   } finally {
     protectedMetricsServer.close();
+  }
+  const xmlRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-xml-"));
+  await mkdir(join(xmlRoot, "notes"), { recursive: true });
+  await writeFile(join(xmlRoot, "notes", "control.md"), "# Unsafe\u0001 title\n\nA useful learning note with enough context for a feed summary.");
+  const xmlServer = createAppServer({ staticRoot: xmlRoot, publicOrigin: "https://xml.example.test" });
+  await new Promise((resolve) => xmlServer.listen(0, "127.0.0.1", resolve));
+  const xmlPort = xmlServer.address().port;
+  try {
+    const xmlFeed = await fetch(`http://127.0.0.1:${xmlPort}/feed.xml`);
+    const xmlFeedText = await xmlFeed.text();
+    assert.equal(xmlFeed.status, 200);
+    assert(!xmlFeedText.includes("\u0001"), "runtime Atom feeds should remove invalid XML control characters");
+  } finally {
+    xmlServer.close();
+    await rm(xmlRoot, { recursive: true, force: true });
   }
   const seoServer = createAppServer({ publicOrigin: "https://notes.example.test" });
   await new Promise((resolve) => seoServer.listen(0, "127.0.0.1", resolve));
@@ -722,6 +826,10 @@ try {
     const seoIndex = await fetch(`http://127.0.0.1:${seoPort}/`);
     const seoIndexText = await seoIndex.text();
     assert(seoIndexText.includes('href="https://notes.example.test/"') && seoIndexText.includes('href="https://notes.example.test/feed.xml"') && seoIndexText.includes('content="https://notes.example.test/"') && (seoIndexText.match(/content="https:\/\/notes\.example\.test\/social-card\.svg"/g) || []).length === 2, "configured public origins should emit absolute canonical and social metadata");
+    const seoStructuredData = seoIndexText.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)?.[1];
+    assert(seoStructuredData, "origin-aware server HTML should retain structured discovery metadata");
+    const seoStructuredDataCsp = `'sha256-${createHash("sha256").update(seoStructuredData).digest("base64")}'`;
+    assert((seoIndex.headers.get("content-security-policy") || "").includes(seoStructuredDataCsp), "origin-aware server CSP should authorize rewritten structured metadata");
     const seoIndexEtag = seoIndex.headers.get("etag");
     assert.match(seoIndexEtag || "", /^"[0-9a-f]{64}"$/);
     assert.equal((await fetch(`http://127.0.0.1:${seoPort}/`, { headers: { "if-none-match": seoIndexEtag } })).status, 304, "origin-aware HTML should revalidate against its transformed representation");
@@ -733,6 +841,7 @@ try {
     assert.equal(sitemap.status, 200, "configured public origins should expose a sitemap");
     assert.equal(sitemap.headers.get("content-type"), "application/xml; charset=utf-8");
     assert((await sitemap.text()).includes("https://notes.example.test/notes/tokens.md"), "sitemap should include crawlable learning notes");
+    assert(!(await (await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`)).text()).includes("https://notes.example.test/notes/README.md"), "sitemap should exclude the learning-map index README");
     const seoRobots = await fetch(`http://127.0.0.1:${seoPort}/robots.txt`);
     assert.equal(seoRobots.status, 200);
     assert.equal(seoRobots.headers.get("content-type"), "text/plain; charset=utf-8", "dynamic robots should use the standard text MIME type");
@@ -765,6 +874,16 @@ try {
     assert.equal(feedHead.status, 200);
     assert.equal(feedHead.headers.get("etag"), feedEtag);
     assert.equal(await feedHead.text(), "", "Atom feed HEAD responses should not contain a body");
+    const subpathServer = createAppServer({ publicOrigin: "https://notes.example.test/field-notes/" });
+    await new Promise((resolve) => subpathServer.listen(0, "127.0.0.1", resolve));
+    const subpathPort = subpathServer.address().port;
+    try {
+      const subpathSitemap = await fetch(`http://127.0.0.1:${subpathPort}/sitemap.xml`);
+      assert.equal(subpathSitemap.status, 200, "Node deployments should accept project-subpath public origins");
+      assert((await subpathSitemap.text()).includes("https://notes.example.test/field-notes/notes/tokens.md"), "project-subpath sitemaps should preserve the deployment prefix");
+    } finally {
+      subpathServer.close();
+    }
     const noOriginServer = createAppServer();
     await new Promise((resolve) => noOriginServer.listen(0, "127.0.0.1", resolve));
     const noOriginPort = noOriginServer.address().port;

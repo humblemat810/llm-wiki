@@ -40,6 +40,7 @@ const cachesApi = {
 };
 let online = true;
 let hanging = false;
+let networkStatus = 200;
 let networkCalls = 0;
 let lastFetchOptions = null;
 let claimCalls = 0;
@@ -61,7 +62,7 @@ const context = {
       });
     }
     if (!online) throw new Error("offline");
-    return new Response(`fresh:${request.url}`, { status: 200 });
+    return new Response(`fresh:${request.url}`, { status: networkStatus });
   },
   self: {
     location,
@@ -113,6 +114,11 @@ const freshWithCacheFailure = await dispatchFetch({ method: "GET", mode: "cors",
 assert.equal(await freshWithCacheFailure.text(), `fresh:${new URL("./styles.css", location).toString()}`, "cache failures must not hide fresh network responses");
 cacheWritable = true;
 
+networkStatus = 503;
+const transientHttpFailure = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
+assert.equal(await transientHttpFailure.text(), `fresh:${new URL("./app.js", location).toString()}`, "cached shell assets should survive transient non-OK network responses");
+networkStatus = 200;
+
 const callsBeforeApi = networkCalls;
 const apiResponse = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./healthz", location).toString() });
 assert.equal(apiResponse, undefined, "API and health requests should bypass the service worker");
@@ -121,6 +127,8 @@ assert.equal(networkCalls, callsBeforeApi, "bypassed requests should not be fetc
 online = false;
 const offlineShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await offlineShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "offline shell requests should use the updated cache");
+const offlineVersionedShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js?cache-bust=1", location).toString() });
+assert.equal(await offlineVersionedShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "offline shell requests with cache-busting queries should reuse the pathname cache");
 const offlineNavigation = await dispatchFetch({ method: "GET", mode: "navigate", url: new URL("./missing-route", location).toString() });
 assert((await offlineNavigation.text()).startsWith("cached:"), "offline navigation should fall back to the cached index");
 hanging = true;

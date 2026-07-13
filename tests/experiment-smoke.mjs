@@ -56,6 +56,16 @@ try {
     (error) => String(error?.stderr).includes("fingerprint does not match"),
     "graph diff should reject tampered backup envelopes"
   );
+  const fingerprintedGraphPath = join(diffRoot, "fingerprinted-graph.json");
+  await writeFile(fingerprintedGraphPath, JSON.stringify({
+    ...JSON.parse(await readFile(afterPath, "utf8")),
+    graphFingerprint: "fnv64-0000000000000000-1"
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/diff-graphs.mjs", fingerprintedGraphPath, afterPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Graph input fingerprint does not match"),
+    "graph diff should reject tampered direct graph exports"
+  );
   const baselineEvaluationPath = join(diffRoot, "baseline-evaluation.json");
   const candidateEvaluationPath = join(diffRoot, "candidate-evaluation.json");
   const evaluation = (acceptedRecall, suppressionRate) => ({
@@ -65,17 +75,18 @@ try {
     feedback: {
       examples: 4,
       datasetFingerprint: "fnv1a-deadbeef",
+      conflicts: 0,
       concepts: {
-        accepted: { recall: acceptedRecall },
+        accepted: { recall: acceptedRecall, reviewedPrecision: acceptedRecall, evidenceCoverage: acceptedRecall },
         rejected: { suppressionRate }
       },
       relations: {
-        accepted: { recall: acceptedRecall },
+        accepted: { recall: acceptedRecall, reviewedPrecision: acceptedRecall, evidenceCoverage: acceptedRecall },
         rejected: { suppressionRate }
       }
     },
     overall: {
-      accepted: { recall: acceptedRecall },
+      accepted: { recall: acceptedRecall, reviewedPrecision: acceptedRecall, evidenceCoverage: acceptedRecall },
       rejected: { suppressionRate }
     }
   });
@@ -85,8 +96,28 @@ try {
   const comparison = JSON.parse(comparisonOutput);
   assert.equal(comparison.format, "llm-field-notes/evaluation-comparison@1");
   assert.equal(comparison.passed, true, "an improving evaluation should pass the promotion gate");
+  assert(comparison.metrics.some((metric) => metric.name === "overall.accepted.evidenceCoverage"), "promotion comparisons should include evidence coverage when both reports provide it");
+  assert(comparison.metrics.some((metric) => metric.name === "overall.accepted.reviewedPrecision"), "promotion comparisons should include reviewed precision when both reports provide it");
   assert.equal(comparison.regressions.length, 0);
   assert.equal(comparison.baseline.datasetFingerprint, "fnv1a-deadbeef");
+  await writeFile(candidateEvaluationPath, JSON.stringify({
+    ...evaluation(.9, .95),
+    feedback: { ...evaluation(.9, .95).feedback, conflicts: 1 }
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/compare-evaluations.mjs", baselineEvaluationPath, candidateEvaluationPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("contradictory reviewed decisions"),
+    "the promotion gate should reject contradictory reviewed datasets"
+  );
+  await writeFile(candidateEvaluationPath, JSON.stringify({
+    ...evaluation(.9, .95),
+    feedback: { ...evaluation(.9, .95).feedback, examples: 0 }
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/compare-evaluations.mjs", baselineEvaluationPath, candidateEvaluationPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("at least one reviewed example"),
+    "the promotion gate should reject empty reviewed benchmarks"
+  );
   await writeFile(candidateEvaluationPath, JSON.stringify(evaluation(.74, .8)));
   assert.throws(
     () => execFileSync(process.execPath, ["experiments/compare-evaluations.mjs", baselineEvaluationPath, candidateEvaluationPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
@@ -105,17 +136,89 @@ try {
   await writeFile(healthPath, JSON.stringify({
     schema: "llm-field-notes/graph@1",
     documents: [{ id: "health-source", title: "Health source", text: "health source text", fingerprint: "health-source" }],
-    nodes: [{ id: "health-node", label: "Health node", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z", sources: ["missing-source"], evidence: [] }]
+    nodes: [{ id: "health-node", label: "Health node", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z", sources: ["missing-source"], evidence: [] }],
+    learning: { examples: [{ kind: "concept", id: "old-learning", label: "Old learning", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z" }] }
   }));
   const healthOutput = execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath], { encoding: "utf8" });
   const health = JSON.parse(healthOutput);
   assert.equal(health.format, "llm-field-notes/health@1");
   assert.match(health.graphFingerprint, /^fnv64-[0-9a-f]{16}-\d+$/, "health reports should identify the exact normalized graph inspected");
   assert.equal(health.gate.passed, true, "health diagnostics without thresholds should pass");
+  assert.equal(health.health.staleLearningExamples, 1, "health diagnostics should report stale reusable learning examples");
+  const jsonLdOutput = execFileSync(process.execPath, ["experiments/project-jsonld.mjs", healthPath], { encoding: "utf8" });
+  const jsonLd = JSON.parse(jsonLdOutput);
+  assert.equal(jsonLd["@type"], "schema:Dataset", "JSON-LD CLI should emit the shared dataset projection");
+  assert.equal(jsonLd.format, "llm-field-notes/jsonld@1");
+  assert.equal(jsonLd.redacted, false);
+  const jsonLdPath = join(diffRoot, "health-graph.jsonld");
+  await writeFile(jsonLdPath, jsonLdOutput);
+  const verificationOutput = execFileSync(process.execPath, ["experiments/verify-jsonld.mjs", healthPath, jsonLdPath], { encoding: "utf8" });
+  assert.equal(JSON.parse(verificationOutput).verified, true, "JSON-LD verification CLI should accept a matching projection");
+  const semanticallyTamperedJsonLdPath = join(diffRoot, "tampered-health-graph.jsonld");
+  await writeFile(semanticallyTamperedJsonLdPath, JSON.stringify({ ...jsonLd, name: "Tampered dataset" }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/verify-jsonld.mjs", healthPath, semanticallyTamperedJsonLdPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("does not match the normalized graph"),
+    "JSON-LD verification CLI should reject semantic projection tampering"
+  );
+  const redactedJsonLdOutput = execFileSync(process.execPath, ["experiments/project-jsonld.mjs", healthPath, "--redacted"], { encoding: "utf8" });
+  const redactedJsonLd = JSON.parse(redactedJsonLdOutput);
+  assert.equal(redactedJsonLd.redacted, true, "JSON-LD CLI should support redacted projections");
+  assert(redactedJsonLd["@graph"].filter((item) => item["@type"] === "schema:CreativeWork").every((item) => !Object.hasOwn(item, "text")), "redacted JSON-LD CLI output should remove source text");
+  const tamperedHealthPath = join(diffRoot, "tampered-health-graph.json");
+  await writeFile(tamperedHealthPath, JSON.stringify({
+    ...JSON.parse(await readFile(healthPath, "utf8")),
+    graphFingerprint: "fnv64-0000000000000000-1"
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", tamperedHealthPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Graph input fingerprint does not match"),
+    "graph health should reject tampered direct graph exports"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/project-jsonld.mjs", tamperedHealthPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Graph input fingerprint does not match"),
+    "JSON-LD projection should reject tampered direct graph exports"
+  );
+  const feedbackInputPath = join(diffRoot, "feedback.json");
+  await writeFile(feedbackInputPath, JSON.stringify({
+    format: "llm-field-notes/feedback@1",
+    examples: [{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }]
+  }));
+  const tamperedExtractionPath = join(diffRoot, "tampered-extraction.json");
+  await writeFile(tamperedExtractionPath, JSON.stringify({
+    ...JSON.parse(await readFile(afterPath, "utf8")),
+    graphFingerprint: "fnv64-0000000000000000-1"
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/evaluate-feedback.mjs", feedbackInputPath, tamperedExtractionPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Extraction graph fingerprint does not match"),
+    "evaluation should reject tampered direct graph exports"
+  );
+  const wrappedTamperedExtractionPath = join(diffRoot, "wrapped-tampered-extraction.json");
+  await writeFile(wrappedTamperedExtractionPath, JSON.stringify({
+    schema: "llm-field-notes/graph@1",
+    extraction: JSON.parse(await readFile(tamperedExtractionPath, "utf8"))
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/evaluate-feedback.mjs", feedbackInputPath, wrappedTamperedExtractionPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Extraction graph fingerprint does not match"),
+    "evaluation should reject tampered graph fingerprints inside response envelopes"
+  );
   assert.throws(
     () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-orphaned", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("orphaned source references"),
     "health thresholds should fail when graph quality misses the requested gate"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-unsupported-nodes", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("unsupported concepts"),
+    "health thresholds should fail when unsupported concepts exceed the requested gate"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--min-fresh-source-review", "1"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("fresh source-review coverage"),
+    "health thresholds should fail when fresh source-review coverage misses the requested gate"
   );
   assert.throws(
     () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-review-candidates", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
@@ -126,6 +229,24 @@ try {
     () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-stale-review-candidates", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("stale review candidates"),
     "health thresholds should fail when stale review debt exceeds the requested gate"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-stale-learning-examples", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("stale learning examples"),
+    "health thresholds should fail when reusable learning memory is stale"
+  );
+  const ambiguousHealthPath = join(diffRoot, "ambiguous-health-graph.json");
+  await writeFile(ambiguousHealthPath, JSON.stringify({
+    schema: "llm-field-notes/graph@1",
+    nodes: [
+      { id: "ambiguous-a", label: "Same concept" },
+      { id: "ambiguous-b", label: "Same concept" }
+    ]
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", ambiguousHealthPath, "--max-ambiguous", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("ambiguous integrity and label diagnostics"),
+    "health thresholds should include ambiguous canonical concept labels"
   );
 } finally {
   await rm(diffRoot, { recursive: true, force: true });

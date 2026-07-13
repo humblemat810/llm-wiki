@@ -9,7 +9,7 @@
     "format": { "const": "llm-field-notes/feedback@1" },
     "graphSchema": { "const": "llm-field-notes/graph@1" },
     "exportedAt": { "type": "string", "format": "date-time" },
-    "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}$" },
+    "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}(?:[0-9a-f]{8})?$" },
     "examples": {
       "type": "array",
       "maxItems": 15000,

@@ -16,9 +16,11 @@ their respective modules. This makes extraction and persistence testable
 without requiring a browser DOM.
 
 External or model-backed extractors should pass their result through
-`normalizeExtraction()` before merging. They may return labels, endpoint names,
-and partial confidence/evidence; the normalizer supplies stable IDs, source
-provenance, defaults, and schema-safe fields.
+`normalizeExtraction()` before merging. HTTP adapters and the reference server
+should use `normalizeExtractionForDocument()` when the submitted document's
+title, text, URI, and provenance must remain authoritative. Extractors may
+return labels, endpoint names, and partial confidence/evidence; the normalizer
+supplies stable IDs, source provenance, defaults, and schema-safe fields.
 
 Persistence code should fail closed: malformed local state must remain
 recoverable, and user-facing mutations must report storage failures instead of
@@ -82,5 +84,9 @@ not sure, label the uncertainty.
 Open an issue or pull request with the smallest coherent change. The project
 maintains a friendly bar: clarity, reproducibility, and intellectual honesty
 matter more than polish.
+
+For a new learning page, use the Learning note issue template first. It keeps
+the question, build, failure modes, sources, and reproducible exercise visible
+before prose or code is added.
 
 Participation follows the project’s [Code of Conduct](CODE_OF_CONDUCT.md).

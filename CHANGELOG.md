@@ -6,6 +6,242 @@ All notable changes to LLM Field Notes are documented here.
 
 ### Added
 
+- Added a dependency-free JSON-LD verification CLI for CI and artifact
+  pipelines, sharing the graph-input and deterministic projection boundaries
+  used by the exporter and browser.
+- Extended JSON-LD projections with source fingerprints, concept types, review
+  timestamps, feedback counts, and other audit metadata needed to preserve the
+  self-improvement loop outside the browser.
+- Tightened the public JSON-LD schema to validate typed source, concept, and
+  relation members instead of validating only the projection envelope.
+- Aligned JSON-LD IRI bounds with escaped Unicode graph identities so valid
+  non-ASCII IDs cannot fail their own published schema contract.
+- Preserved explicit relation and concept source provenance in JSON-LD through
+  `lfn:sources`, avoiding ambiguity with relation endpoints.
+- Kept concept `updatedAt` synchronized with human feedback timestamps so
+  item-history and review-history metadata cannot drift.
+- Preserved source and concept creation/update timestamps in JSON-LD so
+  external projections retain representation chronology.
+- Added bounded JSON-LD learning-example members and graph evolution counts so
+  external consumers can inspect the self-improvement loop.
+- Preserved human-readable endpoint labels in JSON-LD relation-learning
+  examples so portable feedback remains useful without the original graph.
+- Made JSON-LD canonical verification locale-independent for reproducible
+  artifact checks across deployment environments.
+- Tightened JSON-LD learning-example validation so concept and relation members
+  must carry their kind-specific references and labels.
+- Declared chronology and learning fields explicitly in the JSON-LD context for
+  consistent expansion by generic semantic-web tooling.
+- Hardened server request parsing so malformed request targets return HTTP 400
+  instead of being misclassified as internal HTTP 500 failures.
+- Fixed partial Obsidian source-note imports so an omitted URI field preserves
+  existing provenance while an explicitly empty URI still clears it.
+- Added an operator-facing production launch checklist covering TLS, secrets,
+  gateway controls, monitoring, backups, and projection round-trip checks.
+- Clarified the contributor and deployment documentation around the
+  provenance-preserving extraction normalization boundary.
+- Added reviewed-candidate precision to evaluation reports and promotion
+  comparisons, while keeping its sparse-feedback limitation explicit.
+- Corrected evaluation matching so accepted and rejected examples are compared
+  to the candidate item being scored instead of an unrelated item in the
+  extraction.
+- Made evaluation conflict detection use portable relation endpoint labels and
+  endpoint-order-insensitive identity when workspace-specific edge IDs differ.
+- Prevented relation labels beyond the slug bound from collapsing into one
+  semantic edge or sharing a merged edge ID.
+- Encoded relation semantic keys structurally so delimiter characters in
+  imported endpoint IDs cannot create identity collisions.
+- Made feedback dataset fingerprints use locale-independent canonical ordering,
+  keeping Unicode learning exports reproducible across deployment environments.
+- Made review-queue and BPE tie-breaking locale-independent so browser review
+  order and runnable experiment outputs remain reproducible across hosts.
+- Made Pages feed ordering and browser merge-target ordering locale-independent
+  to avoid host-specific public artifacts and review controls.
+- Made the local extractor Unicode-aware so non-Latin concept labels, IDs, and
+  feedback matching survive normalization and multilingual documents produce
+  useful candidate graphs.
+- Added an explicit per-unit multilingual word bound to keep Unicode
+  segmentation resource usage predictable.
+- Enforced the multilingual word bound while matching, preventing the
+  fallback tokenizer from allocating an unbounded intermediate match list.
+- Added an explicit Unicode segmentation character budget and filtered
+  numeric-only tokens from local concept candidates.
+- Made learning-note deep links update browser and share metadata, improving
+  clarity when notes are shared or opened in separate tabs.
+- Made service-worker shell fallback normalize cache-busting query strings so
+  offline versioned asset requests reuse the precached pathname.
+- Strengthened Obsidian vault integrity checks so embedded JSON-LD must match
+  the authoritative embedded graph projection semantically, not merely repeat
+  a valid fingerprint, version, and redaction marker.
+- Made JSON-LD artifact verification tolerant of object-key and unordered
+  member ordering changes while retaining content and privacy-boundary checks.
+
+- Corrected accepted-recall evaluation so explicitly rejected candidate items
+  cannot be counted as successful extraction.
+- Added source-anchored evidence coverage to extractor evaluation reports and
+  optional promotion metrics, separating “found” concepts/relations from
+  supported ones.
+- Corrected evaluation matching so reused relation IDs cannot hide changed
+  labels or mismatched endpoint pairs during extractor promotion checks, while
+  preserving the graph's endpoint-order-insensitive relation identity.
+- Centralized endpoint-order-insensitive relation identity across graph
+  normalization, extraction merging, concept merging, and feedback resolution.
+- Extended graph fingerprint verification to health, diff, and evaluation CLI
+  inputs so tampered external projections cannot silently become reports or
+  promotion inputs.
+- Aligned Obsidian relation feedback with graph identity so reversed endpoint
+  order updates the same semantic relation while unrelated pairs still fail
+  closed.
+- Bound embedded Obsidian graph version, schema, redaction state, and
+  fingerprint to the vault manifest so inconsistent projection metadata fails
+  closed before feedback can be applied.
+- Added full and redacted JSON-LD exports so the normalized representation can
+  move into semantic-web and graph tooling without making a projection a
+  second source of truth.
+- Extracted JSON-LD generation into a reusable pure module and added it to the
+  Pages and offline asset contracts.
+- Added a versioned JSON-LD schema so external consumers can validate the
+  interoperability projection before ingestion.
+- Included the JSON-LD projection inside Obsidian vault exports and validated
+  its metadata against the vault manifest during import.
+- Aligned Node `PUBLIC_ORIGIN` handling with the Pages builder so GitHub Pages
+  project subpaths produce correct canonical URLs, feeds, and sitemaps.
+- Centralized public-origin normalization so Node and Pages deployments cannot
+  drift on canonical URL or crawler metadata behavior.
+- Reused the workbench's existing graph-health snapshot when rendering the
+  live Markdown preview, avoiding a duplicate large-graph diagnostic scan.
+- Aligned graph, diff, and extractor-request URI schemas with runtime source
+  URI validation, including rejection of ambiguous, whitespace-containing, and
+  credential-bearing HTTP(S)/file forms.
+- Added privacy-safe graph health diagnostics to Markdown and Obsidian index
+  projections, keeping provenance gaps and review debt visible outside the
+  browser.
+- Added a fingerprinted `Learning/review-ledger.md` to Obsidian vaults, making
+  reusable human decisions navigable and linked to their concept/relation
+  projections without creating a second source of truth.
+- Corrected graph provenance coverage to measure active concepts and relations,
+  including evidence-free items, so missing provenance cannot look healthy
+  merely because no evidence records were present.
+- Hardened source URI normalization by rejecting ambiguous HTTP forms and
+  embedded HTTP(S) credentials before metadata reaches storage or projections.
+- Made browser and server extraction preserve the submitted document's
+  provenance envelope, preventing provider responses from rewriting source text,
+  URI, quality, review metadata, content fingerprints, or node/evidence source
+  references.
+- Added optional origin-aware `sitemap.xml` and `robots.txt` generation to
+  the GitHub Pages artifact, improving crawler discovery when `PUBLIC_ORIGIN`
+  is configured.
+- Made the Pages workflow automatically pass its configured deployment base
+  URL into the static build, so crawler metadata works without manual setup.
+- Made Pages rewrite canonical, feed, and social-card metadata to the configured
+  deployment origin, including GitHub Pages project subpaths.
+- Aligned structured JSON-LD application URLs with the same deployment origin,
+  preventing conflicting identity metadata in static and server-rendered shells.
+- Recomputed CSP hashes after origin-aware JSON-LD rewrites, keeping generated
+  Pages artifacts and server-rendered HTML valid under the strict script policy.
+- Strengthened reviewed feedback-dataset fingerprints to a dual-lane 64-bit
+  digest, while continuing to accept legacy 32-bit fingerprints during import
+  and evaluation migration.
+- Corrected unauthenticated metrics `HEAD` responses so operational probes
+  receive headers and status without an invalid response body.
+- Compacted reviewed feedback at the server trust boundary so unrecognized
+  fields cannot forward source evidence or other private payloads to providers.
+- Made duplicate Obsidian feedback deterministic: identical notes collapse,
+  while conflicting edits are skipped and reported instead of silently using
+  the last file's values.
+- Fixed redacted graph and vault exports to scrub evidence quotes retained in
+  reusable learning memory, closing a source-text privacy leak.
+- Preserved and validated relation endpoints in Obsidian imports so colliding
+  relation IDs cannot redirect edits to a different local edge.
+- Bound Obsidian source metadata edits to each document fingerprint so source
+  ID collisions cannot redirect edits to another document.
+- Made the redacted marker enforceable during graph normalization, scrubbing
+  tampered source text, URIs, and evidence instead of trusting the label alone.
+- Aligned Node crawler feeds and sitemaps with Pages by excluding the learning
+  map's `notes/README.md` index while continuing to serve it directly.
+- Bounded provider diagnostic codes before structured logging so custom extractor
+  failures cannot inject arbitrary document text into operational logs.
+- Added optional deterministic fingerprints to direct graph JSON exports and
+  verified them on import, while preserving compatibility with legacy graphs.
+- Sanitized invalid XML control characters from generated feeds and sitemaps,
+  keeping crawler artifacts valid when forked learning notes contain controls.
+- Added the graph fingerprint to the embedded Obsidian `graph.json`, keeping
+  extracted vault representations verifiable alongside their manifest.
+- Made vault imports verify embedded graph JSON against its own fingerprint and
+  manifest before applying any Obsidian feedback.
+- Bounded generated feed and sitemap responses to 2 MB in both Pages builds and
+  the Node server, preventing oversized forked curricula from overwhelming crawlers.
+- Improved the local heuristic extractor for punctuation-light and mixed
+  Markdown by supplementing prose with bounded paragraph, bullet, numbered-list,
+  and quote-line units without merging separate list items into false
+  cross-item relations.
+- Pinned CI and Pages GitHub Actions to immutable commit references and added
+  a release gate against mutable workflow tags.
+- Made the workflow pin gate discover every YAML workflow, so new automation
+  cannot silently bypass the reproducibility check.
+- Reduced the Docker runtime context by excluding experiment modules and
+  build/release-only scripts while retaining the server's public asset map.
+- Preserved the newest relation review timestamp when concept merges collapse
+  parallel edges, keeping review freshness stable through consolidation.
+- Invalidated review dates for retained concepts, relations, and reusable
+  learning entries when source removal changes their evidence basis.
+- Preserved the newest review timestamp when concept merges collapse duplicate
+  relation learning examples onto one canonical edge.
+- Preserved the newest update timestamp when duplicate concepts are normalized,
+  preventing imported revision metadata from moving backward.
+- Made duplicate learning decisions resolve by review freshness when timestamps
+  exist, preventing an older correction from replacing newer reusable guidance.
+- Applied the same review-freshness rule to feedback-dataset imports and live
+  learning-memory updates, keeping every learning write path consistent.
+- Applied review freshness before mutating graph items during feedback imports,
+  so an older contradictory decision cannot override a newer human correction
+  merely because it appears later in a dataset.
+- Applied review freshness when combining live graph decisions with reusable
+  memory for extractor guidance, while keeping internal review timestamps out
+  of provider request payloads.
+- Prevented stale feedback aliases from entering the live representation when
+  their associated decision is older than the graph's current review.
+- Made portable relation feedback resolve reversed endpoint order, matching
+  the graph merge identity and preventing valid corrections from being skipped.
+- Made extraction guidance resolve reversed reviewed relation endpoints too, so
+  portable corrections continue influencing later representations.
+- Made full feedback exports preserve the freshest decision when live graph
+  state and reusable memory contain the same reviewed identity.
+- Made valid repeated feedback imports idempotent in the workbench, reporting
+  that the dataset is already current instead of showing a misleading error.
+- Kept revision-limit failures ahead of idempotent feedback success messages,
+  so a full graph still tells users to export a backup before further imports.
+- Added stale reusable-learning diagnostics to graph health, the workbench, and
+  the CLI gate so aging unmatched feedback cannot silently guide extraction.
+- Added a confirmation-based workbench action to forget only stale reusable
+  learning memory while preserving fresh reviewed guidance and undo history.
+- Corrected feedback-import change accounting so stale decisions rejected by
+  newer graph state do not create phantom learning revisions.
+- Made review-next relation navigation scroll the selected relation into view,
+  matching concept navigation on large graph lists.
+- Made review-next clear transient graph filters before navigation, ensuring
+  queued candidates are visible even when search was active.
+- Made review-next move keyboard focus to the inspector so selected evidence is
+  immediately reachable after navigation.
+- Ordered review-next list activation before candidate selection so scrolling
+  works even when the graph view was active.
+- Canonicalized portable feedback to matched graph identities before conflict
+  resolution, preventing workspace-specific relation IDs from hiding conflicts.
+- Hardened feedback identity matching so a colliding local ID fails closed
+  instead of silently applying feedback to another local identity.
+- Rejected malformed concept and relation review dates at the Obsidian parser
+  boundary instead of silently clearing valid review metadata.
+- Prevented malformed Obsidian-shaped notes from falling through as ordinary
+  source documents during unpacked-note imports.
+- Added one-click redacted Markdown export so users can share graph structure
+  without copying source text, evidence quotes, or URIs.
+- Sanitized pipe characters in Markdown and Obsidian wiki-link labels so
+  imported concept and source names cannot corrupt projection navigation.
+- Declared explicit button types on dynamically rendered graph and inspector
+  controls, keeping review interactions safe when the workbench is embedded
+  in a form or reused by another host page.
+- Preserved the newest review timestamp when normalization merges duplicate
+  concepts or relations, keeping stale-review detection accurate after imports.
 - Added bounded review timestamps to concepts, relations, and reusable
   learning examples, preserving human-audit freshness through graph JSON and
   Obsidian projections.
@@ -17,6 +253,64 @@ All notable changes to LLM Field Notes are documented here.
   strip for operational review-debt monitoring.
 - Extended stale-review monitoring to source quality and provenance metadata,
   not only concepts and relations.
+- Included reusable learning review dates in the Markdown projection so
+  human-readable audits retain decision freshness.
+- Added fresh source-review coverage to health reports so historical reviews
+  cannot be mistaken for current provenance confidence.
+- Added an optional `--min-fresh-source-review` health gate for enforcing
+  current provenance confidence in automation.
+- Excluded generated Pages output from Docker build context so runtime images
+  contain only the Node deployment surface.
+- Made heuristic extractor source IDs deterministic from document content,
+  improving reproducibility for standalone extraction and cross-workspace
+  comparisons.
+- Strengthened `release:check` to validate every shared public asset, not only
+  the offline service-worker shell.
+- Added a release parity check for dynamically discovered learning notes, so
+  Node and Pages deployments cannot silently publish different curricula.
+- Cleaned generated Atom feed summaries so public learning-note previews do not
+  expose raw Markdown formatting.
+- Made the Pages smoke test self-contained so it builds its artifact before
+  testing static delivery on a clean checkout.
+- Added a title fallback so sparse learning notes cannot create empty feed
+  summaries.
+- Added a bounded inline latest-diff preview to the workbench so users can
+  inspect representation changes without exporting first.
+- Preserved schema-recognized but malformed persisted graphs as recovery
+  snapshots before normalization, making repairable local-state corruption
+  inspectable instead of silent.
+- Made the service worker fall back to cached shell assets for transient
+  non-OK network responses, not only transport failures.
+- Added content-fingerprint preconditions to graph mutations so same-version
+  imports or restores cannot silently overwrite a divergent tab state.
+- Exposed an idempotent `beginDrain()` lifecycle primitive for programmatic
+  server hosts, keeping readiness, provider cancellation, and idle-connection
+  cleanup consistent with CLI shutdown.
+- Added a separate undo-history recovery snapshot and workbench download action
+  so malformed prior revisions remain inspectable instead of being discarded.
+- Made stale Obsidian vault and note imports require explicit confirmation
+  before applying edits to a newer graph revision.
+- Extended that confirmation to notes and vaults with missing or invalid
+  projection identity metadata.
+- Made ZIP imports fail closed when exported concept or relation notes are
+  malformed, preventing partial feedback application from hiding edits.
+- Restored source-note metadata to the validated ZIP round-trip so Obsidian
+  source quality, URI, and review edits are not silently ignored.
+- Rejected duplicate Obsidian frontmatter keys so ambiguous manual edits cannot
+  silently select the last value.
+- Rejected invalid Obsidian status, source-quality, review-date, alias, and URI
+  fields before any projection edit can be applied.
+- Made the evaluation promotion gate reject empty reviewed benchmarks so
+  apparently perfect metrics cannot promote an untested extractor.
+- Made the evaluation promotion gate reject contradictory reviewed decisions
+  so conflicting human labels cannot produce a misleading improvement signal.
+- Extended the graph health ambiguity gate to include duplicate canonical
+  concept labels, matching the ambiguity diagnostics shown in the workbench.
+- Added explicit health gates for unsupported concepts and relations, so
+  automation can require every active item to retain valid provenance or
+  evidence.
+- Added a bounded `llms.txt` project map linking the workbench, curriculum,
+  contracts, principles, and contribution paths for machine-readable discovery.
 - Added a GitHub Pages deployment workflow backed by a clean, explicit static
   bundle, keeping server, container, test, and repository metadata out of the
   public artifact.

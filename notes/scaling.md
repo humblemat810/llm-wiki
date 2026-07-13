@@ -32,5 +32,9 @@ empirical claim, not a law of nature.
 
 ## Try it yourself
 
+Predict validation loss for three model sizes before training them. Keep the
+data and compute budget visible, then compare your prediction with measured
+loss per parameter and wall-clock cost.
+
 Hold compute constant while changing the data/model allocation. Compare the
 result with a model trained longer.

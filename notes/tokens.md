@@ -34,4 +34,8 @@ round trips while making human-intuitive units invisible.
 
 ## Try it yourself
 
+Take the same sentence, a URL, an emoji, and a short code snippet. Tokenize
+each one, record token count and decoded text, then explain which example
+changes most when the tokenizer vocabulary changes.
+
 Change one character at a time and record how the token sequence changes.

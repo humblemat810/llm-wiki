@@ -12,6 +12,14 @@ const METRICS = [
   ["relations.accepted.recall", (value) => value?.feedback?.relations?.accepted?.recall],
   ["relations.rejected.suppressionRate", (value) => value?.feedback?.relations?.rejected?.suppressionRate]
 ];
+const OPTIONAL_METRICS = [
+  ["overall.accepted.reviewedPrecision", (value) => value?.overall?.accepted?.reviewedPrecision],
+  ["concepts.accepted.reviewedPrecision", (value) => value?.feedback?.concepts?.accepted?.reviewedPrecision],
+  ["relations.accepted.reviewedPrecision", (value) => value?.feedback?.relations?.accepted?.reviewedPrecision],
+  ["overall.accepted.evidenceCoverage", (value) => value?.overall?.accepted?.evidenceCoverage],
+  ["concepts.accepted.evidenceCoverage", (value) => value?.feedback?.concepts?.accepted?.evidenceCoverage],
+  ["relations.accepted.evidenceCoverage", (value) => value?.feedback?.relations?.accepted?.evidenceCoverage]
+];
 
 async function readEvaluation(path) {
   const metadata = await stat(path);
@@ -21,8 +29,17 @@ async function readEvaluation(path) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Evaluation input is not an object: ${path}`);
   if (value.schema !== EVALUATION_SCHEMA) throw new Error(`Evaluation input must declare ${EVALUATION_SCHEMA}: ${path}`);
   if (value.graphSchema !== GRAPH_SCHEMA) throw new Error(`Evaluation input must declare ${GRAPH_SCHEMA}: ${path}`);
-  if (!/^fnv1a-[0-9a-f]{8}$/.test(value.feedback?.datasetFingerprint || "")) {
+  if (!/^fnv1a-[0-9a-f]{8}(?:[0-9a-f]{8})?$/.test(value.feedback?.datasetFingerprint || "")) {
     throw new Error(`Evaluation input must include a valid reviewed-dataset fingerprint: ${path}`);
+  }
+  if (!Number.isSafeInteger(value.feedback?.examples) || value.feedback.examples < 1) {
+    throw new Error(`Evaluation input must contain at least one reviewed example: ${path}`);
+  }
+  if (!Number.isSafeInteger(value.feedback?.conflicts) || value.feedback.conflicts < 0) {
+    throw new Error(`Evaluation input must include a valid reviewed-conflict count: ${path}`);
+  }
+  if (value.feedback.conflicts > 0) {
+    throw new Error(`Evaluation input contains ${value.feedback.conflicts} contradictory reviewed decisions: ${path}`);
   }
   return value;
 }
@@ -51,7 +68,10 @@ export function compareEvaluations(baseline, candidate, { tolerance = 0 } = {}) 
   if (baselineFingerprint !== candidateFingerprint) {
     throw new Error(`Evaluation reports use different reviewed datasets (${baselineFingerprint} versus ${candidateFingerprint}).`);
   }
-  const metrics = METRICS.map(([name, getter]) => {
+  const metrics = [
+    ...METRICS,
+    ...OPTIONAL_METRICS.filter(([, getter]) => getter(baseline) !== undefined && getter(candidate) !== undefined)
+  ].map(([name, getter]) => {
     const baselineValue = readMetric(baseline, name, getter);
     const candidateValue = readMetric(candidate, name, getter);
     const delta = Number((candidateValue - baselineValue).toFixed(4));

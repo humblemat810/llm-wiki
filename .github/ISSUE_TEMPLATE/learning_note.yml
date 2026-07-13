@@ -1,0 +1,52 @@
+name: Learning note
+description: Propose a clear, buildable addition to the LLM learning map.
+title: "[Note]: "
+labels: ["documentation", "learning-map"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A strong note answers one real question, builds a small artifact, names failure modes, and leaves readers with something measurable to try.
+  - type: input
+    id: question
+    attributes:
+      label: Question
+      description: What question should the note answer?
+      placeholder: How does ...?
+    validations:
+      required: true
+  - type: textarea
+    id: short_version
+    attributes:
+      label: Short version
+      description: Explain the idea in plain language without hiding uncertainty.
+    validations:
+      required: true
+  - type: textarea
+    id: build
+    attributes:
+      label: Build it
+      description: Describe a small runnable experiment and what to measure.
+    validations:
+      required: true
+  - type: textarea
+    id: failure_modes
+    attributes:
+      label: Failure modes
+      description: Name plausible ways a reader could get a misleading result.
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Sources
+      description: List papers, books, docs, or primary references that anchor the note.
+    validations:
+      required: true
+  - type: textarea
+    id: try_it
+    attributes:
+      label: Try it yourself
+      description: Give the reader a concrete exercise with an observable outcome.
+    validations:
+      required: true

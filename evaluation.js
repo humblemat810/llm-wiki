@@ -25,8 +25,14 @@ function feedbackIdentityKey(example) {
   if (example.kind === "concept") {
     return `concept|${identity(example.id) || normalized(example.label)}`;
   }
-  const relationIdentity = identity(example.id)
-    || `${normalized(example.source || example.sourceLabel)}|${normalized(example.target || example.targetLabel)}|${normalized(example.label)}`;
+  const source = normalized(example.sourceLabel || example.source);
+  const target = normalized(example.targetLabel || example.target);
+  const label = normalized(example.label);
+  const forward = `${source}|${target}|${label}`;
+  const reverse = `${target}|${source}|${label}`;
+  const relationIdentity = source && target && label
+    ? (forward < reverse ? forward : reverse)
+    : identity(example.id) || forward;
   return `relation|${relationIdentity}`;
 }
 
@@ -59,11 +65,23 @@ function matchesConcept(example, node) {
 }
 
 function matchesRelation(example, edge, nodeById) {
-  if (identity(example.id) && identity(example.id) === identity(edge.id)) return true;
   const labelMatches = normalized(example.label) === normalized(edge.label);
-  const sourceMatches = relationEndpointMatches(edge.source, example.source, example.sourceLabel, nodeById);
-  const targetMatches = relationEndpointMatches(edge.target, example.target, example.targetLabel, nodeById);
-  return labelMatches && sourceMatches && targetMatches;
+  const forwardEndpointMatches = relationEndpointMatches(edge.source, example.source, example.sourceLabel, nodeById)
+    && relationEndpointMatches(edge.target, example.target, example.targetLabel, nodeById);
+  const reverseEndpointMatches = relationEndpointMatches(edge.source, example.target, example.targetLabel, nodeById)
+    && relationEndpointMatches(edge.target, example.source, example.sourceLabel, nodeById);
+  const endpointPairMatches = forwardEndpointMatches || reverseEndpointMatches;
+  if (identity(example.id) && identity(example.id) === identity(edge.id)) {
+    const hasDetailedIdentity = Boolean(
+      identity(example.source)
+      || identity(example.target)
+      || identity(example.sourceLabel)
+      || identity(example.targetLabel)
+      || identity(example.label)
+    );
+    return !hasDetailedIdentity || (labelMatches && endpointPairMatches);
+  }
+  return labelMatches && endpointPairMatches;
 }
 
 function metric(expected, found) {
@@ -75,27 +93,43 @@ function metric(expected, found) {
   };
 }
 
-function countOneToOneMatches(examples, candidates, matcher) {
+function matchedOneToOneCandidates(examples, candidates, matcher) {
   const matchedCandidates = new Set();
-  let found = 0;
+  const matches = [];
   examples.forEach((example) => {
     const candidateIndex = candidates.findIndex((candidate, index) => (
       !matchedCandidates.has(index) && matcher(example, candidate)
     ));
     if (candidateIndex < 0) return;
     matchedCandidates.add(candidateIndex);
-    found += 1;
+    matches.push(candidates[candidateIndex]);
   });
-  return found;
+  return matches;
 }
 
-function categoryMetric(examples, candidates, matcher) {
+function evidenceBacked(candidate, sourceId) {
+  return Array.isArray(candidate?.evidence)
+    && candidate.evidence.some((evidence) => evidence?.text && evidence.sources?.includes(sourceId));
+}
+
+function categoryMetric(examples, candidates, matcher, acceptedMatcher = matcher, sourceId = "") {
   const expected = examples.filter((example) => example.status === "accepted");
   const rejected = examples.filter((example) => example.status === "rejected");
-  const foundAccepted = countOneToOneMatches(expected, candidates, matcher);
-  const presentRejected = countOneToOneMatches(rejected, candidates, matcher);
+  const acceptedMatches = matchedOneToOneCandidates(expected, candidates, acceptedMatcher);
+  const foundAccepted = acceptedMatches.length;
+  const rejectedMatches = matchedOneToOneCandidates(rejected, candidates, matcher);
+  const presentRejected = rejectedMatches.length;
+  const acceptedMetric = metric(expected.length, foundAccepted);
+  const reviewedCandidateMatches = new Set([...acceptedMatches, ...rejectedMatches]).size;
+  acceptedMetric.reviewedPrecision = reviewedCandidateMatches
+    ? Number((foundAccepted / reviewedCandidateMatches).toFixed(4))
+    : 1;
+  acceptedMetric.evidenceBacked = acceptedMatches.filter((candidate) => evidenceBacked(candidate, sourceId)).length;
+  acceptedMetric.evidenceCoverage = expected.length
+    ? Number((acceptedMetric.evidenceBacked / expected.length).toFixed(4))
+    : 1;
   return {
-    accepted: metric(expected.length, foundAccepted),
+    accepted: acceptedMetric,
     rejected: {
       expected: rejected.length,
       suppressed: rejected.length - presentRejected,
@@ -128,14 +162,37 @@ export function evaluateExtraction(extraction, feedback = []) {
     feedbackStatuses.set(key, statuses);
   });
   const conflicts = [...feedbackStatuses.values()].filter((statuses) => statuses.size > 1).length;
-  const conceptMatch = (example) => concepts.some((node) => matchesConcept(example, node));
-  const relationMatch = (example) => relations.some((edge) => matchesRelation(example, edge, nodeById));
-  const conceptMetrics = categoryMetric(conceptExamples, concepts, conceptMatch);
-  const relationMetrics = categoryMetric(relationExamples, relations, relationMatch);
+  const conceptMatch = (example, node) => matchesConcept(example, node);
+  const relationMatch = (example, edge) => matchesRelation(example, edge, nodeById);
+  const sourceId = normalizedExtraction.source.id;
+  const conceptMetrics = categoryMetric(
+    conceptExamples,
+    concepts,
+    conceptMatch,
+    (example, node) => node.status !== "rejected" && conceptMatch(example, node),
+    sourceId
+  );
+  const relationMetrics = categoryMetric(
+    relationExamples,
+    relations,
+    relationMatch,
+    (example, edge) => edge.status !== "rejected" && relationMatch(example, edge),
+    sourceId
+  );
   const accepted = conceptMetrics.accepted.found + relationMetrics.accepted.found;
   const expectedAccepted = conceptMetrics.accepted.expected + relationMetrics.accepted.expected;
+  const evidenceBackedAccepted = conceptMetrics.accepted.evidenceBacked + relationMetrics.accepted.evidenceBacked;
   const rejectedPresent = conceptMetrics.rejected.present + relationMetrics.rejected.present;
   const expectedRejected = conceptMetrics.rejected.expected + relationMetrics.rejected.expected;
+  const overallAccepted = metric(expectedAccepted, accepted);
+  const overallReviewedCandidateMatches = accepted + rejectedPresent;
+  overallAccepted.reviewedPrecision = overallReviewedCandidateMatches
+    ? Number((accepted / overallReviewedCandidateMatches).toFixed(4))
+    : 1;
+  overallAccepted.evidenceBacked = evidenceBackedAccepted;
+  overallAccepted.evidenceCoverage = expectedAccepted
+    ? Number((evidenceBackedAccepted / expectedAccepted).toFixed(4))
+    : 1;
   return {
     schema: EVALUATION_SCHEMA,
     graphSchema: GRAPH_SCHEMA,
@@ -152,7 +209,7 @@ export function evaluateExtraction(extraction, feedback = []) {
       relations: relationMetrics
     },
     overall: {
-      accepted: metric(expectedAccepted, accepted),
+      accepted: overallAccepted,
       rejected: {
         expected: expectedRejected,
         suppressed: expectedRejected - rejectedPresent,

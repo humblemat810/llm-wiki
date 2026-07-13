@@ -1,0 +1,45 @@
+# LLM Field Notes
+
+> An open, local-first workspace for turning documents into an inspectable,
+> evolving knowledge graph and projecting it into Obsidian-ready Markdown.
+
+## Start here
+
+- [Workbench](./#workbench): ingest documents, inspect concepts and relations,
+  review evidence, and improve the representation.
+- [Learning map](./#map): first-principles notes and runnable experiments about
+  tokens, embeddings, attention, training, transformers, retrieval, agents,
+  and production systems.
+- [Try a sample graph](./#sample): launch the complete local workflow without
+  preparing a document.
+
+## Project contracts
+
+- [Architecture](./ARCHITECTURE.md): module boundaries, graph source of truth,
+  learning loop, privacy levels, and extension rules.
+- [Graph schema](./schema/graph.schema.json): normalized internal
+  representation.
+- [Feedback schema](./schema/feedback.schema.json): reviewed decisions used as
+  bounded extractor guidance.
+- [Vault manifest schema](./schema/vault-manifest.schema.json): Obsidian
+  projection identity and round-trip metadata.
+- [Health schema](./schema/health.schema.json): privacy-safe graph quality
+  diagnostics and automation gates.
+- [JSON-LD schema](./schema/jsonld.schema.json): versioned semantic-web
+  projection contract for external graph tooling.
+
+## Principles
+
+- Preserve evidence and provenance with every inference.
+- Make confidence, uncertainty, review freshness, and ambiguity visible.
+- Let people correct the representation without starting over.
+- Treat Obsidian and Markdown as projections, not competing databases.
+- Keep local graph data private; shared URLs never contain the graph.
+
+## Contribute
+
+- [Contributing guide](./CONTRIBUTING.md): improve the curriculum, graph
+  behavior, projections, or deployment surface.
+- [Security guide](./SECURITY.md): data boundaries and vulnerability
+  reporting.
+- [Changelog](./CHANGELOG.md): production hardening and user-visible changes.

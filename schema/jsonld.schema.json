@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/jsonld@1",
+  "title": "LLM Field Notes JSON-LD projection",
+  "description": "Versioned interoperability projection of the normalized knowledge graph.",
+  "type": "object",
+    "required": ["format", "graphSchema", "@context", "@id", "@type", "name", "graphVersion", "graphUpdatedAt", "revisionCount", "learningExampleCount", "fingerprint", "redacted", "@graph"],
+  "properties": {
+    "format": { "const": "llm-field-notes/jsonld@1" },
+    "graphSchema": { "const": "llm-field-notes/graph@1" },
+    "@context": { "type": "object" },
+    "@id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "@type": { "const": "schema:Dataset" },
+    "name": { "const": "LLM Field Notes knowledge graph" },
+    "graphVersion": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "graphUpdatedAt": { "type": ["string", "null"], "maxLength": 128 },
+    "revisionCount": { "type": "integer", "minimum": 0, "maximum": 20 },
+    "learningExampleCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+    "fingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$", "maxLength": 128 },
+    "redacted": { "type": "boolean" },
+    "@graph": {
+      "type": "array",
+      "maxItems": 16500,
+      "items": { "$ref": "#/$defs/member" }
+    }
+  },
+  "$defs": {
+    "memberBase": {
+      "type": "object",
+      "required": ["@id", "@type"],
+      "properties": {
+        "@id": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "@type": { "type": ["string", "array"], "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "timestamp": {
+      "type": ["string", "null"],
+      "maxLength": 128
+    },
+    "requiredTimestamp": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "sourceRef": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["@type", "text", "source"],
+        "properties": {
+          "@type": { "const": "lfn:Evidence" },
+          "text": { "type": "string", "maxLength": 12000 },
+          "source": { "$ref": "#/$defs/sourceRef" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "member": {
+      "oneOf": [
+        {
+          "allOf": [
+            { "$ref": "#/$defs/memberBase" },
+            {
+              "required": ["name", "lfn:quality", "lfn:sourceFingerprint", "lfn:addedAt", "lfn:lastReviewedAt"],
+              "properties": {
+                "@type": { "const": "schema:CreativeWork" },
+                "name": { "type": "string", "maxLength": 200 },
+                "url": { "type": "string", "maxLength": 2048 },
+                "text": { "type": "string", "maxLength": 300000 },
+                "lfn:quality": { "enum": ["unknown", "primary", "secondary", "tertiary"] },
+                "lfn:sourceFingerprint": { "type": "string", "maxLength": 200 },
+                "lfn:addedAt": { "$ref": "#/$defs/requiredTimestamp" },
+                "lfn:lastReviewedAt": { "$ref": "#/$defs/timestamp" }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/memberBase" },
+            {
+              "required": ["name", "lfn:type", "lfn:status", "confidence", "lfn:mentions", "lfn:feedback", "lfn:createdAt", "lfn:updatedAt", "lfn:lastReviewedAt", "source", "lfn:sources", "evidence"],
+              "properties": {
+                "@type": {
+                  "type": "array",
+                  "contains": { "const": "lfn:Concept" }
+                },
+                "name": { "type": "string", "maxLength": 120 },
+                "schema:alternateName": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 } },
+                "lfn:type": { "type": "string", "maxLength": 30 },
+                "lfn:status": { "enum": ["inferred", "accepted", "rejected"] },
+                "confidence": { "type": "number", "minimum": 0.01, "maximum": 0.99 },
+                "lfn:mentions": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+                "lfn:feedback": { "type": "integer", "minimum": -1000000, "maximum": 1000000 },
+                "lfn:createdAt": { "$ref": "#/$defs/requiredTimestamp" },
+                "lfn:updatedAt": { "$ref": "#/$defs/requiredTimestamp" },
+                "lfn:lastReviewedAt": { "$ref": "#/$defs/timestamp" },
+                "source": { "$ref": "#/$defs/sourceRef" },
+                "lfn:sources": { "$ref": "#/$defs/sourceRef" },
+                "evidence": { "$ref": "#/$defs/evidence" }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/memberBase" },
+            {
+              "required": ["name", "source", "target", "lfn:status", "confidence", "lfn:feedback", "lfn:lastReviewedAt", "lfn:sources", "evidence"],
+              "properties": {
+                "@type": { "const": "lfn:Relation" },
+                "name": { "type": "string", "maxLength": 80 },
+                "source": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                "target": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                "lfn:status": { "enum": ["inferred", "accepted", "rejected"] },
+                "confidence": { "type": "number", "minimum": 0.01, "maximum": 0.99 },
+                "lfn:feedback": { "type": "integer", "minimum": -1000000, "maximum": 1000000 },
+                "lfn:lastReviewedAt": { "$ref": "#/$defs/timestamp" },
+                "lfn:sources": { "$ref": "#/$defs/sourceRef" },
+                "evidence": { "$ref": "#/$defs/evidence" }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/memberBase" },
+            {
+              "required": ["name", "lfn:kind", "lfn:status", "lfn:lastReviewedAt"],
+              "properties": {
+                "@type": { "const": "lfn:LearningExample" },
+                "name": { "type": "string", "maxLength": 120 },
+                "lfn:kind": { "enum": ["concept", "relation"] },
+                "lfn:status": { "enum": ["accepted", "rejected"] },
+                "lfn:concept": { "type": "string", "maxLength": 2000 },
+                "lfn:aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 } },
+                "lfn:sourceConcept": { "type": "string", "maxLength": 2000 },
+                "lfn:targetConcept": { "type": "string", "maxLength": 2000 },
+                "lfn:sourceLabel": { "type": "string", "maxLength": 120 },
+                "lfn:targetLabel": { "type": "string", "maxLength": 120 },
+                "lfn:relation": { "type": "string", "maxLength": 80 },
+                "lfn:lastReviewedAt": { "$ref": "#/$defs/timestamp" }
+              }
+            },
+            {
+              "oneOf": [
+                {
+                  "required": ["lfn:concept", "lfn:aliases"],
+                  "properties": { "lfn:kind": { "const": "concept" } }
+                },
+                {
+                  "required": ["lfn:sourceConcept", "lfn:targetConcept", "lfn:sourceLabel", "lfn:targetLabel", "lfn:relation"],
+                  "properties": { "lfn:kind": { "const": "relation" } }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "additionalProperties": true
+}

@@ -32,5 +32,9 @@ limit.
 
 ## Try it yourself
 
+Generate the same prompt with greedy, temperature, and top-k sampling. Record
+first-token latency, total latency, output length, and one failure introduced
+by sampling.
+
 Generate the same prompt at three temperatures and describe the difference
 without using the word “creative.”

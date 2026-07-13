@@ -39,5 +39,9 @@ real-world behavior. Optimization can be correct while the objective is wrong.
 
 ## Try it yourself
 
+Run the tiny trainer twice with different learning rates. Save the loss at
+regular intervals, compare the generated samples, and identify where lower
+training loss fails to produce a more useful sample.
+
 Keep the loss falling while making the output worse. Describe the mismatch
 without using the word “bug.”

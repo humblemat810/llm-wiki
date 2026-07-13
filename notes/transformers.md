@@ -39,5 +39,9 @@ that every block is doing useful work.
 
 ## Try it yourself
 
+Remove one component at a time from the tiny transformer—causal masking,
+residual connections, normalization, or the MLP. Keep the input fixed and
+write down which tensor shapes or outputs change.
+
 Remove one component at a time and record which failure is graceful,
 catastrophic, or merely slower.

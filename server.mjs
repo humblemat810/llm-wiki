@@ -5,9 +5,10 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_ID_CHARS, MAX_SOURCE_URI_CHARS, extractGraph, normalizeExtraction, normalizeSourceUri } from "./graph-core.js";
+import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_ID_CHARS, MAX_SOURCE_URI_CHARS, extractGraph, normalizeExtractionForDocument, normalizeSourceUri } from "./graph-core.js";
 import { MAX_FEEDBACK_CHARS, MAX_RESPONSE_BYTES } from "./extractor-adapter.js";
 import { FIXED_PUBLIC_ASSETS } from "./scripts/public-assets.mjs";
+import { normalizePublicOrigin } from "./scripts/public-origin.mjs";
 
 const require = createRequire(import.meta.url);
 const APP_VERSION = require("./package.json").version;
@@ -22,6 +23,7 @@ const HEADERS_TIMEOUT_MS = 15000;
 const KEEP_ALIVE_TIMEOUT_MS = 5000;
 const MAX_HEADER_BYTES = 16 * 1024;
 const MAX_STATIC_ASSET_BYTES = 10 * 1024 * 1024;
+const MAX_CRAWLER_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_FEEDBACK_LABEL_CHARS = 120;
 const EXTRACTION_LATENCY_BUCKETS_MS = [100, 500, 1000, 5000, 30000, 120000];
 const root = fileURLToPath(new URL("./", import.meta.url));
@@ -158,35 +160,41 @@ function sendNotModified(response, etag, cacheControl) {
   return true;
 }
 
-function normalizePublicOrigin(value) {
-  if (typeof value !== "string" || !value.trim()) return "";
-  try {
-    const url = new URL(value.trim());
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) return "";
-    return url.toString().replace(/\/+$/, "");
-  } catch {
-    return "";
-  }
-}
-
 function renderOriginAwareIndex(content, origin) {
   if (!origin) return content;
   const rootUrl = `${origin}/`;
-  return Buffer.from(content.toString("utf8")
+  const rendered = content.toString("utf8")
     .replace('href="./" />', `href="${rootUrl}" />`)
     .replace('href="feed.xml"', `href="${origin}/feed.xml"`)
     .replace('content="./" />', `content="${rootUrl}" />`)
-    .replace(/content="social-card\.svg"/g, `content="${origin}/social-card.svg"`), "utf8");
+    .replace('"url": "./"', `"url": "${rootUrl}"`)
+    .replace(/content="social-card\.svg"/g, `content="${origin}/social-card.svg"`);
+  const structuredDataMatch = rendered.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+  if (!structuredDataMatch) return Buffer.from(rendered, "utf8");
+  const structuredDataCsp = `'sha256-${createHash("sha256").update(structuredDataMatch[1]).digest("base64")}'`;
+  return Buffer.from(rendered.replace(/'sha256-[^']+'/g, structuredDataCsp), "utf8");
+}
+
+function securityHeadersForIndex(content) {
+  const structuredDataMatch = content.toString("utf8").match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+  if (!structuredDataMatch) return securityHeaders;
+  const structuredDataCsp = `'sha256-${createHash("sha256").update(structuredDataMatch[1]).digest("base64")}'`;
+  return {
+    ...securityHeaders,
+    "content-security-policy": securityHeaders["content-security-policy"].replace(/'sha256-[^']+'/g, structuredDataCsp)
+  };
 }
 
 function xmlEscape(value) {
-  return String(value).replace(/[&<>"']/g, (character) => ({
+  return String(value)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+    .replace(/[&<>"']/g, (character) => ({
     "&": "&amp;",
     "<": "&lt;",
     ">": "&gt;",
     '"': "&quot;",
     "'": "&apos;"
-  }[character]));
+    }[character]));
 }
 
 function matchesEtag(header, etag) {
@@ -206,6 +214,12 @@ function hasValidBearerToken(request, expectedToken) {
   return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
+function safeDiagnosticCode(value, fallback = "EXTRACTOR_FAILURE") {
+  if (typeof value !== "string") return fallback;
+  const code = value.trim().slice(0, 80);
+  return /^[A-Z][A-Z0-9_:-]*$/.test(code) ? code : fallback;
+}
+
 function isFeedbackHint(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   if (!["concept", "relation"].includes(value.kind) || !["accepted", "rejected"].includes(value.status)) return false;
@@ -218,6 +232,20 @@ function isFeedbackHint(value) {
   }
   if (value.aliases !== undefined && (!Array.isArray(value.aliases) || value.aliases.length > 20 || value.aliases.some((alias) => typeof alias !== "string" || alias.length > MAX_FEEDBACK_LABEL_CHARS))) return false;
   return true;
+}
+
+function compactFeedbackHint(value) {
+  if (!isFeedbackHint(value)) return null;
+  const compact = {
+    kind: value.kind,
+    id: value.id,
+    status: value.status
+  };
+  for (const key of ["label", "source", "sourceLabel", "target", "targetLabel"]) {
+    if (typeof value[key] === "string") compact[key] = value[key];
+  }
+  if (Array.isArray(value.aliases)) compact.aliases = [...value.aliases];
+  return compact;
 }
 
 function readBody(request) {
@@ -289,6 +317,7 @@ export function createAppServer({
 } = {}) {
   const safeRoot = resolve(staticRoot);
   const learningNoteAssets = discoverLearningNoteAssets(safeRoot);
+  const learningMapAssets = learningNoteAssets.filter((asset) => asset !== "notes/README.md");
   const learningNoteTitles = new Map(learningNoteAssets.map((asset) => [asset, deriveLearningNoteTitle(safeRoot, asset)]));
   const publicAssets = new Set([...fixedPublicAssets, ...learningNoteAssets]);
   const numericRateLimit = Number(maxRequestsPerMinute);
@@ -347,18 +376,24 @@ export function createAppServer({
         const status = String(response.statusCode || 0);
         metrics.responsesByStatus.set(status, (metrics.responsesByStatus.get(status) || 0) + 1);
       });
-      if (["GET", "HEAD"].includes(request.method) && new URL(request.url, "http://localhost").pathname === "/healthz") {
+      let requestPath;
+      try {
+        requestPath = new URL(request.url || "/", "http://localhost").pathname;
+      } catch {
+        sendEmpty(response, 400);
+        return;
+      }
+      if (["GET", "HEAD"].includes(request.method) && requestPath === "/healthz") {
         sendJson(response, 200, { ok: true, schema: GRAPH_SCHEMA, version: APP_VERSION }, {}, request.method === "HEAD");
         return;
       }
-      const requestPath = new URL(request.url, "http://localhost").pathname;
       if (["GET", "HEAD"].includes(request.method) && requestPath === "/feed.xml") {
         if (!origin) {
           sendEmpty(response, 404);
           return;
         }
         const base = `${origin}/`;
-        const noteEntries = learningNoteAssets.map((asset) => {
+        const noteEntries = learningMapAssets.map((asset) => {
           const url = new URL(`./${asset}`, base).toString();
           const title = learningNoteTitles.get(asset) || deriveLearningNoteTitle(safeRoot, asset);
           return [
@@ -383,6 +418,10 @@ export function createAppServer({
           "</feed>",
           ""
         ].join("\n");
+        if (Buffer.byteLength(body) > MAX_CRAWLER_RESPONSE_BYTES) {
+          sendEmpty(response, 503, { "retry-after": "60" });
+          return;
+        }
         const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
         const cacheControl = "public, max-age=3600";
         if (matchesEtag(request.headers["if-none-match"], etag)) {
@@ -400,7 +439,7 @@ export function createAppServer({
         const base = `${origin}/`;
         const urls = [
           new URL("./", base).toString(),
-          ...learningNoteAssets.map((asset) => new URL(`./${asset}`, base).toString())
+          ...learningMapAssets.map((asset) => new URL(`./${asset}`, base).toString())
         ];
         const body = [
           '<?xml version="1.0" encoding="UTF-8"?>',
@@ -409,6 +448,10 @@ export function createAppServer({
           "</urlset>",
           ""
         ].join("\n");
+        if (Buffer.byteLength(body) > MAX_CRAWLER_RESPONSE_BYTES) {
+          sendEmpty(response, 503, { "retry-after": "60" });
+          return;
+        }
         const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
         const cacheControl = "public, max-age=3600";
         if (matchesEtag(request.headers["if-none-match"], etag)) {
@@ -429,9 +472,9 @@ export function createAppServer({
         sendPlainText(response, 200, body, { "cache-control": cacheControl, etag }, request.method === "HEAD");
         return;
       }
-      if (["GET", "HEAD"].includes(request.method) && new URL(request.url, "http://localhost").pathname === "/metrics") {
+      if (["GET", "HEAD"].includes(request.method) && requestPath === "/metrics") {
         if (!hasValidBearerToken(request, metricsToken)) {
-          sendJson(response, 401, { error: "Authentication is required for metrics." }, { "www-authenticate": "Bearer" });
+          sendJson(response, 401, { error: "Authentication is required for metrics." }, { "www-authenticate": "Bearer" }, request.method === "HEAD");
           return;
         }
         const body = [
@@ -478,7 +521,7 @@ export function createAppServer({
         sendText(response, 200, body, {}, request.method === "HEAD");
         return;
       }
-      if (["GET", "HEAD"].includes(request.method) && new URL(request.url, "http://localhost").pathname === "/readyz") {
+      if (["GET", "HEAD"].includes(request.method) && requestPath === "/readyz") {
         if (server.isDraining) {
           sendJson(response, 503, { ok: false, schema: GRAPH_SCHEMA, version: APP_VERSION, ready: false, error: "Server is draining." }, { "retry-after": "5" }, request.method === "HEAD");
           return;
@@ -498,11 +541,11 @@ export function createAppServer({
         }
         return;
       }
-      if (new URL(request.url, "http://localhost").pathname === "/api/extract-graph" && request.method !== "POST") {
+      if (requestPath === "/api/extract-graph" && request.method !== "POST") {
         sendEmpty(response, 405, { allow: "POST" });
         return;
       }
-      if (request.method === "POST" && new URL(request.url, "http://localhost").pathname === "/api/extract-graph") {
+      if (request.method === "POST" && requestPath === "/api/extract-graph") {
         if (server.isDraining) {
           sendJson(response, 503, { error: "Server is draining." }, { "retry-after": "5" });
           return;
@@ -556,14 +599,16 @@ export function createAppServer({
           return;
         }
         const document = body?.document;
-        const feedbackSerialized = Array.isArray(body?.feedback) ? JSON.stringify(body.feedback) : null;
-        const validFeedback = Array.isArray(body?.feedback)
-          && body.feedback.length <= MAX_FEEDBACK_EXAMPLES
-          && body.feedback.every(isFeedbackHint)
+        const rawFeedback = Array.isArray(body?.feedback) ? body.feedback : null;
+        const compactFeedback = rawFeedback?.map(compactFeedbackHint) || null;
+        const feedbackSerialized = rawFeedback ? JSON.stringify(rawFeedback) : null;
+        const validFeedback = Array.isArray(rawFeedback)
+          && rawFeedback.length <= MAX_FEEDBACK_EXAMPLES
+          && compactFeedback.every(Boolean)
           && typeof feedbackSerialized === "string"
           && feedbackSerialized.length <= MAX_FEEDBACK_CHARS;
         if (body?.operation !== "extract-graph" || body?.schema !== GRAPH_SCHEMA || body?.feedbackFormat !== FEEDBACK_FORMAT || !validFeedback || !document || typeof document.title !== "string" || document.title.length > 200 || (document.uri !== undefined && (typeof document.uri !== "string" || document.uri.length > MAX_SOURCE_URI_CHARS)) || typeof document.text !== "string") {
-          const status = Array.isArray(body?.feedback) && typeof feedbackSerialized === "string" && feedbackSerialized.length > MAX_FEEDBACK_CHARS ? 413 : 400;
+          const status = Array.isArray(rawFeedback) && typeof feedbackSerialized === "string" && feedbackSerialized.length > MAX_FEEDBACK_CHARS ? 413 : 400;
           respondJson(status, { error: status === 413 ? "Reviewed feedback exceeds the 500,000 character limit." : "Expected the llm-field-notes extract-graph request contract." });
           return;
         }
@@ -590,11 +635,11 @@ export function createAppServer({
             document: { title: document.title, text: document.text, ...(normalizedDocumentUri ? { uri: normalizedDocumentUri } : {}) },
             title: document.title,
             text: document.text,
-            feedback: body.feedback,
+            feedback: compactFeedback,
             requestId,
             signal: controller.signal
           }));
-          const extraction = normalizeExtraction(
+          const extraction = normalizeExtractionForDocument(
             await Promise.race([
               extractionPromise,
               new Promise((_, reject) => {
@@ -604,31 +649,34 @@ export function createAppServer({
                 }, extractorTimeout);
               })
             ]),
-            document.title,
-            document.text
+            { title: document.title, text: document.text, uri: normalizedDocumentUri }
           );
-          if (normalizedDocumentUri && !extraction.source.uri) extraction.source.uri = normalizedDocumentUri;
           const responsePayload = {
               schema: GRAPH_SCHEMA,
               extraction,
               feedbackFormat: FEEDBACK_FORMAT,
-              feedbackReceived: body.feedback.length
+              feedbackReceived: compactFeedback.length
           };
           if (Buffer.byteLength(JSON.stringify(responsePayload)) > MAX_RESPONSE_BYTES) {
             throw Object.assign(new Error("Extractor response exceeds the 10 MB safety limit."), { code: "EXTRACTOR_RESPONSE_TOO_LARGE" });
           }
           if (!request.aborted && !response.destroyed && !response.writableEnded) {
-            respondJson(200, responsePayload, {}, { documentChars: document.text.length, feedbackCount: body.feedback.length });
+            respondJson(200, responsePayload, {}, { documentChars: document.text.length, feedbackCount: compactFeedback.length });
           }
         } catch (error) {
           if (request.aborted || response.destroyed) return;
           const timedOut = error?.code === "EXTRACTOR_TIMEOUT";
           const responseTooLarge = error?.code === "EXTRACTOR_RESPONSE_TOO_LARGE";
+          const diagnosticCode = safeDiagnosticCode(error?.code, timedOut
+            ? "EXTRACTOR_TIMEOUT"
+            : responseTooLarge
+              ? "EXTRACTOR_RESPONSE_TOO_LARGE"
+              : "EXTRACTOR_FAILURE");
           respondJson(
             timedOut ? 504 : 502,
             { error: timedOut ? "The configured extractor timed out. Try again or increase the provider capacity." : responseTooLarge ? "The extractor response exceeded the 10 MB safety limit." : "The configured extractor failed. Try again or inspect the provider logs." },
             {},
-            { error: error?.code || "EXTRACTOR_FAILURE", documentChars: document.text.length, feedbackCount: body.feedback.length }
+            { error: diagnosticCode, documentChars: document.text.length, feedbackCount: compactFeedback.length }
           );
         } finally {
           if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -644,7 +692,7 @@ export function createAppServer({
       }
       let pathname;
       try {
-        pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+        pathname = decodeURIComponent(requestPath);
       } catch {
         sendEmpty(response, 400);
         return;
@@ -676,6 +724,7 @@ export function createAppServer({
       }
       const content = await readFile(resolvedFilePath);
       const responseContent = relative === "index.html" ? renderOriginAwareIndex(content, origin) : content;
+      const responseSecurityHeaders = relative === "index.html" ? securityHeadersForIndex(responseContent) : securityHeaders;
       if (responseContent.byteLength > MAX_STATIC_ASSET_BYTES) {
         sendEmpty(response, 413);
         return;
@@ -688,7 +737,7 @@ export function createAppServer({
         response.writeHead(304, {
           etag,
           "cache-control": cacheControl,
-          ...securityHeaders
+          ...responseSecurityHeaders
         });
         response.end();
         return;
@@ -698,7 +747,7 @@ export function createAppServer({
         "cache-control": cacheControl,
         "content-length": responseContent.byteLength,
         etag,
-        ...securityHeaders
+        ...responseSecurityHeaders
       });
       if (request.method === "HEAD") response.end();
       else response.end(responseContent);
@@ -719,6 +768,13 @@ export function createAppServer({
   });
   server.abortActiveExtractors = () => {
     for (const controller of activeExtractors) controller.abort();
+  };
+  server.beginDrain = () => {
+    if (server.isDraining) return false;
+    server.isDraining = true;
+    server.abortActiveExtractors();
+    server.closeIdleConnections?.();
+    return true;
   };
   return server;
 }
@@ -756,10 +812,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    server.isDraining = true;
     console.log(`Received ${signal}; draining active requests.`);
-    server.abortActiveExtractors?.();
-    server.closeIdleConnections?.();
+    server.beginDrain?.();
     const forceExit = setTimeout(() => process.exit(1), 5000);
     forceExit.unref();
     server.close(() => {

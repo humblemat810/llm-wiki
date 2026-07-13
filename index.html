@@ -8,6 +8,7 @@
     <meta name="robots" content="index,follow" />
     <link rel="canonical" href="./" />
     <link rel="alternate" type="application/atom+xml" href="feed.xml" title="LLM Field Notes updates" />
+    <link rel="help" type="text/plain" href="llms.txt" title="LLM-readable project map" />
     <meta
       name="description"
       content="Turn documents into an inspectable, evolving knowledge graph and project it into Obsidian-ready Markdown."
@@ -158,8 +159,8 @@
                 <small>Leave blank for the local heuristic. Use a same-origin path such as <code>/api/extract-graph</code>; reviewed feedback may be sent with documents, and credentials belong on your server.</small>
               </details>
               <div class="ingest-actions">
-                <button class="button button-primary" id="ingest-document" aria-busy="false">Build graph <span>↗</span></button>
-                <button class="text-button inverse" id="load-sample">Load sample</button>
+                <button class="button button-primary" id="ingest-document" type="button" aria-busy="false">Build graph <span>↗</span></button>
+                <button class="text-button inverse" id="load-sample" type="button">Load sample</button>
                 <button class="text-button inverse" id="cancel-extraction" type="button" disabled>Cancel extraction</button>
               </div>
               <button class="clear-graph" id="clear-graph" type="button">Clear local graph</button>
@@ -173,8 +174,8 @@
               <div class="graph-toolbar">
                 <div class="graph-toolbar-left"><span id="graph-summary">No concepts yet — ingest a document to begin.</span><label class="sr-only" for="graph-search">Filter graph</label><input id="graph-search" class="graph-search" type="search" placeholder="Filter concepts, evidence, sources…" autocomplete="off" /></div>
                 <div>
-                  <button class="mini-button active" data-view="graph" aria-pressed="true">Graph</button>
-                  <button class="mini-button" data-view="list" aria-pressed="false">List</button>
+                  <button class="mini-button active" type="button" data-view="graph" aria-pressed="true">Graph</button>
+                  <button class="mini-button" type="button" data-view="list" aria-pressed="false">List</button>
                 </div>
               </div>
               <details class="manual-add">
@@ -188,7 +189,7 @@
                     <label for="manual-edge-source">Relation</label>
                     <div class="manual-inline">
                       <select id="manual-edge-source" aria-label="Relation source"></select>
-                      <input id="manual-edge-label" type="text" maxlength="80" placeholder="supports" />
+                      <input id="manual-edge-label" type="text" maxlength="80" placeholder="supports" aria-label="Relation label" />
                       <select id="manual-edge-target" aria-label="Relation target"></select>
                       <button id="add-manual-edge" type="button">Add</button>
                     </div>
@@ -201,12 +202,13 @@
               </div>
               <div class="node-list" id="node-list" hidden></div>
               <div class="relation-list" id="relation-list" hidden></div>
-              <aside class="inspector-panel" id="inspector-panel" aria-live="polite">
+              <aside class="inspector-panel" id="inspector-panel" tabindex="-1" aria-live="polite">
                 <div class="inspector-empty"><span>INSPECTOR</span><p>Select a concept or relation to inspect its evidence.</p></div>
               </aside>
               <div class="graph-legend"><span><i class="legend-dot concept"></i> concept</span><span><i class="legend-dot source"></i> source</span><span><i class="legend-line"></i> inferred relation</span></div>
               <div class="health-strip" id="graph-health" aria-live="polite"></div>
               <div class="revision-log" id="revision-log"></div>
+              <div class="revision-diff-preview" id="revision-diff-preview"></div>
             </section>
           </div>
 
@@ -221,17 +223,20 @@
                   Obsidian, edit it, and bring corrections back as feedback.
                 </p>
                 <div class="projection-actions">
-                  <button class="button button-light" id="download-markdown">Download .md <span>↓</span></button>
-                  <button class="button button-light" id="copy-markdown">Copy Markdown <span>↗</span></button>
-                  <button class="button button-light" id="download-vault">Download Obsidian vault <span>↓</span></button>
-                  <button class="button button-quiet" id="download-redacted-vault" title="Removes source text, evidence quotes, and URIs">Download redacted vault <span>↓</span></button>
-                  <button class="button button-quiet" id="download-json">Export graph JSON <span>↓</span></button>
-                  <button class="button button-quiet" id="download-health">Export health report <span>↓</span></button>
-                  <button class="button button-quiet" id="download-redacted">Export redacted graph <span>↓</span></button>
-                  <button class="button button-quiet" id="download-backup">Download full backup <span>↓</span></button>
-                  <button class="button button-quiet" id="download-feedback" title="Includes evidence and source references">Export feedback dataset <span>↓</span></button>
-                  <button class="button button-quiet" id="download-compact-feedback" title="Removes evidence and source references">Export compact feedback <span>↓</span></button>
-                  <button class="button button-quiet" id="download-diff">Export latest revision diff <span>↓</span></button>
+                  <button class="button button-light" id="download-markdown" type="button">Download .md <span>↓</span></button>
+                  <button class="button button-light" id="copy-markdown" type="button">Copy Markdown <span>↗</span></button>
+                  <button class="button button-quiet" id="download-redacted-markdown" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted Markdown <span>↓</span></button>
+                  <button class="button button-light" id="download-vault" type="button">Download Obsidian vault <span>↓</span></button>
+                  <button class="button button-quiet" id="download-redacted-vault" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted vault <span>↓</span></button>
+                  <button class="button button-quiet" id="download-json" type="button">Export graph JSON <span>↓</span></button>
+                  <button class="button button-quiet" id="download-jsonld" type="button">Export JSON-LD <span>↓</span></button>
+                  <button class="button button-quiet" id="download-redacted-jsonld" type="button" title="Removes source text, evidence quotes, and URIs">Export redacted JSON-LD <span>↓</span></button>
+                  <button class="button button-quiet" id="download-health" type="button">Export health report <span>↓</span></button>
+                  <button class="button button-quiet" id="download-redacted" type="button">Export redacted graph <span>↓</span></button>
+                  <button class="button button-quiet" id="download-backup" type="button">Download full backup <span>↓</span></button>
+                  <button class="button button-quiet" id="download-feedback" type="button" title="Includes evidence and source references">Export feedback dataset <span>↓</span></button>
+                  <button class="button button-quiet" id="download-compact-feedback" type="button" title="Removes evidence and source references">Export compact feedback <span>↓</span></button>
+                  <button class="button button-quiet" id="download-diff" type="button">Export latest revision diff <span>↓</span></button>
                 </div>
                 <p class="projection-status" id="projection-status" role="status" aria-live="polite"></p>
               </div>
@@ -289,10 +294,10 @@
               <kbd>/</kbd>
             </div>
             <div class="filters" role="group" aria-label="Filter notes">
-              <button class="filter active" data-filter="all" aria-pressed="true">All <span>12</span></button>
-              <button class="filter" data-filter="foundations" aria-pressed="false">Foundations <span>4</span></button>
-              <button class="filter" data-filter="systems" aria-pressed="false">Systems <span>4</span></button>
-              <button class="filter" data-filter="shipping" aria-pressed="false">Shipping <span>4</span></button>
+              <button class="filter active" type="button" data-filter="all" aria-pressed="true">All <span>12</span></button>
+              <button class="filter" type="button" data-filter="foundations" aria-pressed="false">Foundations <span>4</span></button>
+              <button class="filter" type="button" data-filter="systems" aria-pressed="false">Systems <span>4</span></button>
+              <button class="filter" type="button" data-filter="shipping" aria-pressed="false">Shipping <span>4</span></button>
             </div>
           </div>
           <div class="notes-grid" id="notes-grid"></div>
@@ -327,7 +332,7 @@
             contact. You do not need to finish every exercise. You do need to
             keep making things.
           </p>
-          <button class="text-button" id="reset-progress">Reset progress ↺</button>
+        <button class="text-button" id="reset-progress" type="button">Reset progress ↺</button>
           <p class="progress-status" id="progress-status" role="status" aria-live="polite"></p>
         </div>
         <div class="path-list" id="path-list"></div>
@@ -396,7 +401,7 @@ for step in range(max_steps):
             <div class="contribute-actions">
               <a class="button button-primary" href="CONTRIBUTING.md">Open a contribution <span>↗</span></a>
               <a class="button button-quiet" href="ARCHITECTURE.md">Read the architecture <span>↗</span></a>
-              <button class="button button-quiet" id="copy-prompt">Copy the page template <span>⧉</span></button>
+              <button class="button button-quiet" id="copy-prompt" type="button">Copy the page template <span>⧉</span></button>
             </div>
             <p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite"></p>
           </div>

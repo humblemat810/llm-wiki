@@ -23,6 +23,12 @@
       "type": "boolean",
       "description": "True when source text, evidence quotes, and source URIs were intentionally removed."
     },
+    "graphFingerprint": {
+      "type": "string",
+      "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$",
+      "maxLength": 128,
+      "description": "Optional deterministic fingerprint of the normalized graph, used to verify portable JSON exports."
+    },
     "documents": {
       "type": "array",
       "maxItems": 1000,
@@ -98,7 +104,7 @@
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "text": { "type": "string", "maxLength": 300000 },
         "fingerprint": { "type": "string", "minLength": 1, "maxLength": 200 },
-        "uri": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^(?:(?:https?|file|urn|doi):|[^:]+$)" },
+        "uri": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^(?:(?:https?|file):\\/\\/[^\\s@<>]+|(?:urn|doi):[^\\s<>]+|[^:\\s<>]+)$" },
         "addedAt": { "type": "string", "format": "date-time", "maxLength": 128 },
         "quality": { "enum": ["unknown", "primary", "secondary", "tertiary"] },
         "lastReviewedAt": { "type": ["string", "null"], "format": "date-time", "maxLength": 128 }

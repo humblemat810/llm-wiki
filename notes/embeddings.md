@@ -30,5 +30,9 @@ useful regularities and inherited corpus bias at the same time.
 
 ## Try it yourself
 
+Choose one ambiguous word with two meanings. List five neighbors from your
+embedding model, label which sense each neighbor suggests, and repeat with a
+different corpus to see which relationships survive.
+
 Find one useful neighborhood and one misleading neighborhood. Ask what the
 corpus taught the geometry.

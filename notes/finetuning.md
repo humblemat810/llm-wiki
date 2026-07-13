@@ -29,5 +29,9 @@ model can pass familiar tests while failing on simple variations.
 
 ## Try it yourself
 
+Hold out twenty percent of your examples before tuning. Compare prompt-only
+and tuned behavior on both splits, then write down one example where tuning
+memorized a pattern instead of learning the intended behavior.
+
 Remove the weakest quarter of the examples. If performance improves, the
 dataset was teaching noise.

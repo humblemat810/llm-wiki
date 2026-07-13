@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evaluateExtraction, EVALUATION_SCHEMA, MAX_EVALUATION_EXAMPLES } from "../evaluation.js";
-import { fingerprintFeedbackExamples } from "../graph-core.js";
+import { fingerprintFeedbackExamples, matchesFeedbackFingerprint } from "../graph-core.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,7 +31,19 @@ const report = evaluateExtraction(extraction, [
 ]);
 
 assert.equal(report.schema, EVALUATION_SCHEMA);
-assert.match(report.feedback.datasetFingerprint, /^fnv1a-[0-9a-f]{8}$/);
+assert.match(report.feedback.datasetFingerprint, /^fnv1a-[0-9a-f]{16}$/);
+const singleFeedback = [{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }];
+assert(matchesFeedbackFingerprint(singleFeedback, fingerprintFeedbackExamples(singleFeedback)));
+assert(matchesFeedbackFingerprint(singleFeedback, "fnv1a-7ebe5ec3"), "legacy 32-bit feedback fingerprints should remain importable");
+const unicodeFeedback = [
+  { kind: "concept", id: "angstrom", label: "Ångström", status: "accepted" },
+  { kind: "concept", id: "注意", label: "注意 机制", status: "rejected" }
+];
+assert.equal(
+  fingerprintFeedbackExamples(unicodeFeedback),
+  fingerprintFeedbackExamples([...unicodeFeedback].reverse()),
+  "feedback fingerprints should use locale-independent canonical ordering"
+);
 assert.equal(report.extraction.concepts, 3);
 assert.equal(report.extraction.relations, 1);
 assert.equal(report.feedback.conflicts, 0);
@@ -41,11 +53,85 @@ assert.equal(report.feedback.concepts.rejected.present, 1);
 assert.equal(report.feedback.concepts.rejected.suppressionRate, 0);
 assert.equal(report.feedback.relations.accepted.found, 1);
 assert.equal(report.feedback.relations.rejected.suppressed, 1);
+assert.equal(report.feedback.concepts.accepted.evidenceBacked, 0);
+assert.equal(report.feedback.concepts.accepted.evidenceCoverage, 0);
+assert.equal(report.feedback.concepts.accepted.reviewedPrecision, .5, "evaluation should expose reviewed candidate precision");
+assert.equal(report.feedback.relations.accepted.evidenceCoverage, 0);
+assert.equal(report.feedback.relations.accepted.reviewedPrecision, 1);
 assert.equal(report.overall.accepted.recall, .6667);
+assert.equal(report.overall.accepted.evidenceCoverage, 0);
+assert.equal(report.overall.accepted.reviewedPrecision, .6667);
+const unmatchedReviewedExamples = evaluateExtraction({
+  nodes: [{ id: "attention", label: "Attention" }],
+  edges: []
+}, [
+  { kind: "concept", id: "missing", label: "Missing", status: "accepted" },
+  { kind: "concept", id: "noise", label: "Noise", status: "rejected" }
+]);
+assert.equal(unmatchedReviewedExamples.feedback.concepts.accepted.found, 0, "evaluation must not count an unrelated candidate for an accepted example");
+assert.equal(unmatchedReviewedExamples.feedback.concepts.rejected.present, 0, "evaluation must not count an unrelated candidate for a rejected example");
+assert.equal(unmatchedReviewedExamples.feedback.concepts.rejected.suppressionRate, 1);
 assert.equal(report.overall.rejected.suppressionRate, .5);
+const reversedRelation = evaluateExtraction({
+  nodes: [{ id: "attention", label: "Attention" }, { id: "context", label: "Context" }],
+  edges: [{ id: "attention--context--uses", source: "context", target: "attention", label: "uses" }]
+}, [{
+  kind: "relation",
+  id: "attention--context--uses",
+  source: "attention",
+  target: "context",
+  label: "uses",
+  status: "accepted"
+}]);
+assert.equal(reversedRelation.feedback.relations.accepted.found, 1, "evaluation should preserve graph relation identity when endpoint order is reversed");
+const wrongLabelSameId = evaluateExtraction({
+  nodes: [{ id: "attention", label: "Attention" }, { id: "context", label: "Context" }],
+  edges: [{ id: "attention--context--uses", source: "attention", target: "context", label: "supports" }]
+}, [{
+  kind: "relation",
+  id: "attention--context--uses",
+  source: "attention",
+  target: "context",
+  label: "uses",
+  status: "accepted"
+}]);
+assert.equal(wrongLabelSameId.feedback.relations.accepted.found, 0, "evaluation should reject a reused relation ID when its label changes");
+const rejectedAcceptedCandidate = evaluateExtraction({
+  nodes: [{ id: "attention", label: "Attention", status: "rejected" }],
+  edges: []
+}, [{
+  kind: "concept",
+  id: "attention",
+  label: "Attention",
+  status: "accepted"
+}]);
+assert.equal(rejectedAcceptedCandidate.feedback.concepts.accepted.found, 0, "evaluation should not count a rejected candidate as accepted recall");
+const unanchoredEvidence = evaluateExtraction({
+  source: { id: "doc-evidence", text: "Evaluation source text" },
+  nodes: [{ id: "attention", label: "Attention", evidence: [{ text: "unanchored", sources: ["other-document"] }] }],
+  edges: []
+}, [{
+  kind: "concept",
+  id: "attention",
+  label: "Attention",
+  status: "accepted"
+}]);
+assert.equal(unanchoredEvidence.feedback.concepts.accepted.evidenceCoverage, 0, "evaluation evidence coverage should require a reference to the evaluated source");
+const anchoredEvidence = evaluateExtraction({
+  source: { id: "doc-evidence", text: "Evaluation source text" },
+  nodes: [{ id: "attention", label: "Attention", evidence: [{ text: "anchored", sources: ["doc-evidence"] }] }],
+  edges: []
+}, [{
+  kind: "concept",
+  id: "attention",
+  label: "Attention",
+  status: "accepted"
+}]);
+assert.equal(anchoredEvidence.feedback.concepts.accepted.evidenceCoverage, 1, "evaluation should count source-anchored evidence");
 
 const empty = evaluateExtraction({ nodes: [], edges: [] }, []);
 assert.equal(empty.overall.accepted.recall, 1);
+assert.equal(empty.overall.accepted.evidenceCoverage, 1);
 assert.equal(empty.overall.rejected.suppressionRate, 1);
 const longIdentity = `workspace-${"x".repeat(190)}`;
 const longIdentityReport = evaluateExtraction(
@@ -84,6 +170,14 @@ const conflicting = evaluateExtraction({ nodes: [{ id: "attention", label: "Atte
   { kind: "concept", id: "attention", label: "Attention", status: "rejected" }
 ]);
 assert.equal(conflicting.feedback.conflicts, 1, "evaluation should disclose contradictory reviewed decisions");
+const conflictingPortableRelation = evaluateExtraction({
+  nodes: [{ id: "attention", label: "Attention" }, { id: "context", label: "Context" }],
+  edges: [{ id: "local-edge", source: "attention", target: "context", label: "uses" }]
+}, [
+  { kind: "relation", id: "workspace-a-edge", source: "workspace-a-attention", sourceLabel: "Attention", target: "workspace-a-context", targetLabel: "Context", label: "uses", status: "accepted" },
+  { kind: "relation", id: "workspace-b-edge", source: "workspace-b-context", sourceLabel: "Context", target: "workspace-b-attention", targetLabel: "Attention", label: "uses", status: "rejected" }
+]);
+assert.equal(conflictingPortableRelation.feedback.conflicts, 1, "evaluation should detect portable relation conflicts across workspace IDs and endpoint order");
 
 const temporaryDirectory = await mkdtemp(join("/tmp", "llm-field-notes-evaluation-"));
 try {
@@ -108,6 +202,7 @@ try {
   const legacyFeedbackPath = join(temporaryDirectory, "legacy-feedback.json");
   await writeFile(legacyFeedbackPath, JSON.stringify({
     format: "llm-field-notes/feedback@1",
+    datasetFingerprint: "fnv1a-7ebe5ec3",
     examples: [{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }]
   }));
   const legacyOutput = await execFileAsync(process.execPath, [

@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { BACKUP_FORMAT, DIFF_FORMAT, GRAPH_SCHEMA, diffGraphs, fingerprintBackup } from "../graph-core.js";
+import { BACKUP_FORMAT, DIFF_FORMAT, GRAPH_SCHEMA, diffGraphs, matchesGraphFingerprint } from "../graph-core.js";
 
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
 const [beforePath, afterPath] = process.argv.slice(2);
@@ -11,12 +11,15 @@ async function readGraph(path) {
   const value = JSON.parse(await readFile(path, "utf8"));
   if (value?.format === BACKUP_FORMAT) {
     if (!value.graph || value.graph.schema !== GRAPH_SCHEMA) throw new Error(`Backup input must contain ${GRAPH_SCHEMA}: ${path}`);
-    if (value.graphFingerprint !== undefined && value.graphFingerprint !== fingerprintBackup(value.graph, value.history)) {
+    if (value.graphFingerprint !== undefined && !matchesGraphFingerprint(value.graph, value.graphFingerprint, value.history)) {
       throw new Error(`Backup input fingerprint does not match its graph and history: ${path}`);
     }
     return value.graph;
   }
   if (value?.schema !== GRAPH_SCHEMA) throw new Error(`Graph diff input must declare ${GRAPH_SCHEMA}: ${path}`);
+  if (value.graphFingerprint !== undefined && !matchesGraphFingerprint(value, value.graphFingerprint)) {
+    throw new Error(`Graph input fingerprint does not match its contents: ${path}`);
+  }
   return value;
 }
 

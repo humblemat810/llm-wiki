@@ -12,8 +12,14 @@ const extractor = createRemoteExtractor({
       ok: true,
       status: 200,
       json: async () => ({
-        nodes: [{ label: "Attention" }, { label: "Context" }],
-        edges: [{ source: "Attention", target: "Context", label: "uses" }]
+        source: {
+          title: "Provider-controlled title",
+          text: "provider-controlled source text",
+          fingerprint: "provider-controlled-fingerprint",
+          uri: "https://provider.example.test/private"
+        },
+        nodes: [{ label: "Attention", sources: ["provider-private-source"], evidence: [{ text: "provider evidence", sources: ["provider-private-source"] }] }, { label: "Context" }],
+        edges: [{ source: "Attention", target: "Context", label: "uses", sources: ["provider-private-source"], evidence: [{ text: "provider relation evidence", sources: ["provider-private-source"] }] }]
       })
     };
   }
@@ -23,7 +29,12 @@ const result = await extractor(
   { feedback: Array.from({ length: 600 }, (_, index) => ({ id: `feedback-${index}` })) }
 );
 assert.equal(result.source.title, "Adapter test");
+assert.equal(result.source.text, "Attention uses context to make a useful knowledge representation.", "remote extraction must preserve the submitted document text");
 assert.equal(result.source.uri, "https://example.org/adapter-test");
+assert.notEqual(result.source.fingerprint, "provider-controlled-fingerprint", "remote extraction must derive source fingerprints from submitted text");
+assert.deepEqual(result.nodes[0].sources, [result.source.id], "remote extraction must bind node provenance to the submitted source");
+assert.deepEqual(result.nodes[0].evidence[0].sources, [result.source.id], "remote extraction must bind concept evidence to the submitted source");
+assert.deepEqual(result.edges[0].sources, [result.source.id], "remote extraction must bind relation provenance to the submitted source");
 assert.equal(result.nodes[0].id, "attention");
 assert.equal(result.edges[0].source, "attention");
 const longTitle = "T".repeat(240);

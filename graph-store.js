@@ -1,8 +1,9 @@
-import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, defaultGraph, normalizeGraph } from "./graph-core.js";
+import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, defaultGraph, fingerprintBackup, normalizeGraph } from "./graph-core.js";
 
 export const GRAPH_KEY = "llm-field-notes-knowledge-graph";
 export const HISTORY_KEY = "llm-field-notes-knowledge-graph-history";
 export const RECOVERY_KEY = "llm-field-notes-knowledge-graph-recovery";
+export const HISTORY_RECOVERY_KEY = "llm-field-notes-knowledge-graph-history-recovery";
 export const HISTORY_LIMIT = 3;
 export const MAX_PERSISTED_JSON_CHARS = 50 * 1024 * 1024;
 
@@ -10,6 +11,7 @@ export function createGraphStore(storage, {
   graphKey = GRAPH_KEY,
   historyKey = HISTORY_KEY,
   recoveryKey = RECOVERY_KEY,
+  historyRecoveryKey = HISTORY_RECOVERY_KEY,
   historyLimit = HISTORY_LIMIT,
   maxPersistedJsonChars = MAX_PERSISTED_JSON_CHARS
 } = {}) {
@@ -36,14 +38,15 @@ export function createGraphStore(storage, {
     && typeof value === "object"
     && (value.schema === GRAPH_SCHEMA || LEGACY_GRAPH_SCHEMAS.has(value.schema));
   let lastWriteMode = "none";
-  const captureRecovery = (raw) => {
+  const captureRaw = (key, raw) => {
     if (typeof raw !== "string" || !raw) return;
     try {
-      if (!storage.getItem(recoveryKey)) storage.setItem(recoveryKey, raw);
+      if (!storage.getItem(key)) storage.setItem(key, raw);
     } catch {
       // Recovery is best effort when storage itself is unavailable.
     }
   };
+  const captureRecovery = (raw) => captureRaw(recoveryKey, raw);
   const read = () => {
     let raw = null;
     try {
@@ -51,7 +54,10 @@ export function createGraphStore(storage, {
       if (typeof raw === "string" && raw.length > persistedJsonLimit) throw new Error("Persisted graph exceeds the safety limit.");
       const stored = JSON.parse(raw || "null");
       const normalized = normalizeGraph(stored);
-      if (stored && typeof stored === "object" && stored.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(stored.schema)) {
+      if (stored && typeof stored === "object" && (
+        (stored.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(stored.schema))
+        || JSON.stringify(stored) !== JSON.stringify(normalized)
+      )) {
         captureRecovery(raw);
       }
       return normalized;
@@ -75,13 +81,43 @@ export function createGraphStore(storage, {
       return false;
     }
   };
-  const readHistory = () => {
+  const readHistoryRecovery = () => {
     try {
-      const raw = storage.getItem(historyKey);
-      if (typeof raw === "string" && raw.length > persistedJsonLimit) return [];
-      const stored = JSON.parse(raw || "[]");
-      return Array.isArray(stored) ? trimHistory(stored.filter(isGraphRecord)).map(normalizeGraph) : [];
+      return storage.getItem(historyRecoveryKey);
     } catch {
+      return null;
+    }
+  };
+  const clearHistoryRecovery = () => {
+    try {
+      storage.removeItem(historyRecoveryKey);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const readHistory = () => {
+    let raw = null;
+    try {
+      raw = storage.getItem(historyKey);
+      if (typeof raw === "string" && raw.length > persistedJsonLimit) {
+        captureRaw(historyRecoveryKey, raw);
+        return [];
+      }
+      const stored = JSON.parse(raw || "[]");
+      if (!Array.isArray(stored)) {
+        captureRaw(historyRecoveryKey, raw);
+        return [];
+      }
+      const valid = stored.filter(isGraphRecord);
+      const trimmed = trimHistory(valid);
+      const normalized = trimmed.map(normalizeGraph);
+      if (valid.length !== stored.length || JSON.stringify(trimmed) !== JSON.stringify(normalized)) {
+        captureRaw(historyRecoveryKey, raw);
+      }
+      return normalized;
+    } catch {
+      captureRaw(historyRecoveryKey, raw);
       return [];
     }
   };
@@ -100,8 +136,10 @@ export function createGraphStore(storage, {
     readHistory,
     readRecovery,
     clearRecovery,
+    readHistoryRecovery,
+    clearHistoryRecovery,
     getLastWriteMode: () => lastWriteMode,
-    write(graph, { recordHistory = true, expectedVersion } = {}) {
+    write(graph, { recordHistory = true, expectedVersion, expectedFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       let normalizedRaw;
@@ -116,13 +154,14 @@ export function createGraphStore(storage, {
       try {
         previousGraphRaw = storage.getItem(graphKey);
         previousHistoryRaw = storage.getItem(historyKey);
-        if (Number.isInteger(expectedVersion) && read().version !== expectedVersion) {
+        const current = read();
+        if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }
         if (recordHistory) {
           const history = readHistory();
-          const current = read();
           if (current.version !== normalized.version || JSON.stringify(current) !== JSON.stringify(normalized)) {
             history.push(current);
             storage.setItem(historyKey, serializeHistory(trimHistory(history)));
@@ -155,13 +194,15 @@ export function createGraphStore(storage, {
     canUndo() {
       return readHistory().length > 0;
     },
-    undo({ expectedVersion } = {}) {
+    undo({ expectedVersion, expectedFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       try {
         previousGraphRaw = storage.getItem(graphKey);
         previousHistoryRaw = storage.getItem(historyKey);
-        if (Number.isInteger(expectedVersion) && read().version !== expectedVersion) {
+        const current = read();
+        if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }
@@ -181,7 +222,7 @@ export function createGraphStore(storage, {
         return false;
       }
     },
-    restore(graph, history = [], { expectedVersion, preserveCurrent = false } = {}) {
+    restore(graph, history = [], { expectedVersion, expectedFingerprint, preserveCurrent = false } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       const normalizedGraph = normalizeGraph(graph);
@@ -208,7 +249,9 @@ export function createGraphStore(storage, {
       try {
         previousGraphRaw = storage.getItem(graphKey);
         previousHistoryRaw = storage.getItem(historyKey);
-        if (Number.isInteger(expectedVersion) && read().version !== expectedVersion) {
+        const current = read();
+        if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }
@@ -230,14 +273,15 @@ export function createGraphStore(storage, {
         }
       }
     },
-    clear({ expectedVersion } = {}) {
+    clear({ expectedVersion, expectedFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       try {
         previousGraphRaw = storage.getItem(graphKey);
         previousHistoryRaw = storage.getItem(historyKey);
         const current = read();
-        if (Number.isInteger(expectedVersion) && current.version !== expectedVersion) {
+        if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }

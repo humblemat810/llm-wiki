@@ -25,6 +25,17 @@ The browser prototype supports:
 - Showing a bounded summary of per-file batch failures so partial imports are
   recoverable without overwhelming the workbench.
 - Extracting candidate concepts and evidence-backed co-occurrence relations.
+- Handling punctuation-light and mixed Markdown by supplementing prose with
+  bounded paragraph, bullet, numbered-list, and quote-line units, while keeping
+  separate list items from becoming false cross-item relations.
+- Retaining Unicode concept labels and extracting multilingual tokens instead
+  of silently reducing local extraction to ASCII-only documents.
+- Bounding extracted words per text unit as well as total extraction units, so
+  multilingual segmentation cannot turn a large document into unbounded work.
+- Keeping Unicode segmentation itself behind an explicit character budget and
+  ignoring numeric-only tokens to reduce low-value graph noise.
+- Making offline shell fallback query-tolerant so cache-busted static assets
+  still resolve to the installed application shell.
 - Optionally sending documents to a configured same-origin extraction endpoint
   that returns the same normalized graph contract; blank configuration keeps
   extraction fully local.
@@ -72,6 +83,8 @@ The browser prototype supports:
   or custom fingerprints.
 - Using a dual-lane deterministic content digest for newly generated source
   fingerprints so accidental identity collisions remain extremely unlikely.
+- Deriving heuristic source IDs from normalized content as well as fingerprints,
+  making repeated standalone extraction results reproducible.
 - Editing concept and relation labels without changing their stable IDs.
 - Merging duplicate concepts into a canonical concept while preserving aliases,
   evidence, provenance, feedback memory, and relations; the merge is recorded
@@ -92,6 +105,8 @@ The browser prototype supports:
 - Undoing the last three local graph mutations with bounded snapshot history.
 - Preserving malformed local graph data as a downloadable recovery snapshot
   instead of silently discarding it.
+- Preserving malformed undo-history data as a separate downloadable recovery
+  snapshot instead of silently losing prior revisions.
 - Best-effort persistent browser storage requests after the user starts
   building a graph.
 - Hydrating graph state from IndexedDB when available, migrating existing
@@ -103,9 +118,9 @@ The browser prototype supports:
 - Surfacing asynchronous durable-storage failures in the privacy note and graph
   health strip so users know when to export a backup, with a direct backup
   action available from the warning.
-- Optimistic version checks for asynchronous batches, graph imports, backup
-  restores, and Obsidian feedback so another browser tab cannot be silently
-  overwritten.
+- Optimistic version and content-fingerprint checks for asynchronous batches,
+  graph imports, backup restores, and Obsidian feedback so another browser tab
+  cannot silently overwrite a divergent same-version graph.
 - The same conflict protection covers single-document extraction, manual
   concept and relation edits, source removal, and feedback clicks.
 - Undo and clear also refuse to overwrite a graph that changed in another tab.
@@ -130,12 +145,16 @@ The browser prototype supports:
   and Obsidian source notes.
 - Rendering safe HTTP(S) source URIs as clickable links in the Markdown
   projection while keeping other allowed URI schemes as escaped text.
+- Rejecting ambiguous HTTP forms and embedded HTTP(S) credentials before source
+  URI metadata reaches graph storage or projections, with matching graph, diff,
+  and extractor-request schema constraints.
 - Reusing a per-render source-title index so graph search stays responsive as
   provenance grows.
 - Bounding per-item search text and evidence previews so large imported graphs
   cannot force unbounded search-index allocations.
 - Inspecting provenance health, including unsupported concepts/relations and
-  evidence coverage, source review coverage, and quality distribution.
+  active-item provenance coverage, source review coverage, and quality
+  distribution.
 - Showing how many reviewed feedback decisions are retained for future
   extraction guidance.
 - Revisiting stale human decisions after a bounded freshness window, so
@@ -143,6 +162,8 @@ The browser prototype supports:
   evidence arrives.
 - Reporting stale-review pressure in graph health exports and the workbench,
   making representation drift visible to operators and quality gates.
+- Separating historical source-review coverage from fresh source-review
+  coverage, so old metadata is not counted as current trust.
 - Recording the latest human review time on concepts, relations, and reusable
   learning examples so the representation's audit trail survives JSON and
   Obsidian round-trips.
@@ -155,6 +176,8 @@ The browser prototype supports:
   window is full, so stale imports cannot displace recent human decisions.
 - Allowing users to forget reusable learning memory without deleting source
   documents or the current knowledge graph.
+- Allowing users to forget only stale reusable learning memory while preserving
+  fresh reviewed guidance and an undoable revision.
 - Marking each source as unknown, primary, secondary, or tertiary quality and
   recording its last-reviewed date in the graph and Obsidian projection.
 - Normalizing review dates to ISO timestamps and discarding malformed dates at
@@ -172,12 +195,17 @@ The browser prototype supports:
   correction, with confirm/dismiss actions available directly in the
   inspector.
 - Exporting the internal representation as JSON.
+- Including an optional deterministic graph fingerprint in JSON exports so
+  imports can detect accidental edits or truncation while legacy graphs remain
+  readable.
 - Binding Markdown projections to the normalized graph fingerprint so copied
   notes can be traced back to the exact representation that produced them.
 - Copying the current Markdown projection directly to the clipboard for quick
   sharing into Obsidian, issues, or chat.
 - Exporting a redacted graph that preserves structure and review state while
   removing source text, evidence quotes, and source URIs for safer sharing.
+- Exporting a redacted Markdown projection for quick, privacy-safe sharing in
+  issues, chat, and Obsidian-compatible viewers.
 - Exporting a redacted Obsidian vault with the same privacy boundary, so
   shareable Markdown projections do not require exposing source material; the
   exported notes visibly mark the redaction state.
@@ -194,7 +222,8 @@ The browser prototype supports:
   relations, including aliases, for future extractor evaluation or
   improvement.
 - Stamping feedback exports with a deterministic reviewed-dataset fingerprint
-  so evaluation runs can prove they used the intended examples.
+  so evaluation runs can prove they used the intended examples; new exports
+  use a dual-lane 64-bit digest while legacy fingerprints remain importable.
 - Exporting compact feedback without evidence or source IDs for safer sharing
   of reviewed learning decisions.
 - Evaluating an extractor or graph against that feedback dataset with a
@@ -203,7 +232,16 @@ The browser prototype supports:
 - Comparing baseline and candidate evaluation reports with a dependency-free
   regression gate that fails promotion when accepted recall or rejected-example
   suppression worsens beyond an explicit tolerance, while rejecting reports
-  generated from different reviewed datasets.
+  generated from different reviewed datasets, empty reviewed benchmarks, or
+  contradictory reviewed decisions.
+- Validating relation labels and endpoint pairs during evaluation even when a
+  candidate reuses the reviewed relation ID, while treating reversed endpoint
+  order as the same graph relation.
+- Reporting evidence-backed coverage separately from recall, so a candidate
+  cannot appear complete merely by naming the right concepts or relations;
+  evidence must point back to the evaluated source.
+- Excluding explicitly rejected candidate items from accepted-recall scores,
+  so suppression cannot be mistaken for successful extraction.
 - Importing that feedback dataset into another graph workspace idempotently,
 including reviewed aliases, so decisions can travel between projects without
 double-counting. When IDs differ, concept feedback falls back to canonical
@@ -216,11 +254,22 @@ retains the existing correction semantics.
 - Saving learning-map progress through the same browser storage boundary as
   the graph, surfacing failures instead of silently losing checkmarks, and
   synchronizing progress across open tabs.
+- Giving note deep links note-specific browser and share metadata while
+  restoring the wiki-level metadata when the dialog closes.
 - Exporting a complete Obsidian vault ZIP with an index, one Markdown note per
   concept, one editable note per relation, one note per source document,
-  relations, the bounded revision history, the graph JSON, and an orientation
+  relations, a navigable reusable-review ledger, the bounded revision history,
+  the graph JSON, and an orientation
   README describing the round-trip review workflow, plus a fingerprinted vault
-  manifest for projection identity.
+  manifest and fingerprinted graph JSON for projection identity.
+  The vault also carries the versioned JSON-LD projection for machine-readable
+  graph tooling.
+- Exporting the same normalized representation as interoperable JSON-LD, with
+  source fingerprints, explicit concept/relation provenance, and review
+  metadata preserved, plus a redacted variant that removes source text,
+  evidence quotes, and source URIs. It also carries bounded reusable learning
+  examples, portable relation endpoint labels, and graph revision counts for
+  external audit.
 - Preflighting each generated vault and learning-note file against the ZIP
   size limit before retaining more projection content in browser memory, and
   failing clearly rather than silently omitting notes when the limit is hit.
@@ -228,6 +277,8 @@ retains the existing correction semantics.
   `notes/`, so the curriculum is forkable, linkable, and usable in Obsidian.
 - Including a bounded Mermaid graph view in Markdown projections for visual
   inspection in Obsidian-compatible viewers.
+- Including privacy-safe graph health diagnostics in the Markdown projection,
+  so provenance gaps and review debt remain visible outside the browser.
 - Bounding evidence retained in full Markdown projections so large graphs
   produce a useful, explicitly marked export instead of an unbounded string.
 - Including those learning pages in Obsidian vault exports and precaching them
@@ -245,8 +296,15 @@ retains the existing correction semantics.
   reloads and browser back/forward navigation.
 - Importing edited concept/relation Markdown notes from an unpacked Obsidian
   vault so label, alias, and status corrections become graph revisions; vault
-  imports surface invalid or stale manifest metadata without silently hiding it,
-  and individual exported notes retain the same projection identity.
+  imports surface invalid or stale manifest metadata, require explicit
+  confirmation before applying edits from an older or unverifiable graph
+  revision, reject conflicting duplicate edits instead of choosing a file-order
+  winner, validate relation endpoints before applying edits, and
+  bind source metadata edits to the source document fingerprint,
+  verify embedded graph JSON against the vault manifest before applying edits,
+  individual exported notes retain the same projection identity. Concept,
+  relation, and source metadata notes round-trip through ZIP imports; malformed
+  exported notes fail the import closed rather than being silently skipped.
 - Confirming destructive graph and full-backup replacement imports while
   retaining the previous graph through the undo path.
 - Rejecting oversized Obsidian feedback notes before frontmatter parsing.
@@ -265,8 +323,9 @@ node experiments/evaluate-feedback.mjs feedback.json extraction.json
 ```
 
 The evaluator emits the versioned `llm-field-notes/evaluation@1` contract. It
-measures coverage of accepted concepts and relations and whether rejected
-examples stay out of the representation; it does not pretend a sparse human
+measures accepted recall, reviewed-candidate precision, and whether rejected
+examples stay out of the representation; reviewed precision is limited to
+candidates that match reviewed examples and does not pretend a sparse human
 feedback set is a complete precision benchmark.
 
 To compare two graph exports or full backups outside the browser:
@@ -286,39 +345,67 @@ To gate an extractor or representation improvement:
 node experiments/compare-evaluations.mjs baseline-evaluation.json candidate-evaluation.json
 ```
 
-The command exits non-zero when any accepted-recall or rejected-suppression
-metric regresses. Pass `--max-regression 0.02` to allow a documented two-point
-tradeoff.
+The command exits non-zero when any accepted-recall, reviewed-precision, or
+rejected-suppression metric regresses. Pass `--max-regression 0.02` to allow a
+documented two-point tradeoff.
 
 To inspect graph quality in automation:
 
 ```bash
-npm run health -- graph.json --min-provenance 95 --max-orphaned 0 --max-review-candidates 25 --max-stale-review-candidates 10
+npm run health -- graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-stale-review-candidates 10 --max-stale-learning-examples 25
 ```
 
 This emits the privacy-safe health contract and exits non-zero when the
 requested quality thresholds are missed.
 The report and gate reuse the same normalized diagnostic pass, so large graphs
-are not scanned twice.
+are not scanned twice; `--max-ambiguous` includes duplicate canonical concept
+labels as well as provenance and identifier ambiguity. The unsupported-node
+and unsupported-edge gates require every active item to retain valid evidence
+or provenance.
+
+To project a graph or backup into JSON-LD from automation:
+
+```bash
+npm run project:jsonld -- graph.json > graph.jsonld
+npm run project:jsonld -- graph.json --redacted > graph-redacted.jsonld
+npm run verify:jsonld -- graph.json graph.jsonld
+```
+
+The CLI verifies graph or backup fingerprints before projection and uses the
+same pure projection module as the browser export. `verify:jsonld` checks an
+existing artifact against the normalized graph and exits non-zero if its
+content, fingerprint, or redaction state diverges.
 
 Before publishing a release, run `npm run release:check` to verify that the
-package version, public release manifest, changelog heading, and every
-service-worker shell asset agree and are non-empty.
+package version, public release manifest, changelog heading, and every shared
+public/offline asset agree and are non-empty.
 
 Model-backed adapters should call `normalizeExtraction()` before merge; this is
 the stable boundary for partial or provider-specific extraction responses.
+HTTP adapters should use `normalizeExtractionForDocument()` when the submitted
+document's title, text, URI, and provenance must remain authoritative.
 `extractor-adapter.js` provides a small HTTP adapter with endpoint validation,
 timeouts, bounded document input and response size, and normalized responses. It is intentionally
 not wired to a vendor or API key, so deployments can add a server-side provider
 without putting credentials in the browser.
+Remote extraction treats the submitted title, text, URI, and content fingerprint
+as authoritative source metadata; a provider can contribute graph nodes and
+relations but cannot rewrite the document provenance envelope or attach
+node/evidence provenance to an unrelated source.
 
 ## Run it locally
 
-There are no dependencies or build steps. Serve the repository over HTTP so
-browser modules, service workers, and durable storage work consistently:
+There are no runtime dependencies. Serve the repository over HTTP so browser
+modules, service workers, and durable storage work consistently:
 
 ```bash
 npm run serve
+```
+
+For the exact GitHub Pages artifact, use:
+
+```bash
+npm run serve:pages
 ```
 
 Then visit `http://localhost:8000`.
@@ -342,10 +429,10 @@ return HTTP 504 with a correlated request ID. The default provider timeout is
 120 seconds and is configurable with `EXTRACTOR_TIMEOUT_MS` (capped at 120
 seconds); disconnected clients also abort in-flight provider work. The
 normalized extractor response is capped at 10 MB before transmission. The
-An invalid or absent `PORT` falls back to `8000`; an empty or absent `HOST`
+invalid or absent `PORT` falls back to `8000`; an empty or absent `HOST`
 falls back to `127.0.0.1`, while a non-empty host is passed to Node for
-normal hostname validation. The
-reference endpoint requires JSON, validates the feedback format,
+normal hostname validation. The reference endpoint requires JSON, validates
+the feedback format,
 sets no-store response behavior, and emits baseline security headers.
 Set `EXTRACTOR_AUTH_TOKEN` to require a bearer token for extraction requests;
 leave it unset for the local development default. The token is compared
@@ -422,14 +509,21 @@ Generic Node hosts can use `npm start`; the server honors `PORT`, `HOST`,
 `EXTRACTOR_RATE_LIMIT`, and `EXTRACTOR_TIMEOUT_MS`. The container intentionally
 execs Node directly so orchestrator signals reach graceful shutdown handling
 without an npm intermediary.
+Before a public deployment, follow the [production launch checklist](SECURITY.md#production-launch-checklist)
+for TLS, secret management, gateway controls, monitoring, backups, and
+projection round-trip verification.
 
 The image binds to `0.0.0.0`, includes a Docker health check, and keeps the
 runtime dependency-free. It runs as the non-root `node` user; the Node server
 aborts active provider calls, closes idle keep-alive sockets, and drains
-requests during SIGINT/SIGTERM shutdown.
+requests during SIGINT/SIGTERM shutdown. Programmatic hosts can call the
+idempotent `server.beginDrain()` before `server.close()` to use the same
+lifecycle behavior.
 The base image is digest-pinned for reproducible builds.
-The Docker context excludes environment files, local exports, and development
-tests, common backup/database artifacts, and private-key material.
+The Docker context excludes environment files, local exports, development
+tests and experiment modules, build/release-only scripts, common
+backup/database artifacts, and private-key material; it retains only the
+runtime public-asset contract needed by the server.
 
 Run the dependency-free smoke checks with:
 
@@ -442,6 +536,9 @@ request across Node 18, 20, and 22.
 CI also builds the Docker image to catch deployment drift.
 CI starts that image, probes `/readyz`, and waits for Docker’s health status to
 become `healthy` so the runtime and its own health check agree.
+GitHub Actions in the verification and Pages workflows are pinned to immutable
+commit references; Dependabot tracks their updates without making releases
+depend on mutable tags.
 
 The test suite also serves the static asset graph through a local HTTP server,
 simulates service-worker install/network/offline behavior, and verifies that
@@ -472,6 +569,8 @@ those files as feedback updates rather than new source documents.
 - `manifest.webmanifest` / `sw.js` — installable, cacheable static deployment
 - `version.json` — public release metadata shared by the browser and static
   deployment checks
+- `llms.txt` — bounded machine-readable project map for discovery and
+  assistant tooling
 - `tests/` — dependency-free graph and site smoke checks
 - `schema/graph.schema.json` — versioned interchange contract for external tools
 - `schema/feedback.schema.json` — versioned reviewed-example export contract
@@ -484,6 +583,8 @@ those files as feedback updates rather than new source documents.
   gate result
 - `schema/health.schema.json` — versioned privacy-safe graph health report
 - `schema/vault-manifest.schema.json` — versioned Obsidian projection identity
+- `schema/jsonld.schema.json` — versioned JSON-LD projection contract
+- `jsonld-projection.js` — reusable full and redacted JSON-LD projection
 - `SECURITY.md` — data boundary and vulnerability-reporting guidance
 - `CODE_OF_CONDUCT.md` — community participation expectations
 - `LICENSE` — reuse and attribution terms
@@ -554,14 +655,21 @@ a model-backed extraction implementation behind the same graph contract.
 - Or run `npm run serve:pages` to rebuild and serve that exact artifact on
   `http://localhost:8000`.
 - The Pages artifact also generates `feed.xml` from the published learning
-  notes; the Node server provides the richer origin-aware feed when
-  `PUBLIC_ORIGIN` is configured.
+  notes. Set the build environment variable `PUBLIC_ORIGIN` to the final
+  HTTPS origin to additionally generate absolute `sitemap.xml` URLs and a
+  deployment-aware `robots.txt`; the GitHub Pages workflow automatically uses
+  the configured Pages base URL, while the optional repository variable can
+  override it for custom build environments. Generated XML removes invalid
+  control characters from forked note headings and summaries. The Node server
+  provides the same origin-aware crawler assets at runtime, with a 2 MB
+  generated feed/sitemap safety bound.
 - Public asset delivery is defined once in `scripts/public-assets.mjs` and
   checked against the offline service-worker shell during release validation.
 - The repo should be easy to fork, improve, and deploy on GitHub Pages.
 - The service worker prefers fresh shell assets and only falls back to its
-  cache when offline or when the network stalls for three seconds; API and
-  non-shell requests are not cached.
+  cache when offline, when the network stalls for three seconds, or when a
+  transient non-OK shell response arrives; API and non-shell requests are not
+  cached.
 - Service-worker activation removes only older `llm-field-notes-*` caches, so
   deploying beside another app on the same origin does not erase its cache.
 - Shell requests explicitly revalidate the browser HTTP cache so deployments

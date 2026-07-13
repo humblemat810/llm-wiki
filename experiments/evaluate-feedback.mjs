@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { FEEDBACK_FORMAT, GRAPH_SCHEMA, fingerprintFeedbackExamples } from "../graph-core.js";
+import { FEEDBACK_FORMAT, GRAPH_SCHEMA, matchesFeedbackFingerprint, matchesGraphFingerprint } from "../graph-core.js";
 import { evaluateExtraction } from "../evaluation.js";
 
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
@@ -25,16 +25,25 @@ if (!feedbackPath || !extractionPath) {
     if (!Array.isArray(feedback) && feedback?.graphSchema !== undefined && feedback.graphSchema !== GRAPH_SCHEMA) {
       throw new Error("Feedback JSON declares an incompatible graph schema.");
     }
+    const extractionValue = extraction?.extraction || extraction;
     if (extraction?.schema !== undefined && extraction.schema !== GRAPH_SCHEMA) {
       throw new Error("Extraction JSON declares an incompatible graph schema.");
+    }
+    if (extractionValue?.schema !== undefined && extractionValue.schema !== GRAPH_SCHEMA) {
+      throw new Error("Extraction payload declares an incompatible graph schema.");
+    }
+    if (extractionValue?.schema === GRAPH_SCHEMA
+      && extractionValue.graphFingerprint !== undefined
+      && !matchesGraphFingerprint(extractionValue, extractionValue.graphFingerprint)) {
+      throw new Error("Extraction graph fingerprint does not match its contents.");
     }
     const examples = Array.isArray(feedback) ? feedback : feedback.examples;
     if (!Array.isArray(examples)) throw new Error("Feedback JSON must be an array or contain an examples array.");
     if (!Array.isArray(feedback) && feedback.datasetFingerprint !== undefined
-      && feedback.datasetFingerprint !== fingerprintFeedbackExamples(examples)) {
+      && !matchesFeedbackFingerprint(examples, feedback.datasetFingerprint)) {
       throw new Error("Feedback JSON dataset fingerprint does not match its examples.");
     }
-    console.log(JSON.stringify(evaluateExtraction(extraction.extraction || extraction, examples), null, 2));
+    console.log(JSON.stringify(evaluateExtraction(extractionValue, examples), null, 2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : "Evaluation failed.");
     process.exitCode = 1;

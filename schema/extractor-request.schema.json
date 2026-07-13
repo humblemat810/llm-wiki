@@ -14,7 +14,7 @@
       "required": ["title", "text"],
       "properties": {
         "title": { "type": "string", "maxLength": 200 },
-        "uri": { "type": "string", "maxLength": 2048, "pattern": "^(?:(?:https?|file|urn|doi):|[^:]+$)" },
+        "uri": { "type": "string", "maxLength": 2048, "pattern": "^(?:(?:https?|file):\\/\\/[^\\s@<>]+|(?:urn|doi):[^\\s<>]+|[^:\\s<>]+)$" },
         "text": { "type": "string", "minLength": 40, "maxLength": 300000 }
       },
       "additionalProperties": false

@@ -18,15 +18,20 @@ Treat downloaded graph JSON, backups, and Obsidian vaults as sensitive if the
 source documents are sensitive. They contain source text and derived evidence.
 Use the redacted graph or redacted Obsidian vault export for public issue
 reports, examples, or shared review; they remove source text, evidence quotes,
-and source URIs while preserving reviewable graph structure. The `redacted`
+and source URIs—including evidence retained in reusable learning memory—while
+preserving reviewable graph structure. The `redacted`
 marker survives normalization and import so downstream tools can keep the
-privacy boundary visible.
+privacy boundary visible; normalization also enforces the marker by scrubbing
+source text, URIs, and evidence if a marked payload was tampered with.
 The compact feedback export is safer when only reviewed labels, aliases,
 statuses, and relation endpoints need to be shared.
 Ingesting a new full-text source into a redacted graph clears the marker so a
 mixed graph cannot be mistaken for a fully redacted export.
 Source URI metadata is scheme-filtered at the graph boundary; dangerous
-schemes such as `javascript:` are discarded.
+schemes such as `javascript:` are discarded, ambiguous HTTP forms are rejected,
+embedded whitespace and HTTP(S)/file credentials are never retained in source
+metadata. The graph, diff, and extractor-request schemas enforce the same URI
+shape for external validators.
 
 ## Reference server deployment
 
@@ -55,6 +60,41 @@ The `/metrics` endpoint contains only aggregate operational counters and no
 document content or credentials. Set `METRICS_AUTH_TOKEN` for a simple
 single-instance guard, and restrict it at the gateway if traffic statistics
 are considered sensitive.
+The reference extraction server compacts reviewed feedback at its trust
+boundary, forwarding only bounded labels, aliases, statuses, and relation
+endpoints; unrecognized fields such as evidence or source text are discarded
+before a provider call.
+Provider responses are normalized against the submitted document before they
+reach the browser: returned source titles, text, URIs, quality, review dates,
+fingerprints, and node/evidence source references cannot rewrite or escape the
+request's provenance envelope.
+Provider diagnostic codes are also allowlisted and length-bounded before they
+reach structured logs.
+
+## Production launch checklist
+
+Before exposing the reference server to real users:
+
+- Put it behind a TLS-terminating reverse proxy. Configure `PUBLIC_ORIGIN` to
+  the exact externally visible `https://` origin so canonical links, feeds,
+  sitemaps, and social metadata point to the right deployment.
+- Set `EXTRACTOR_AUTH_TOKEN` for the extraction endpoint and
+  `METRICS_AUTH_TOKEN` for operational metrics. Keep both values outside the
+  repository and rotate them through the deployment secret manager.
+- Enforce identity, CSRF policy, request logging, and a shared rate limit at
+  the gateway. The built-in bearer check and in-process limiter are safety
+  nets for a single instance, not a complete multi-user account system.
+- Monitor `/readyz`, `/healthz`, and authenticated `/metrics`. Treat a failed
+  readiness check as a deployment failure and retain request IDs when
+  investigating extraction errors.
+- Export and verify graph backups before browser storage is cleared, a device
+  is replaced, or an Obsidian vault is shared. Use redacted graph, vault, or
+  JSON-LD exports for public examples and issue reports.
+- Run `npm test` in CI and perform one real Obsidian export/import review before
+  upgrading the application or changing graph or projection schemas.
+- Treat browser storage, downloaded backups, and full vaults as user data.
+  Define retention and deletion procedures for each deployment that collects
+  documents or model-provider requests.
 
 ## Reporting a vulnerability
 

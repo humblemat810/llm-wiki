@@ -6,6 +6,8 @@ import {
   HEALTH_FORMAT,
   VAULT_FORMAT,
   fingerprintBackup,
+  matchesGraphFingerprint,
+  preferLearningExample,
   advanceGraphVersion,
   LEGACY_GRAPH_SCHEMAS,
   MAX_DOCUMENT_CHARS,
@@ -30,11 +32,13 @@ import {
   mergeConcepts,
   buildExtractorFeedback,
   clearLearningMemory,
+  clearStaleLearningMemory,
   rememberLearningItem,
   removeSource,
   inspectGraph,
   reviewQueue,
   fingerprintFeedbackExamples,
+  matchesFeedbackFingerprint,
   syncLearningRelationLabels,
   slugify,
   makeEdgeId,
@@ -43,9 +47,10 @@ import {
   SOURCE_QUALITIES
 } from "./graph-core.js";
 import { GRAPH_KEY, createGraphStore } from "./graph-store.js";
-import { MAX_ZIP_BYTES, applyObsidianFeedback, parseObsidianFeedback, parseObsidianVault } from "./projection-adapter.js";
+import { MAX_ZIP_BYTES, applyObsidianFeedback, looksLikeObsidianFeedback, parseObsidianFeedback, parseObsidianVault } from "./projection-adapter.js";
 import { createRemoteExtractor } from "./extractor-adapter.js";
 import { getBrowserStorage } from "./storage-adapter.js";
+import { buildJsonLd } from "./jsonld-projection.js";
 
 const notes = [
   { id: "tokens", category: "foundations", number: "01", tag: "FOUNDATIONS", title: "Tokens are the interface", description: "What a model actually sees, why text becomes integers, and where the seams show.", meta: "12 min read", question: "Why can't the model see words?" },
@@ -151,10 +156,40 @@ const clearProgressStorageError = () => {
 };
 const dialog = document.querySelector("#note-dialog");
 let lastNoteTrigger = null;
+const defaultPageMetadata = {
+  title: document.title,
+  description: document.querySelector('meta[name="description"]')?.content || "",
+  ogTitle: document.querySelector('meta[property="og:title"]')?.content || "",
+  ogDescription: document.querySelector('meta[property="og:description"]')?.content || "",
+  twitterTitle: document.querySelector('meta[name="twitter:title"]')?.content || "",
+  twitterDescription: document.querySelector('meta[name="twitter:description"]')?.content || ""
+};
+const setMetadataContent = (selector, content) => {
+  const element = document.querySelector(selector);
+  if (element) element.setAttribute("content", content);
+};
+function setNoteMetadata(note) {
+  const description = `${note.question} ${note.description}`.replace(/\s+/g, " ").trim().slice(0, 280);
+  document.title = `${note.title} · LLM Field Notes`;
+  setMetadataContent('meta[name="description"]', description);
+  setMetadataContent('meta[property="og:title"]', `${note.title} · LLM Field Notes`);
+  setMetadataContent('meta[property="og:description"]', description);
+  setMetadataContent('meta[name="twitter:title"]', `${note.title} · LLM Field Notes`);
+  setMetadataContent('meta[name="twitter:description"]', description);
+}
+function restorePageMetadata() {
+  document.title = defaultPageMetadata.title;
+  setMetadataContent('meta[name="description"]', defaultPageMetadata.description);
+  setMetadataContent('meta[property="og:title"]', defaultPageMetadata.ogTitle);
+  setMetadataContent('meta[property="og:description"]', defaultPageMetadata.ogDescription);
+  setMetadataContent('meta[name="twitter:title"]', defaultPageMetadata.twitterTitle);
+  setMetadataContent('meta[name="twitter:description"]', defaultPageMetadata.twitterDescription);
+}
 
 function openNote(note, { updateUrl = true } = {}) {
   if (!note || !noteDetails[note.id]) return;
   const detail = noteDetails[note.id];
+  setNoteMetadata(note);
   document.querySelector("#dialog-kicker").textContent = `${note.number} / ${note.tag}`;
   document.querySelector("#dialog-title").textContent = note.title;
   document.querySelector("#dialog-question").textContent = note.question;
@@ -170,6 +205,7 @@ function openNoteFromLocation() {
   const match = location.hash.match(/^#note=([^&]+)/);
   if (!match) {
     if (dialog.open) dialog.close();
+    else restorePageMetadata();
     return;
   }
   let noteId;
@@ -177,11 +213,13 @@ function openNoteFromLocation() {
     noteId = decodeURIComponent(match[1]);
   } catch {
     if (dialog.open) dialog.close();
+    else restorePageMetadata();
     return;
   }
   const note = notes.find((item) => item.id === noteId);
   if (!note) {
     if (dialog.open) dialog.close();
+    else restorePageMetadata();
     return;
   }
   openNote(note, { updateUrl: false });
@@ -209,8 +247,8 @@ function renderNotes() {
         <div>
           <a class="open-note" href="#note=${encodeURIComponent(note.id)}" data-open-note="${note.id}">open note <span>↗</span></a>
           <a class="note-source" href="./notes/${encodeURIComponent(note.id)}.md" target="_blank" rel="noopener">markdown</a>
-          <button class="copy-note" data-copy-note="${note.id}" aria-label="Copy link to ${note.title}">copy link</button>
-          <button class="mark-done" data-note="${note.id}" aria-label="Mark ${note.title} as read">
+          <button type="button" class="copy-note" data-copy-note="${note.id}" aria-label="Copy link to ${note.title}">copy link</button>
+          <button type="button" class="mark-done" data-note="${note.id}" aria-label="Mark ${note.title} as read">
             ${done.includes(note.id) ? "✓ read" : "mark read"}
           </button>
         </div>
@@ -226,7 +264,7 @@ function renderPath() {
     <div class="path-item ${done.includes(index) ? "done" : ""}">
       <span class="path-day">DAYS ${item[0]}</span>
       <div><h3>${item[1]}</h3><p>${item[2]}</p></div>
-      <button class="path-check" data-day="${index}" aria-label="Mark ${item[1]} complete">${done.includes(index) ? "✓" : "·"}</button>
+      <button type="button" class="path-check" data-day="${index}" aria-label="Mark ${item[1]} complete">${done.includes(index) ? "✓" : "·"}</button>
     </div>
   `).join("");
 }
@@ -285,6 +323,7 @@ dialog.addEventListener("click", (event) => {
 });
 dialog.addEventListener("close", () => {
   if (location.hash.startsWith("#note=")) history.pushState({}, "", "#map");
+  restorePageMetadata();
   if (lastNoteTrigger?.isConnected) lastNoteTrigger.focus();
   lastNoteTrigger = null;
 });
@@ -362,6 +401,11 @@ openNoteFromLocation();
 // useful first pass today; a future model adapter can replace extractGraph()
 // without changing the graph schema, renderer, or export formats.
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+const lexicalCompare = (left, right) => {
+  const leftText = String(left);
+  const rightText = String(right);
+  return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+};
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 const MAX_BATCH_FILES = 100;
 const MAX_BATCH_CHARS = 10 * 1024 * 1024;
@@ -373,6 +417,10 @@ const MAX_RENDERED_GRAPH_NODES = 250;
 const MAX_RENDERED_GRAPH_EDGES = 500;
 const MAX_EXPORT_BYTES = 50 * 1024 * 1024;
 const graphStore = createGraphStore(appStorage);
+const graphStoreOptions = (graph) => ({
+  expectedVersion: graph.version,
+  expectedFingerprint: fingerprintBackup(graph)
+});
 const extractorEndpointInput = document.querySelector("#extractor-endpoint");
 const privacyNote = document.querySelector("#privacy-note");
 const cancelExtractionButton = document.querySelector("#cancel-extraction");
@@ -524,7 +572,7 @@ function renderInspector(graph) {
   const evidenceMarkup = (item) => {
     const sourceLinks = item.sources?.map((sourceId) => {
       const source = graph.documents.find((doc) => doc.id === sourceId);
-      return `<button class="evidence-source" data-select-source="${escapeHtml(sourceId)}">${escapeHtml(source?.title || sourceId)}</button>`;
+      return `<button type="button" class="evidence-source" data-select-source="${escapeHtml(sourceId)}">${escapeHtml(source?.title || sourceId)}</button>`;
     }).join(", ");
     return `<li>${escapeHtml(item.text)}${sourceLinks ? `<small class="evidence-source-list">source: ${sourceLinks}</small>` : ""}</li>`;
   };
@@ -537,23 +585,23 @@ function renderInspector(graph) {
     }
     const sources = node.sources.map((sourceId) => ({ id: sourceId, title: graph.documents.find((doc) => doc.id === sourceId)?.title || sourceId }));
     const relations = graph.edges.filter((edge) => edge.source === node.id || edge.target === node.id);
-    const mergeTargets = graph.nodes.filter((candidate) => candidate.id !== node.id).sort((left, right) => left.label.localeCompare(right.label));
+    const mergeTargets = graph.nodes.filter((candidate) => candidate.id !== node.id).sort((left, right) => lexicalCompare(left.label, right.label));
     const feedbackActions = node.status === "rejected"
-      ? `<button data-inspector-feedback="restore" data-node-id="${escapeHtml(node.id)}">↺ restore</button>`
-      : `<button data-inspector-feedback="up" data-node-id="${escapeHtml(node.id)}">+ confirm</button><button data-inspector-feedback="down" data-node-id="${escapeHtml(node.id)}">− dismiss</button>`;
+      ? `<button type="button" data-inspector-feedback="restore" data-node-id="${escapeHtml(node.id)}">↺ restore</button>`
+      : `<button type="button" data-inspector-feedback="up" data-node-id="${escapeHtml(node.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-node-id="${escapeHtml(node.id)}">− dismiss</button>`;
     panel.innerHTML = `
       <div class="inspector-header"><span>CONCEPT / ${escapeHtml(node.status.toUpperCase())}</span><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback${node.feedback === 1 ? "" : "s"}${node.lastReviewedAt ? ` · reviewed ${escapeHtml(node.lastReviewedAt)}` : ""}${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</small></div>
       <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
-      <div class="inspector-edit"><label for="inspector-node-label">EDIT LABEL</label><div><input id="inspector-node-label" class="inspector-edit-input" value="${escapeHtml(node.label)}" maxlength="120" /><button data-edit-node="${escapeHtml(node.id)}">save</button></div></div>
-      ${mergeTargets.length ? `<div class="inspector-merge"><label for="inspector-merge-target">MERGE INTO</label><div><select id="inspector-merge-target" class="inspector-edit-input">${mergeTargets.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.label)}</option>`).join("")}</select><button data-merge-node="${escapeHtml(node.id)}">merge</button></div><small>Keep the selected concept as the stable ID; evidence, aliases, and relations will be combined. This can be undone.</small></div>` : ""}
+      <div class="inspector-edit"><label for="inspector-node-label">EDIT LABEL</label><div><input id="inspector-node-label" class="inspector-edit-input" value="${escapeHtml(node.label)}" maxlength="120" /><button type="button" data-edit-node="${escapeHtml(node.id)}">save</button></div></div>
+      ${mergeTargets.length ? `<div class="inspector-merge"><label for="inspector-merge-target">MERGE INTO</label><div><select id="inspector-merge-target" class="inspector-edit-input">${mergeTargets.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.label)}</option>`).join("")}</select><button type="button" data-merge-node="${escapeHtml(node.id)}">merge</button></div><small>Keep the selected concept as the stable ID; evidence, aliases, and relations will be combined. This can be undone.</small></div>` : ""}
       <div class="inspector-columns">
         <div><span class="inspector-label">EVIDENCE</span>${node.evidence.length ? `<ul>${node.evidence.map(evidenceMarkup).join("")}</ul>` : "<p class=\"inspector-muted\">No evidence captured.</p>"}</div>
-        <div><span class="inspector-label">SOURCES</span>${sources.length ? `<ul>${sources.map((item) => `<li><button class="inspector-link" data-select-source="${escapeHtml(item.id)}">${escapeHtml(item.title)} ↗</button></li>`).join("")}</ul>` : "<p class=\"inspector-muted\">No source attached.</p>"}</div>
+        <div><span class="inspector-label">SOURCES</span>${sources.length ? `<ul>${sources.map((item) => `<li><button type="button" class="inspector-link" data-select-source="${escapeHtml(item.id)}">${escapeHtml(item.title)} ↗</button></li>`).join("")}</ul>` : "<p class=\"inspector-muted\">No source attached.</p>"}</div>
       </div>
       <div class="inspector-relations"><span class="inspector-label">NEIGHBORS</span>${relations.length ? relations.map((edge) => {
         const otherId = edge.source === node.id ? edge.target : edge.source;
         const other = graph.nodes.find((item) => item.id === otherId);
-        return `<button class="inspector-link" data-select-edge="${escapeHtml(edge.id)}">${escapeHtml(edge.label)} · ${escapeHtml(other?.label || otherId)} <small>${edge.status}</small></button>`;
+        return `<button type="button" class="inspector-link" data-select-edge="${escapeHtml(edge.id)}">${escapeHtml(edge.label)} · ${escapeHtml(other?.label || otherId)} <small>${edge.status}</small></button>`;
       }).join("") : "<p class=\"inspector-muted\">No relations attached.</p>"}</div>`;
     return;
   }
@@ -571,10 +619,10 @@ function renderInspector(graph) {
     const reviewedDate = source.lastReviewedAt ? source.lastReviewedAt.slice(0, 10) : "";
     panel.innerHTML = `
       <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small></div>
-      <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="200" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" /><button data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
-      <button class="replace-source" data-replace-source="${escapeHtml(source.id)}">Replace source with a newer file</button>
-      <button class="remove-source" data-remove-source="${escapeHtml(source.id)}">Remove source from graph</button>
-      <div class="inspector-source-actions"><span class="inspector-label">CONCEPTS FOUND</span>${relatedNodes.length ? relatedNodes.map((node) => `<button class="inspector-link" data-select-node="${escapeHtml(node.id)}">${escapeHtml(node.label)} <small>${node.status}</small></button>`).join("") : "<p class=\"inspector-muted\">No concepts attached.</p>"}</div>
+      <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="200" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" /><button type="button" data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
+      <button type="button" class="replace-source" data-replace-source="${escapeHtml(source.id)}">Replace source with a newer file</button>
+      <button type="button" class="remove-source" data-remove-source="${escapeHtml(source.id)}">Remove source from graph</button>
+      <div class="inspector-source-actions"><span class="inspector-label">CONCEPTS FOUND</span>${relatedNodes.length ? relatedNodes.map((node) => `<button type="button" class="inspector-link" data-select-node="${escapeHtml(node.id)}">${escapeHtml(node.label)} <small>${node.status}</small></button>`).join("") : "<p class=\"inspector-muted\">No concepts attached.</p>"}</div>
       <div class="inspector-evidence"><span class="inspector-label">DOCUMENT PREVIEW</span><pre class="source-preview">${escapeHtml(preview)}${source.text.length > previewLimit ? "\n\n[… preview truncated …]" : ""}</pre></div>`;
     return;
   }
@@ -587,12 +635,12 @@ function renderInspector(graph) {
   const source = graph.nodes.find((node) => node.id === edge.source);
   const target = graph.nodes.find((node) => node.id === edge.target);
   const feedbackActions = edge.status === "rejected"
-    ? `<button data-inspector-feedback="restore" data-edge-id="${escapeHtml(edge.id)}">↺ restore</button>`
-    : `<button data-inspector-feedback="up" data-edge-id="${escapeHtml(edge.id)}">+ confirm</button><button data-inspector-feedback="down" data-edge-id="${escapeHtml(edge.id)}">− dismiss</button>`;
+    ? `<button type="button" data-inspector-feedback="restore" data-edge-id="${escapeHtml(edge.id)}">↺ restore</button>`
+    : `<button type="button" data-inspector-feedback="up" data-edge-id="${escapeHtml(edge.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-edge-id="${escapeHtml(edge.id)}">− dismiss</button>`;
   panel.innerHTML = `
   <div class="inspector-header"><span>RELATION / ${escapeHtml(edge.status.toUpperCase())}</span><strong>${escapeHtml(source?.label || edge.source)} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(target?.label || edge.target)}</strong><small>${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback${edge.feedback === 1 ? "" : "s"} · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}${edge.lastReviewedAt ? ` · reviewed ${escapeHtml(edge.lastReviewedAt)}` : ""}</small></div>
     <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
-    <div class="inspector-edit"><label for="inspector-edge-label">EDIT RELATION</label><div><input id="inspector-edge-label" class="inspector-edit-input" value="${escapeHtml(edge.label)}" maxlength="80" /><button data-edit-edge="${escapeHtml(edge.id)}">save</button></div></div>
+    <div class="inspector-edit"><label for="inspector-edge-label">EDIT RELATION</label><div><input id="inspector-edge-label" class="inspector-edit-input" value="${escapeHtml(edge.label)}" maxlength="80" /><button type="button" data-edit-edge="${escapeHtml(edge.id)}">save</button></div></div>
     <div class="inspector-evidence"><span class="inspector-label">EVIDENCE</span>${edge.evidence.length ? `<ul>${edge.evidence.map(evidenceMarkup).join("")}</ul>` : "<p class=\"inspector-muted\">No evidence captured.</p>"}</div>`;
 }
 
@@ -622,12 +670,13 @@ function renderWorkbenchUnsafe() {
   document.querySelector("#hero-edge-count").textContent = activeEdges.length;
   document.querySelector("#hero-source-count").textContent = graph.documents.length;
   const recoveryAvailable = Boolean(graphStore.readRecovery());
+  const historyRecoveryAvailable = Boolean(graphStore.readHistoryRecovery());
   const storageMode = graphStore.getLastWriteMode();
   const storageWarning = [
     storageMode === "without-history" || storageMode === "without-new-history" ? "Saved with reduced undo history" : "",
     storageDurabilityFailure ? `<small class="storage-warning">Durable storage unavailable</small><button type="button" data-storage-action="backup">download backup</button>` : ""
   ].filter(Boolean).join("");
-  document.querySelector("#graph-health").innerHTML = `<span>HEALTH</span><small>${health.provenanceCoverage}% provenance</small><small>${health.sourceReviewCoverage}% sources reviewed</small><small>${health.reviewedItems} feedback decision${health.reviewedItems === 1 ? "" : "s"} in memory</small><small>learning: ${health.acceptedItems} accepted · ${health.rejectedItems} rejected · ${health.learningExamples} reusable</small>${health.learningExamples ? `<button type="button" data-learning-action="clear">forget reusable memory</button>` : ""}${health.redacted ? "<small class=\"privacy-warning\">redacted source content</small>" : ""}<small>quality: ${escapeHtml(sourceQualitySummary)}</small><small>${health.unsupportedNodes} unsupported concept${health.unsupportedNodes === 1 ? "" : "s"}</small><small>${health.unsupportedEdges} unsupported relation${health.unsupportedEdges === 1 ? "" : "s"}</small>${health.ambiguousLabels ? `<small>${health.ambiguousLabels} ambiguous concept label${health.ambiguousLabels === 1 ? "" : "s"}</small>` : ""}${reviews.length ? `<small>${reviews.length} review candidate${reviews.length === 1 ? "" : "s"}${health.staleReviewCandidates ? ` · ${health.staleReviewCandidates} stale` : ""}</small><button type="button" data-review-action="next">review next</button>` : ""}${health.orphanedSourceReferences ? `<small>${health.orphanedSourceReferences} broken source reference${health.orphanedSourceReferences === 1 ? "" : "s"}</small>` : ""}${health.ambiguousSourceIds ? `<small>${health.ambiguousSourceIds} ambiguous source ID${health.ambiguousSourceIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousEdgeIds ? `<small>${health.ambiguousEdgeIds} ambiguous edge ID${health.ambiguousEdgeIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousSourceReferences ? `<small>${health.ambiguousSourceReferences} ambiguous provenance reference${health.ambiguousSourceReferences === 1 ? "" : "s"}</small>` : ""}${storageWarning}${recoveryAvailable ? `<small class="recovery-warning">Recovery snapshot available</small><button type="button" data-recovery-action="download">download recovery</button><button type="button" data-recovery-action="dismiss">dismiss</button>` : ""}`;
+  document.querySelector("#graph-health").innerHTML = `<span>HEALTH</span><small>${health.provenanceCoverage}% provenance</small><small>${health.sourceReviewCoverage}% sources reviewed · ${health.freshSourceReviewCoverage}% fresh</small><small>${health.reviewedItems} feedback decision${health.reviewedItems === 1 ? "" : "s"} in memory</small><small>learning: ${health.acceptedItems} accepted · ${health.rejectedItems} rejected · ${health.learningExamples} reusable${health.staleLearningExamples ? ` · ${health.staleLearningExamples} stale` : ""}</small>${health.learningExamples ? `<button type="button" data-learning-action="clear">forget reusable memory</button>` : ""}${health.staleLearningExamples ? `<button type="button" data-learning-action="clear-stale">forget stale learning</button>` : ""}${health.redacted ? "<small class=\"privacy-warning\">redacted source content</small>" : ""}<small>quality: ${escapeHtml(sourceQualitySummary)}</small><small>${health.unsupportedNodes} unsupported concept${health.unsupportedNodes === 1 ? "" : "s"}</small><small>${health.unsupportedEdges} unsupported relation${health.unsupportedEdges === 1 ? "" : "s"}</small>${health.ambiguousLabels ? `<small>${health.ambiguousLabels} ambiguous concept label${health.ambiguousLabels === 1 ? "" : "s"}</small>` : ""}${reviews.length ? `<small>${reviews.length} review candidate${reviews.length === 1 ? "" : "s"}${health.staleReviewCandidates ? ` · ${health.staleReviewCandidates} stale` : ""}</small><button type="button" data-review-action="next">review next</button>` : ""}${health.orphanedSourceReferences ? `<small>${health.orphanedSourceReferences} broken source reference${health.orphanedSourceReferences === 1 ? "" : "s"}</small>` : ""}${health.ambiguousSourceIds ? `<small>${health.ambiguousSourceIds} ambiguous source ID${health.ambiguousSourceIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousEdgeIds ? `<small>${health.ambiguousEdgeIds} ambiguous edge ID${health.ambiguousEdgeIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousSourceReferences ? `<small>${health.ambiguousSourceReferences} ambiguous provenance reference${health.ambiguousSourceReferences === 1 ? "" : "s"}</small>` : ""}${storageWarning}${recoveryAvailable ? `<small class="recovery-warning">Recovery snapshot available</small><button type="button" data-recovery-action="download">download recovery</button><button type="button" data-recovery-action="dismiss">dismiss</button>` : ""}${historyRecoveryAvailable ? `<small class="recovery-warning">Undo history recovery available</small><button type="button" data-recovery-action="history-download">download history recovery</button><button type="button" data-recovery-action="history-dismiss">dismiss</button>` : ""}`;
   undoButton.disabled = !graphStore.canUndo();
   empty.hidden = positions.length > 0;
   document.querySelector("#graph-empty p").textContent = graph.nodes.length && !positions.length ? "All concepts are dismissed." : "Your graph will appear here.";
@@ -648,7 +697,7 @@ function renderWorkbenchUnsafe() {
     return searchIndex.nodeText(node).includes(query);
   });
   const visibleGraphNodes = matchingGraphNodes.slice(0, MAX_RENDERED_GRAPH_NODES);
-  list.innerHTML = visibleGraphNodes.map((node) => `<div class="node-row ${node.status === "rejected" ? "rejected" : ""}" data-node-id="${escapeHtml(node.id)}" tabindex="0" role="group" aria-label="Inspect concept ${escapeHtml(node.label)}"><div><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${node.status} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback</small></div><div class="node-feedback">${node.status === "rejected" ? `<button data-feedback="restore" data-node-id="${escapeHtml(node.id)}" aria-label="Restore ${escapeHtml(node.label)}">↺ restore</button>` : `<button data-feedback="up" data-node-id="${escapeHtml(node.id)}" aria-label="Confirm ${escapeHtml(node.label)}">+ confirm</button><button data-feedback="down" data-node-id="${escapeHtml(node.id)}" aria-label="Dismiss ${escapeHtml(node.label)}">− dismiss</button>`}</div></div>`).join("");
+  list.innerHTML = visibleGraphNodes.map((node) => `<div class="node-row ${node.status === "rejected" ? "rejected" : ""}" data-node-id="${escapeHtml(node.id)}" tabindex="0" role="group" aria-label="Inspect concept ${escapeHtml(node.label)}"><div><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${node.status} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback</small></div><div class="node-feedback">${node.status === "rejected" ? `<button type="button" data-feedback="restore" data-node-id="${escapeHtml(node.id)}" aria-label="Restore ${escapeHtml(node.label)}">↺ restore</button>` : `<button type="button" data-feedback="up" data-node-id="${escapeHtml(node.id)}" aria-label="Confirm ${escapeHtml(node.label)}">+ confirm</button><button type="button" data-feedback="down" data-node-id="${escapeHtml(node.id)}" aria-label="Dismiss ${escapeHtml(node.label)}">− dismiss</button>`}</div></div>`).join("");
   const nodeName = (id) => nodeById.get(id)?.label || id;
   const matchingGraphEdges = graph.edges.filter((edge) => {
     if (!query) return true;
@@ -657,7 +706,7 @@ function renderWorkbenchUnsafe() {
   const visibleGraphEdges = matchingGraphEdges.slice(0, MAX_RENDERED_GRAPH_EDGES);
   relationList.innerHTML = visibleGraphEdges.map((edge) => {
     const relationName = `${nodeName(edge.source)} ${edge.label} ${nodeName(edge.target)}`;
-    return `<div class="relation-row ${edge.status === "rejected" ? "rejected" : ""}" data-edge-id="${escapeHtml(edge.id)}" tabindex="0" role="group" aria-label="Inspect relation ${escapeHtml(relationName)}"><div><strong>${escapeHtml(nodeName(edge.source))} <span>${escapeHtml(edge.label)}</span> ${escapeHtml(nodeName(edge.target))}</strong><small>${edge.status} · ${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}</small></div><div class="node-feedback">${edge.status === "rejected" ? `<button data-edge-feedback="restore" data-edge-id="${escapeHtml(edge.id)}" aria-label="Restore relation ${escapeHtml(relationName)}">↺ restore</button>` : `<button data-edge-feedback="up" data-edge-id="${escapeHtml(edge.id)}" aria-label="Confirm relation ${escapeHtml(relationName)}">+ confirm</button><button data-edge-feedback="down" data-edge-id="${escapeHtml(edge.id)}" aria-label="Dismiss relation ${escapeHtml(relationName)}">− dismiss</button>`}</div></div>`;
+    return `<div class="relation-row ${edge.status === "rejected" ? "rejected" : ""}" data-edge-id="${escapeHtml(edge.id)}" tabindex="0" role="group" aria-label="Inspect relation ${escapeHtml(relationName)}"><div><strong>${escapeHtml(nodeName(edge.source))} <span>${escapeHtml(edge.label)}</span> ${escapeHtml(nodeName(edge.target))}</strong><small>${edge.status} · ${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}</small></div><div class="node-feedback">${edge.status === "rejected" ? `<button type="button" data-edge-feedback="restore" data-edge-id="${escapeHtml(edge.id)}" aria-label="Restore relation ${escapeHtml(relationName)}">↺ restore</button>` : `<button type="button" data-edge-feedback="up" data-edge-id="${escapeHtml(edge.id)}" aria-label="Confirm relation ${escapeHtml(relationName)}">+ confirm</button><button type="button" data-edge-feedback="down" data-edge-id="${escapeHtml(edge.id)}" aria-label="Dismiss relation ${escapeHtml(relationName)}">− dismiss</button>`}</div></div>`;
   }).join("");
   const manualNodes = graph.nodes
     .filter((node) => node.status !== "rejected" && (!query || searchIndex.nodeText(node).includes(query)))
@@ -679,8 +728,22 @@ function renderWorkbenchUnsafe() {
   revisionLog.innerHTML = graph.revisions.length
     ? `<details${wasRevisionOpen ? " open" : ""}><summary><span>MEMORY</span><small>${graph.revisions.length} retained revision${graph.revisions.length === 1 ? "" : "s"}</small></summary><div class="revision-items">${graph.revisions.map((revision) => `<div><b>v${revision.version}</b><span>${escapeHtml(revision.reason)}</span><small>${escapeHtml(revision.timestamp)} · ${revision.nodes} nodes · ${revision.edges} relations</small></div>`).join("")}</div></details>`
     : "<span>MEMORY</span><small>No revisions yet.</small>";
+  const revisionDiffPreview = document.querySelector("#revision-diff-preview");
+  const history = graphStore.readHistory();
+  if (!history.length) {
+    revisionDiffPreview.innerHTML = "";
+  } else {
+    const diff = diffGraphs(history.at(-1), graph);
+    const changes = [
+      ...diff.nodes.changed.map((change) => `concept: ${change.before.label || change.after.label} → ${change.after.label || change.before.label}`),
+      ...diff.edges.changed.map((change) => `relation: ${change.before.label || change.after.label} → ${change.after.label || change.before.label}`),
+      ...diff.learning.added.map((example) => `learning: ${example.label || example.identity} added`),
+      ...diff.learning.removed.map((example) => `learning: ${example.label || example.identity} removed`)
+    ].slice(0, 5);
+    revisionDiffPreview.innerHTML = `<details><summary><span>LAST DIFF</span><small>${diff.summary.added} added · ${diff.summary.changed} changed · ${diff.summary.removed} removed</small></summary><div class="revision-diff-items">${changes.length ? changes.map((change) => `<small>${escapeHtml(change)}</small>`).join("") : "<small>No summarized field changes.</small>"}</div></details>`;
+  }
   const projectionFingerprint = fingerprintBackup(graph);
-  const projection = buildMarkdown(graph, { maxEvidenceChars: MAX_MARKDOWN_PREVIEW_EVIDENCE_CHARS, graphFingerprint: projectionFingerprint });
+  const projection = buildMarkdown(graph, { maxEvidenceChars: MAX_MARKDOWN_PREVIEW_EVIDENCE_CHARS, graphFingerprint: projectionFingerprint, health });
   document.querySelector("#markdown-preview code").textContent = projection;
   renderInspector(graph);
 }
@@ -696,7 +759,7 @@ function renderWorkbench() {
   }
 }
 
-const safeMarkdownLabel = (value) => String(value).replace(/[\[\]\r\n]/g, " ").replace(/\s+/g, " ").trim();
+const safeMarkdownLabel = (value) => String(value).replace(/[\[\]|\r\n]/g, " ").replace(/\s+/g, " ").trim();
 const safeMarkdownUri = (value) => {
   const uri = String(value).replace(/[\r\n<>]/g, "").trim();
   if (!/^https?:\/\//i.test(uri)) return safeMarkdownLabel(uri);
@@ -704,8 +767,9 @@ const safeMarkdownUri = (value) => {
 };
 const quoteMarkdown = (value) => String(value).replace(/\r\n?/g, "\n").split("\n").map((line) => `> ${line}`).join("\n");
 
-function buildMarkdown(graph, { maxEvidenceChars = Number.POSITIVE_INFINITY, graphFingerprint = fingerprintBackup(graph) } = {}) {
+function buildMarkdown(graph, { maxEvidenceChars = Number.POSITIVE_INFINITY, graphFingerprint = fingerprintBackup(graph), health = null } = {}) {
   const MAX_MARKDOWN_EXPORT_EVIDENCE_CHARS = 40 * 1024 * 1024;
+  const graphHealth = health || inspectGraph(graph);
   const paths = buildProjectionPaths(graph);
   const sourceById = new Map(graph.documents.map((doc) => [doc.id, doc]));
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -716,9 +780,12 @@ function buildMarkdown(graph, { maxEvidenceChars = Number.POSITIVE_INFINITY, gra
   const revisionLines = graph.revisions.length
     ? graph.revisions.map((revision) => `- v${revision.version} · ${revision.timestamp} · ${safeMarkdownLabel(revision.reason)} · ${revision.nodes} concepts · ${revision.edges} relations`)
     : ["- none"];
-  const learningLines = (graph.learning?.examples || []).map((example) => example.kind === "concept"
-    ? `- concept: ${safeMarkdownLabel(example.label)} (${example.status}${example.aliases?.length ? `, aliases: ${example.aliases.map(safeMarkdownLabel).join(", ")}` : ""})`
-    : `- relation: ${safeMarkdownLabel(example.sourceLabel || example.source)} — ${safeMarkdownLabel(example.label)} → ${safeMarkdownLabel(example.targetLabel || example.target)} (${example.status})`);
+  const learningLines = (graph.learning?.examples || []).map((example) => {
+    const reviewedAt = example.lastReviewedAt ? `, reviewed ${safeMarkdownLabel(example.lastReviewedAt)}` : "";
+    return example.kind === "concept"
+      ? `- concept: ${safeMarkdownLabel(example.label)} (${example.status}${reviewedAt}${example.aliases?.length ? `, aliases: ${example.aliases.map(safeMarkdownLabel).join(", ")}` : ""})`
+      : `- relation: ${safeMarkdownLabel(example.sourceLabel || example.source)} — ${safeMarkdownLabel(example.label)} → ${safeMarkdownLabel(example.targetLabel || example.target)} (${example.status}${reviewedAt})`;
+  });
   const reviewed = [...graph.nodes, ...graph.edges].filter((item) => item.status !== "inferred" || item.feedback !== 0);
   const accepted = [...graph.nodes.filter((node) => node.status === "accepted").map((node) => `- concept: ${conceptLink(node.id)}`), ...graph.edges.filter((edge) => edge.status === "accepted").map((edge) => `- relation: ${conceptLink(edge.source)} — ${safeMarkdownLabel(edge.label)} → ${conceptLink(edge.target)}`)];
   const rejected = [...graph.nodes.filter((node) => node.status === "rejected").map((node) => `- concept: ${conceptLink(node.id)}`), ...graph.edges.filter((edge) => edge.status === "rejected").map((edge) => `- relation: ${conceptLink(edge.source)} — ${safeMarkdownLabel(edge.label)} → ${conceptLink(edge.target)}`)];
@@ -781,6 +848,13 @@ function buildMarkdown(graph, { maxEvidenceChars = Number.POSITIVE_INFINITY, gra
     "## Relations",
     ...graph.edges.map((edge) => `- ${conceptLink(edge.source)} — ${safeMarkdownLabel(edge.label)} → ${conceptLink(edge.target)} (${edge.status}, ${(edge.confidence * 100).toFixed(0)}%)`),
     "",
+    "## Graph health",
+    `- Active-item provenance coverage: ${graphHealth.provenanceCoverage}%`,
+    `- Unsupported concepts: ${graphHealth.unsupportedNodes}`,
+    `- Unsupported relations: ${graphHealth.unsupportedEdges}`,
+    `- Review candidates: ${graphHealth.reviewCandidates}${graphHealth.staleReviewCandidates ? ` (${graphHealth.staleReviewCandidates} stale)` : ""}`,
+    `- Source review coverage: ${graphHealth.sourceReviewCoverage}% historical · ${graphHealth.freshSourceReviewCoverage}% fresh`,
+    "",
     "## Visual graph",
     "The bounded view below renders in Obsidian and Mermaid-compatible Markdown viewers.",
     "",
@@ -823,7 +897,12 @@ function buildFeedbackDataset(graph) {
       const index = examples.findIndex((candidate) => (
         (candidate.kind === "concept" ? `concept|${candidate.id}` : `relation|${candidate.id}`) === key
       ));
-      if (index >= 0) examples[index] = { ...examples[index], ...example };
+      if (index >= 0) {
+        const preferred = preferLearningExample(examples[index], example);
+        examples[index] = preferred === example
+          ? { ...examples[index], ...example }
+          : examples[index];
+      }
       return;
     }
     if (examples.length >= MAX_FEEDBACK_EXAMPLES) return;
@@ -968,16 +1047,53 @@ function buildVaultFiles(graph) {
       "## Contents",
       "",
       "- [[_index]] — graph overview, evidence, learning ledger, and revision history.",
+      "- [[Learning/review-ledger]] — reusable reviewed decisions that guide future extraction.",
       "- [[Relations]] — relation-oriented browse view.",
       "- `Concepts/` — one editable note per concept.",
       "- `Relations/` — one editable note per relation.",
       "- `Sources/` — source documents and provenance metadata.",
       "- `Learning/` — public curriculum notes included with the wiki.",
       "- `graph.json` — normalized internal representation.",
+      "- `graph.jsonld` — versioned semantic-web projection of the graph.",
       ""
     ].join("\n")
   });
   addVaultFile({ name: "_index.md", content: buildMarkdown(graph, { graphFingerprint }) });
+  const learningDecisionLines = graph.learning.examples.map((example) => {
+    const reviewedAt = example.lastReviewedAt ? ` · reviewed ${safeMarkdownLabel(example.lastReviewedAt)}` : "";
+    if (example.kind === "concept") {
+      const path = paths.nodes.get(example.id);
+      const label = safeMarkdownLabel(example.label);
+      const link = path ? `[[${path}|${label}]]` : label;
+      return `- concept: ${link} — ${example.status}${reviewedAt}`;
+    }
+    const edge = graph.edges.find((candidate) => candidate.id === example.id);
+    const path = edge ? paths.relations.get(edge) : null;
+    const label = safeMarkdownLabel(example.label);
+    const relation = `${safeMarkdownLabel(example.sourceLabel || example.source)} ${label} ${safeMarkdownLabel(example.targetLabel || example.target)}`;
+    const link = path ? `[[${path}|${relation}]]` : relation;
+    return `- relation: ${link} — ${example.status}${reviewedAt}`;
+  });
+  addVaultFile({
+    name: "Learning/review-ledger.md",
+    content: [
+      "---",
+      "type: learning-ledger",
+      `graph_version: ${graph.version}`,
+      `graph_fingerprint: ${graphFingerprint}`,
+      `redacted: ${graph.redacted === true}`,
+      "---",
+      "",
+      "# Reusable review ledger",
+      "",
+      "This is a derived Obsidian view of the graph's reusable human decisions.",
+      "Edit the linked concept or relation note, then import that note to change",
+      "the graph and learning memory.",
+      "",
+      ...(learningDecisionLines.length ? learningDecisionLines : ["- none"]),
+      ""
+    ].join("\n")
+  });
   addVaultFile({
     name: "vault-manifest.json",
     content: JSON.stringify({
@@ -1009,7 +1125,8 @@ function buildVaultFiles(graph) {
         ""
       ])
     ].join("\n") });
-  addVaultFile({ name: "graph.json", content: JSON.stringify(graph, null, 2) });
+  addVaultFile({ name: "graph.json", content: JSON.stringify({ ...graph, graphFingerprint }, null, 2) });
+  addVaultFile({ name: "graph.jsonld", content: JSON.stringify(buildJsonLd(graph), null, 2) });
   graph.nodes.forEach((node) => {
     const related = relatedByNode.get(node.id) || [];
     addVaultFile({
@@ -1076,7 +1193,7 @@ function buildVaultFiles(graph) {
   graph.documents.forEach((doc) => {
     addVaultFile({
       name: paths.sources.get(doc.id),
-      content: ["---", "type: source", `id: ${JSON.stringify(doc.id)}`, `uri: ${JSON.stringify(doc.uri || "")}`, `added: ${doc.addedAt}`, `quality: ${doc.quality}`, `last_reviewed: ${doc.lastReviewedAt || ""}`, `graph_version: ${graph.version}`, `graph_fingerprint: ${graphFingerprint}`, `redacted: ${graph.redacted === true}`, "---", "", `# ${safeMarkdownLabel(doc.title)}`, "", ...(doc.uri ? [`Source URI: ${safeMarkdownUri(doc.uri)}`, ""] : []), ...(graph.redacted ? ["> Source content was redacted before this vault was exported."] : [doc.text]), ""].join("\n")
+      content: ["---", "type: source", `id: ${JSON.stringify(doc.id)}`, `fingerprint: ${JSON.stringify(doc.fingerprint)}`, `uri: ${JSON.stringify(doc.uri || "")}`, `added: ${doc.addedAt}`, `quality: ${doc.quality}`, `last_reviewed: ${doc.lastReviewedAt || ""}`, `graph_version: ${graph.version}`, `graph_fingerprint: ${graphFingerprint}`, `redacted: ${graph.redacted === true}`, "---", "", `# ${safeMarkdownLabel(doc.title)}`, "", ...(doc.uri ? [`Source URI: ${safeMarkdownUri(doc.uri)}`, ""] : []), ...(graph.redacted ? ["> Source content was redacted before this vault was exported."] : [doc.text]), ""].join("\n")
     });
   });
   Object.defineProperty(files, "estimatedArchiveBytes", {
@@ -1260,6 +1377,27 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
     return;
   }
   const learningAction = event.target.closest("[data-learning-action]")?.dataset.learningAction;
+  if (learningAction === "clear-stale") {
+    const currentGraph = graphStore.read();
+    const staleCount = inspectGraph(currentGraph).staleLearningExamples;
+    if (!staleCount || !window.confirm(`Forget ${staleCount} stale reusable learning example${staleCount === 1 ? "" : "s"}? Fresh learning memory will remain.`)) return;
+    const result = clearStaleLearningMemory(currentGraph);
+    if (!result.changed) {
+      document.querySelector("#ingest-status").textContent = result.limited === "version"
+        ? "This graph has reached its revision limit. Export a backup before changing reusable memory."
+        : "No stale reusable learning memory remains.";
+      return;
+    }
+    if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
+      document.querySelector("#ingest-status").textContent = graphStore.getLastWriteMode() === "conflict"
+        ? "The graph changed in another tab. Stale learning memory was not cleared; reload and try again."
+        : "Stale learning memory could not be cleared.";
+      return;
+    }
+    renderWorkbench();
+    document.querySelector("#ingest-status").textContent = `Forgot ${result.removed} stale reusable learning example${result.removed === 1 ? "" : "s"}.`;
+    return;
+  }
   if (learningAction === "clear") {
     if (!window.confirm("Forget reusable learning memory? Your documents and graph knowledge will remain.")) return;
     const currentGraph = graphStore.read();
@@ -1268,7 +1406,7 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
       if (result.limited === "version") document.querySelector("#ingest-status").textContent = "This graph has reached its revision limit. Export a backup before changing reusable memory.";
       return;
     }
-    if (!graphStore.write(result.graph, { expectedVersion: currentGraph.version })) {
+    if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
       document.querySelector("#ingest-status").textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab. Reusable memory was not cleared; reload and try again."
         : "Reusable memory could not be cleared.";
@@ -1280,17 +1418,36 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
   }
   const reviewAction = event.target.closest("[data-review-action]")?.dataset.reviewAction;
   if (reviewAction === "next") {
+    if (graphSearchQuery) {
+      graphSearchQuery = "";
+      document.querySelector("#graph-search").value = "";
+      renderWorkbench();
+    }
     const candidate = reviewQueue(graphStore.read(), 1)[0];
     if (!candidate) return;
+    document.querySelector(".mini-button[data-view='list']").click();
     if (candidate.kind === "node") selectGraphNode(candidate.id);
     else if (candidate.kind === "edge") selectGraphEdge(candidate.id);
     else selectSource(candidate.id);
-    document.querySelector(".mini-button[data-view='list']").click();
+    document.querySelector("#inspector-panel").focus();
     document.querySelector("#ingest-status").textContent = `Review next · ${candidate.reason}.`;
     return;
   }
   const action = event.target.closest("[data-recovery-action]")?.dataset.recoveryAction;
   if (!action) return;
+  if (action === "history-dismiss") {
+    graphStore.clearHistoryRecovery();
+    renderWorkbench();
+    document.querySelector("#ingest-status").textContent = "Undo history recovery snapshot dismissed.";
+    return;
+  }
+  if (action === "history-download") {
+    const rawHistory = graphStore.readHistoryRecovery();
+    if (!rawHistory) return;
+    downloadFile("llm-field-notes-history-recovery.json", rawHistory, "application/json");
+    document.querySelector("#ingest-status").textContent = "Undo history recovery downloaded. Inspect it before dismissing the warning.";
+    return;
+  }
   if (action === "dismiss") {
     graphStore.clearRecovery();
     renderWorkbench();
@@ -1317,7 +1474,7 @@ document.querySelector("#clear-graph").addEventListener("click", () => {
     || currentGraph.documents.length
     || currentGraph.learning?.examples?.length;
   if (!hasSavedState || window.confirm("Clear this browser's saved graph and reusable learning memory?")) {
-    if (graphStore.clear({ expectedVersion: currentGraph.version })) {
+    if (graphStore.clear(graphStoreOptions(currentGraph))) {
       renderWorkbench();
       status.textContent = "Local graph cleared.";
     } else {
@@ -1330,7 +1487,7 @@ document.querySelector("#clear-graph").addEventListener("click", () => {
 document.querySelector("#undo-graph").addEventListener("click", () => {
   const status = document.querySelector("#ingest-status");
   const currentGraph = graphStore.read();
-  if (!graphStore.undo({ expectedVersion: currentGraph.version })) {
+  if (!graphStore.undo(graphStoreOptions(currentGraph))) {
     status.textContent = graphStore.getLastWriteMode() === "conflict"
       ? "The graph changed in another tab. Nothing was undone; reload and try again."
       : "There is no saved change to undo.";
@@ -1359,17 +1516,20 @@ document.querySelector("#document-file").addEventListener("change", async (event
         if (files.length !== 1) throw new Error("Import one graph JSON at a time.");
         const file = files[0];
         if (Number.isFinite(file.size) && file.size > MAX_IMPORT_BYTES) throw new Error("That JSON import exceeds the 10 MB safety limit.");
-        const expectedVersion = graphStore.read().version;
+        const expectedGraph = graphStore.read();
+        const expectedVersion = expectedGraph.version;
+        const expectedFingerprint = fingerprintBackup(expectedGraph);
       const text = await file.text();
       const imported = JSON.parse(text);
       if (imported.format === FEEDBACK_FORMAT) {
         if (imported.graphSchema !== GRAPH_SCHEMA || !Array.isArray(imported.examples)) throw new Error("That feedback file is not compatible with this graph.");
         if (imported.datasetFingerprint !== undefined
-          && imported.datasetFingerprint !== fingerprintFeedbackExamples(imported.examples)) {
+          && !matchesFeedbackFingerprint(imported.examples, imported.datasetFingerprint)) {
           throw new Error("That feedback file's dataset fingerprint does not match its examples.");
         }
         const result = applyFeedbackDataset(graphStore.read(), imported.examples);
-        if (!result.changed && !result.conflicts) throw new Error("No matching reviewed concepts or relations were found in that feedback dataset.");
+        if (!result.changed && result.limited === "version") throw new Error("This graph has reached its revision limit. Export a backup before importing more feedback.");
+        if (!result.changed && !result.conflicts && result.skipped) throw new Error("No matching reviewed concepts or relations were found in that feedback dataset.");
         if (!result.changed && result.conflicts) {
           status.textContent = `Feedback dataset contained ${result.conflicts} contradictory decision${result.conflicts === 1 ? "" : "s"} but made no graph changes.`;
           pendingFiles = [];
@@ -1377,7 +1537,14 @@ document.querySelector("#document-file").addEventListener("change", async (event
           renderFileQueue();
           return;
         }
-        if (!graphStore.write(result.graph, { expectedVersion })) {
+        if (!result.changed) {
+          status.textContent = "Feedback dataset is already up to date; no graph changes were needed.";
+          pendingFiles = [];
+          document.querySelector("#document-file").value = "";
+          renderFileQueue();
+          return;
+        }
+        if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
           throw new Error(graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while feedback was loading. The feedback was not written."
             : "The feedback dataset could not be saved in this browser.");
@@ -1392,7 +1559,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
       if (imported.format === BACKUP_FORMAT) {
         if (!imported.graph || (imported.graph.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(imported.graph.schema))) throw new Error("That backup does not contain a valid graph.");
         if (imported.graphFingerprint !== undefined
-          && imported.graphFingerprint !== fingerprintBackup(imported.graph, imported.history)) {
+          && !matchesGraphFingerprint(imported.graph, imported.graphFingerprint, imported.history)) {
           throw new Error("That backup's fingerprint does not match its graph and history.");
         }
         const importedGraph = normalizeGraph(imported.graph);
@@ -1410,7 +1577,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
           renderFileQueue();
           return;
         }
-        if (!graphStore.restore(importedGraph, importedHistory, { expectedVersion, preserveCurrent: true })) {
+        if (!graphStore.restore(importedGraph, importedHistory, { expectedVersion, expectedFingerprint, preserveCurrent: true })) {
           throw new Error(graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while the backup was loading. The backup was not restored."
             : "The backup could not be restored in this browser.");
@@ -1424,6 +1591,10 @@ document.querySelector("#document-file").addEventListener("change", async (event
         return;
       }
       if (imported.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(imported.schema)) throw new Error("That JSON file is not an LLM Field Notes graph.");
+      if (imported.graphFingerprint !== undefined
+        && !matchesGraphFingerprint(imported, imported.graphFingerprint)) {
+        throw new Error("That graph's fingerprint does not match its contents.");
+      }
       const importedGraph = normalizeGraph(imported);
       if (importedGraph.redacted) {
         status.textContent = "This graph is redacted: source text, evidence quotes, and source URIs are unavailable.";
@@ -1441,7 +1612,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
         renderFileQueue();
         return;
       }
-      if (!graphStore.write(importedGraph, { expectedVersion })) {
+      if (!graphStore.write(importedGraph, { expectedVersion, expectedFingerprint })) {
         throw new Error(graphStore.getLastWriteMode() === "conflict"
           ? "The graph changed in another tab while the import was loading. The import was not written."
           : "The graph could not be saved in this browser.");
@@ -1494,19 +1665,45 @@ async function buildGraphFromInput() {
         if (Number.isFinite(files[0].size) && files[0].size > MAX_ZIP_BYTES) throw new Error("The vault archive is larger than the 50 MB safety limit.");
         const currentGraph = graphStore.read();
         const expectedVersion = currentGraph.version;
+        const expectedFingerprint = fingerprintBackup(currentGraph);
         const vault = parseObsidianVault(await files[0].arrayBuffer());
+        if (vault.invalidFeedbackFiles?.length) {
+          status.textContent = `That vault contains ${vault.invalidFeedbackFiles.length} malformed concept or relation note${vault.invalidFeedbackFiles.length === 1 ? "" : "s"}; no feedback was applied. Fix or remove those notes and try again.`;
+          return;
+        }
+        if (vault.graphError) {
+          status.textContent = `${vault.graphError} No feedback was applied. Repair or remove the embedded graph and try again.`;
+          return;
+        }
         if (!vault.feedbacks.length) {
           status.textContent = "That vault contains no exported concept or relation feedback notes.";
+          return;
+        }
+        const staleVault = Boolean(vault.manifest && vault.manifest.graphFingerprint !== fingerprintBackup(currentGraph));
+        const unverifiedVault = Boolean(vault.manifestError || vault.jsonLdError || !vault.manifest);
+        const manifestNote = vault.manifestError
+          ? " Manifest metadata was invalid; feedback was still applied."
+          : vault.jsonLdError
+            ? " Embedded JSON-LD metadata was invalid; feedback was still applied."
+          : !vault.manifest
+            ? " This vault has no projection manifest; its graph revision could not be verified."
+          : staleVault
+            ? " This vault came from an earlier or different graph revision."
+            : "";
+        if ((staleVault || unverifiedVault) && !window.confirm("This Obsidian vault has stale or unverifiable projection identity. Apply its edits to the current graph anyway?")) {
+          status.textContent = "Obsidian vault import canceled; the current graph was kept.";
           return;
         }
         const result = applyObsidianFeedback(currentGraph, vault.feedbacks);
         if (!result.changed) {
           status.textContent = result.limited === "version"
             ? "This graph has reached its revision limit. Export a backup before importing vault feedback."
+            : result.conflicts
+              ? `The vault contains ${result.conflicts} conflicting feedback item${result.conflicts === 1 ? "" : "s"}; those edits were skipped.`
             : "No matching graph items or changes were found in that vault.";
           return;
         }
-        if (!graphStore.write(result.graph, { expectedVersion })) {
+        if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
           status.textContent = graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while the vault was loading. Vault feedback was not written."
             : "Obsidian vault feedback could not be saved. Your prior graph is still intact.";
@@ -1516,12 +1713,7 @@ async function buildGraphFromInput() {
         document.querySelector("#document-file").value = "";
         renderFileQueue();
         renderWorkbench();
-        const manifestNote = vault.manifestError
-          ? " Manifest metadata was invalid; feedback was still applied."
-          : vault.manifest && vault.manifest.graphFingerprint !== fingerprintBackup(currentGraph)
-            ? " This vault came from an earlier or different graph revision."
-            : "";
-        status.textContent = `Obsidian vault feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}.${manifestNote}`;
+        status.textContent = `Obsidian vault feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} duplicate conflict${result.conflicts === 1 ? "" : "s"} skipped` : ""}.${manifestNote}`;
       } catch (error) {
         status.textContent = error instanceof Error ? error.message : "That vault could not be read.";
       }
@@ -1529,6 +1721,7 @@ async function buildGraphFromInput() {
     }
     const currentGraph = graphStore.read();
     const expectedVersion = currentGraph.version;
+    const expectedFingerprint = fingerprintBackup(currentGraph);
     let fileTexts;
     try {
       const declaredFeedbackBytes = files.reduce((total, file) => total + (Number.isFinite(file.size) ? file.size : 0), 0);
@@ -1546,25 +1739,35 @@ async function buildGraphFromInput() {
       return;
     }
     const feedbacks = fileTexts.map(parseObsidianFeedback).filter(Boolean);
-    if (feedbacks.length) {
+    if (feedbacks.length || fileTexts.some(looksLikeObsidianFeedback)) {
       if (feedbacks.length !== files.length) {
-        status.textContent = "Select only exported concept or relation notes when importing Obsidian feedback.";
+        status.textContent = "Obsidian-shaped notes must be valid exported concept, relation, or source notes before import.";
         return;
       }
       const projectionFingerprint = fingerprintBackup(currentGraph);
+      const staleProjection = feedbacks.some((feedback) => feedback.graphFingerprint && feedback.graphFingerprint !== projectionFingerprint);
+      const unverifiedProjection = feedbacks.some((feedback) => feedback.projectionMetadataError || !feedback.graphFingerprint);
       const projectionNote = feedbacks.some((feedback) => feedback.projectionMetadataError)
         ? " Projection metadata was invalid; feedback was still applied."
-        : feedbacks.some((feedback) => feedback.graphFingerprint && feedback.graphFingerprint !== projectionFingerprint)
+        : feedbacks.some((feedback) => !feedback.graphFingerprint)
+          ? " Some notes have no projection identity; their graph revision could not be verified."
+        : staleProjection
           ? " These notes came from an earlier or different graph revision."
           : "";
+      if ((staleProjection || unverifiedProjection) && !window.confirm("These Obsidian notes have stale or unverifiable projection identity. Apply their edits to the current graph anyway?")) {
+        status.textContent = "Obsidian feedback import canceled; the current graph was kept.";
+        return;
+      }
       const result = applyObsidianFeedback(currentGraph, feedbacks);
       if (!result.changed) {
         status.textContent = result.limited === "version"
           ? "This graph has reached its revision limit. Export a backup before importing Obsidian feedback."
+          : result.conflicts
+            ? `The selected notes contain ${result.conflicts} conflicting feedback item${result.conflicts === 1 ? "" : "s"}; those edits were skipped.`
           : "No matching graph items or changes were found in those Obsidian notes.";
         return;
       }
-      if (!graphStore.write(result.graph, { expectedVersion })) {
+      if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
         status.textContent = graphStore.getLastWriteMode() === "conflict"
           ? "The graph changed in another tab while the notes were loading. Obsidian feedback was not written."
           : "Obsidian feedback could not be saved. Your prior graph is still intact.";
@@ -1574,7 +1777,7 @@ async function buildGraphFromInput() {
       document.querySelector("#document-file").value = "";
       renderFileQueue();
       renderWorkbench();
-      status.textContent = `Obsidian feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}.${projectionNote}`;
+      status.textContent = `Obsidian feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} duplicate conflict${result.conflicts === 1 ? "" : "s"} skipped` : ""}.${projectionNote}`;
       return;
     }
   }
@@ -1598,6 +1801,7 @@ async function buildGraphFromInput() {
     }
     let graph = graphStore.read();
     const expectedVersion = graph.version;
+    const expectedFingerprint = fingerprintBackup(graph);
     let added = 0;
     let duplicates = 0;
     let batchChars = 0;
@@ -1650,7 +1854,7 @@ async function buildGraphFromInput() {
         failures.push(`${file.name}: ${error instanceof Error ? error.message : "could not extract"}`);
       }
     }
-    if (added && !graphStore.write(graph, { expectedVersion })) {
+    if (added && !graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
       status.textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab while this batch was running. Your batch was not written; reload the graph and try again."
         : "The batch could not be saved. Your browser may be out of storage.";
@@ -1678,6 +1882,7 @@ async function buildGraphFromInput() {
   }
   const currentGraph = graphStore.read();
   const expectedVersion = currentGraph.version;
+  const expectedFingerprint = fingerprintBackup(currentGraph);
   let extraction;
   try {
     ensureBuildActive();
@@ -1706,7 +1911,7 @@ async function buildGraphFromInput() {
     status.textContent = `The graph has reached its ${limit} limit. Remove or merge existing knowledge before adding more.`;
     return;
   }
-  if (!graphStore.write(result.graph, { expectedVersion })) {
+  if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
     status.textContent = graphStore.getLastWriteMode() === "conflict"
       ? "The graph changed in another tab while extraction was running. The document was not written; reload and try again."
       : "The graph could not be saved. Your browser may be out of storage.";
@@ -1764,6 +1969,7 @@ document.querySelector("#graph-search").addEventListener("input", (event) => {
 function commitManualGraph(graph, reason) {
   void requestPersistentStorage();
   const expectedVersion = graph.version;
+  const expectedFingerprint = fingerprintBackup(graph);
   if (!advanceGraphVersion(graph)) {
     document.querySelector("#ingest-status").textContent = "This graph has reached its revision limit. Export a backup and start a fresh graph before editing it.";
     return false;
@@ -1771,7 +1977,7 @@ function commitManualGraph(graph, reason) {
   graph.updatedAt = new Date().toISOString();
   graph.revisions.unshift({ id: `rev-${graph.version}`, version: graph.version, timestamp: graph.updatedAt, reason, nodes: graph.nodes.length, edges: graph.edges.length });
   graph.revisions = graph.revisions.slice(0, MAX_GRAPH_REVISIONS);
-  if (!graphStore.write(graph, { expectedVersion })) {
+  if (!graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
     document.querySelector("#ingest-status").textContent = graphStore.getLastWriteMode() === "conflict"
       ? "The graph changed in another tab. Your manual change was not written; reload and try again."
       : "The manual change could not be saved.";
@@ -1862,7 +2068,13 @@ const selectGraphNode = (nodeId) => {
 };
 const selectGraphEdge = (edgeId) => {
   selectedGraphItem = { kind: "edge", id: edgeId };
-  document.querySelectorAll(".relation-row").forEach((row) => row.classList.toggle("selected", row.dataset.edgeId === edgeId));
+  let selectedRow = null;
+  document.querySelectorAll(".relation-row").forEach((row) => {
+    const selected = row.dataset.edgeId === edgeId;
+    row.classList.toggle("selected", selected);
+    if (selected) selectedRow = row;
+  });
+  if (selectedRow) selectedRow.scrollIntoView({ block: "nearest" });
   renderInspector(graphStore.read());
 };
 const selectSource = (sourceId) => {
@@ -1893,7 +2105,7 @@ function persistFeedbackDecision(kind, id, action) {
       : "That feedback could not be applied.";
     return false;
   }
-  if (!graphStore.write(result.graph, { expectedVersion: currentGraph.version })) {
+  if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
     status.textContent = graphStore.getLastWriteMode() === "conflict"
       ? "The graph changed in another tab. That feedback was not written; reload and try again."
       : "That feedback could not be saved. Your prior graph is still intact.";
@@ -1995,7 +2207,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
           status.textContent = `The replacement could not fit within the graph ${result.limited} limit; the current source was kept.`;
           return;
         }
-        if (!result.replaced || !graphStore.write(result.graph, { expectedVersion: currentGraph.version })) {
+        if (!result.replaced || !graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
           status.textContent = graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while the replacement was running. The source was not replaced."
             : "The replacement could not be saved; the current source was kept.";
@@ -2021,7 +2233,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
       document.querySelector("#ingest-status").textContent = "The source could not be removed.";
       return;
     }
-    if (!graphStore.write(result.graph, { expectedVersion: currentGraph.version })) {
+    if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
       document.querySelector("#ingest-status").textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab. The source was not removed; reload and try again."
         : "The source could not be removed.";
@@ -2045,7 +2257,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         : "Those concepts could not be merged.";
       return;
     }
-    if (!graphStore.write(result.graph, { expectedVersion: currentGraph.version })) {
+    if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
       document.querySelector("#ingest-status").textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab. The merge was not written; reload and try again."
         : "The concept merge could not be saved.";
@@ -2062,6 +2274,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
   if (!nodeEdit && !edgeEdit && !sourceEdit) return;
   let graph = graphStore.read();
   const expectedVersion = graph.version;
+  const expectedFingerprint = fingerprintBackup(graph);
   const input = document.querySelector(".inspector-edit-input");
   const nextLabel = input?.value.trim();
   if (!nextLabel) return;
@@ -2124,7 +2337,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     edges: graph.edges.length
   });
   graph.revisions = graph.revisions.slice(0, MAX_GRAPH_REVISIONS);
-  if (!graphStore.write(graph, { expectedVersion })) {
+  if (!graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
     document.querySelector("#ingest-status").textContent = graphStore.getLastWriteMode() === "conflict"
       ? "The graph changed in another tab. This edit was not written; reload and try again."
       : "The edit could not be saved.";
@@ -2140,6 +2353,15 @@ document.querySelector("#download-markdown").addEventListener("click", () => {
     document.querySelector("#projection-status").textContent = "Markdown projection downloaded.";
   } catch (error) {
     document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The Markdown projection could not be exported.";
+  }
+});
+document.querySelector("#download-redacted-markdown").addEventListener("click", () => {
+  try {
+    const markdown = buildMarkdown(redactGraph(graphStore.read()));
+    downloadFile("knowledge-graph-redacted.md", markdown, "text/markdown");
+    document.querySelector("#projection-status").textContent = "Redacted Markdown projection downloaded · source text, evidence, and URIs removed.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted Markdown projection could not be exported.";
   }
 });
 document.querySelector("#copy-markdown").addEventListener("click", async () => {
@@ -2179,10 +2401,28 @@ document.querySelector("#download-redacted-vault").addEventListener("click", asy
 document.querySelector("#download-json").addEventListener("click", () => {
   try {
     const graph = graphStore.read();
-    downloadFile("knowledge-graph.json", JSON.stringify(graph, null, 2), "application/json");
+    downloadFile("knowledge-graph.json", JSON.stringify({ ...graph, graphFingerprint: fingerprintBackup(graph) }, null, 2), "application/json");
     document.querySelector("#projection-status").textContent = "Internal representation exported as JSON.";
   } catch (error) {
     document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The graph JSON could not be exported.";
+  }
+});
+document.querySelector("#download-jsonld").addEventListener("click", () => {
+  try {
+    const graph = graphStore.read();
+    downloadFile("knowledge-graph.jsonld", JSON.stringify(buildJsonLd(graph), null, 2), "application/ld+json");
+    document.querySelector("#projection-status").textContent = "Internal representation exported as JSON-LD.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The JSON-LD projection could not be exported.";
+  }
+});
+document.querySelector("#download-redacted-jsonld").addEventListener("click", () => {
+  try {
+    const graph = redactGraph(graphStore.read());
+    downloadFile("knowledge-graph-redacted.jsonld", JSON.stringify(buildJsonLd(graph), null, 2), "application/ld+json");
+    document.querySelector("#projection-status").textContent = "Redacted JSON-LD exported · source text, evidence, and URIs removed.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted JSON-LD projection could not be exported.";
   }
 });
 document.querySelector("#download-health").addEventListener("click", () => {
@@ -2205,7 +2445,7 @@ document.querySelector("#download-health").addEventListener("click", () => {
 document.querySelector("#download-redacted").addEventListener("click", () => {
   try {
     const graph = redactGraph(graphStore.read());
-    downloadFile("llm-field-notes-redacted-graph.json", JSON.stringify(graph, null, 2), "application/json");
+    downloadFile("llm-field-notes-redacted-graph.json", JSON.stringify({ ...graph, graphFingerprint: fingerprintBackup(graph) }, null, 2), "application/json");
     document.querySelector("#projection-status").textContent = "Redacted graph downloaded · source text, evidence, and URIs removed.";
   } catch (error) {
     document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted graph could not be exported.";
