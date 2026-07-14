@@ -1,4 +1,4 @@
-import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, defaultGraph, fingerprintBackup, normalizeGraph } from "./graph-core.js";
+import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_GRAPH_REVISIONS, defaultGraph, fingerprintBackup, normalizeGraph } from "./graph-core.js";
 
 export const GRAPH_KEY = "llm-field-notes-knowledge-graph";
 export const HISTORY_KEY = "llm-field-notes-knowledge-graph-history";
@@ -6,6 +6,9 @@ export const RECOVERY_KEY = "llm-field-notes-knowledge-graph-recovery";
 export const HISTORY_RECOVERY_KEY = "llm-field-notes-knowledge-graph-history-recovery";
 export const HISTORY_LIMIT = 3;
 export const MAX_PERSISTED_JSON_CHARS = 50 * 1024 * 1024;
+export const MAX_PERSISTED_JSON_BYTES = 50 * 1024 * 1024;
+export const MAX_HISTORY_CAPACITY = MAX_GRAPH_REVISIONS;
+export const MAX_RECOVERY_JSON_CHARS = Math.floor(MAX_PERSISTED_JSON_BYTES / 4);
 
 export function createGraphStore(storage, {
   graphKey = GRAPH_KEY,
@@ -13,26 +16,41 @@ export function createGraphStore(storage, {
   recoveryKey = RECOVERY_KEY,
   historyRecoveryKey = HISTORY_RECOVERY_KEY,
   historyLimit = HISTORY_LIMIT,
-  maxPersistedJsonChars = MAX_PERSISTED_JSON_CHARS
+  maxPersistedJsonChars = MAX_PERSISTED_JSON_CHARS,
+  maxPersistedJsonBytes = MAX_PERSISTED_JSON_BYTES,
+  maxRecoveryJsonChars = MAX_RECOVERY_JSON_CHARS
 } = {}) {
   const numericHistoryLimit = Number(historyLimit);
   const historyCapacity = Number.isFinite(numericHistoryLimit) && numericHistoryLimit >= 0
-    ? Math.floor(numericHistoryLimit)
+    ? Math.min(MAX_HISTORY_CAPACITY, Math.floor(numericHistoryLimit))
     : HISTORY_LIMIT;
   const numericPersistedLimit = Number(maxPersistedJsonChars);
   const persistedJsonLimit = Number.isFinite(numericPersistedLimit) && numericPersistedLimit > 0
-    ? Math.floor(numericPersistedLimit)
+    ? Math.min(MAX_PERSISTED_JSON_CHARS, Math.floor(numericPersistedLimit))
     : MAX_PERSISTED_JSON_CHARS;
+  const numericPersistedBytesLimit = Number(maxPersistedJsonBytes);
+  const persistedJsonBytesLimit = Number.isFinite(numericPersistedBytesLimit) && numericPersistedBytesLimit > 0
+    ? Math.min(MAX_PERSISTED_JSON_BYTES, Math.floor(numericPersistedBytesLimit))
+    : MAX_PERSISTED_JSON_BYTES;
+  const numericRecoveryLimit = Number(maxRecoveryJsonChars);
+  const recoveryJsonLimit = Number.isFinite(numericRecoveryLimit) && numericRecoveryLimit > 0
+    ? Math.min(MAX_RECOVERY_JSON_CHARS, Math.floor(numericRecoveryLimit))
+    : MAX_RECOVERY_JSON_CHARS;
+  const serializedBytes = (value) => new TextEncoder().encode(value).byteLength;
+  const exceedsPersistedLimit = (value) => value.length > persistedJsonLimit || serializedBytes(value) > persistedJsonBytesLimit;
+  const suppressedRecoveryKeys = new Set();
   const serializeGraph = (graph) => {
     const raw = JSON.stringify(normalizeGraph(graph));
-    if (raw.length > persistedJsonLimit) throw new Error("Graph exceeds the persisted state safety limit.");
+    if (exceedsPersistedLimit(raw)) throw new Error("Graph exceeds the persisted state safety limit.");
     return raw;
   };
   const serializeHistory = (history) => {
     const raw = JSON.stringify(history);
-    if (raw.length > persistedJsonLimit) throw new Error("Graph history exceeds the persisted state safety limit.");
+    if (exceedsPersistedLimit(raw)) throw new Error("Graph history exceeds the persisted state safety limit.");
     return raw;
   };
+  const hasImportTruncation = (graph) => Object.values(graph?.integrity?.truncated || {})
+    .some((count) => Number.isSafeInteger(count) && count > 0);
   const trimHistory = (history) => historyCapacity === 0 ? [] : history.slice(-historyCapacity);
   const isGraphRecord = (value) => value
     && typeof value === "object"
@@ -40,6 +58,10 @@ export function createGraphStore(storage, {
   let lastWriteMode = "none";
   const captureRaw = (key, raw) => {
     if (typeof raw !== "string" || !raw) return;
+    if (raw.length > recoveryJsonLimit) {
+      suppressedRecoveryKeys.add(key);
+      return;
+    }
     try {
       if (!storage.getItem(key)) storage.setItem(key, raw);
     } catch {
@@ -51,7 +73,7 @@ export function createGraphStore(storage, {
     let raw = null;
     try {
       raw = storage.getItem(graphKey);
-      if (typeof raw === "string" && raw.length > persistedJsonLimit) throw new Error("Persisted graph exceeds the safety limit.");
+      if (typeof raw === "string" && exceedsPersistedLimit(raw)) throw new Error("Persisted graph exceeds the safety limit.");
       const stored = JSON.parse(raw || "null");
       const normalized = normalizeGraph(stored);
       if (stored && typeof stored === "object" && (
@@ -76,6 +98,7 @@ export function createGraphStore(storage, {
   const clearRecovery = () => {
     try {
       storage.removeItem(recoveryKey);
+      suppressedRecoveryKeys.delete(recoveryKey);
       return true;
     } catch {
       return false;
@@ -91,6 +114,7 @@ export function createGraphStore(storage, {
   const clearHistoryRecovery = () => {
     try {
       storage.removeItem(historyRecoveryKey);
+      suppressedRecoveryKeys.delete(historyRecoveryKey);
       return true;
     } catch {
       return false;
@@ -100,7 +124,7 @@ export function createGraphStore(storage, {
     let raw = null;
     try {
       raw = storage.getItem(historyKey);
-      if (typeof raw === "string" && raw.length > persistedJsonLimit) {
+      if (typeof raw === "string" && exceedsPersistedLimit(raw)) {
         captureRaw(historyRecoveryKey, raw);
         return [];
       }
@@ -112,7 +136,7 @@ export function createGraphStore(storage, {
       const valid = stored.filter(isGraphRecord);
       const trimmed = trimHistory(valid);
       const normalized = trimmed.map(normalizeGraph);
-      if (valid.length !== stored.length || JSON.stringify(trimmed) !== JSON.stringify(normalized)) {
+      if (valid.length !== stored.length || valid.length > historyCapacity || JSON.stringify(trimmed) !== JSON.stringify(normalized)) {
         captureRaw(historyRecoveryKey, raw);
       }
       return normalized;
@@ -122,13 +146,34 @@ export function createGraphStore(storage, {
     }
   };
   const rollback = (previousGraphRaw, previousHistoryRaw) => {
+    const restore = (key, raw) => {
+      try {
+        if (raw === null || raw === undefined) storage.removeItem(key);
+        else storage.setItem(key, raw);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    return {
+      graph: restore(graphKey, previousGraphRaw),
+      history: restore(historyKey, previousHistoryRaw)
+    };
+  };
+  const rollbackAndCapture = (previousGraphRaw, previousHistoryRaw) => {
+    const restored = rollback(previousGraphRaw, previousHistoryRaw);
+    if (!restored.graph) captureRaw(recoveryKey, previousGraphRaw);
+    if (!restored.history) captureRaw(historyRecoveryKey, previousHistoryRaw);
+    return restored;
+  };
+  const readRawSnapshot = () => {
     try {
-      if (previousGraphRaw === null || previousGraphRaw === undefined) storage.removeItem(graphKey);
-      else storage.setItem(graphKey, previousGraphRaw);
-      if (previousHistoryRaw === null || previousHistoryRaw === undefined) storage.removeItem(historyKey);
-      else storage.setItem(historyKey, previousHistoryRaw);
+      return {
+        graph: storage.getItem(graphKey),
+        history: storage.getItem(historyKey)
+      };
     } catch {
-      // Storage is unavailable; the caller still receives failure.
+      return null;
     }
   };
   return {
@@ -138,11 +183,13 @@ export function createGraphStore(storage, {
     clearRecovery,
     readHistoryRecovery,
     clearHistoryRecovery,
+    hasRecoverySuppression: () => suppressedRecoveryKeys.size > 0,
     getLastWriteMode: () => lastWriteMode,
     write(graph, { recordHistory = true, expectedVersion, expectedFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       let normalizedRaw;
+      let nextHistoryRaw = null;
       let normalized;
       try {
         normalized = normalizeGraph(graph);
@@ -152,39 +199,56 @@ export function createGraphStore(storage, {
         return false;
       }
       try {
-        previousGraphRaw = storage.getItem(graphKey);
-        previousHistoryRaw = storage.getItem(historyKey);
+        const snapshot = readRawSnapshot();
+        if (!snapshot) {
+          lastWriteMode = "failed";
+          return false;
+        }
+        previousGraphRaw = snapshot.graph;
+        previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
           || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }
+        if (hasImportTruncation(current)
+          && hasImportTruncation(normalized)
+          && fingerprintBackup(current) !== fingerprintBackup(normalized)) {
+          lastWriteMode = "integrity";
+          return false;
+        }
         if (recordHistory) {
           const history = readHistory();
           if (current.version !== normalized.version || JSON.stringify(current) !== JSON.stringify(normalized)) {
             history.push(current);
-            storage.setItem(historyKey, serializeHistory(trimHistory(history)));
+            nextHistoryRaw = serializeHistory(trimHistory(history));
           }
         }
+        // Commit the primary graph before its undo history. If a tab is
+        // terminated between synchronous storage writes, preserving the
+        // newest graph is safer than exposing history for a graph that is
+        // still current.
         storage.setItem(graphKey, normalizedRaw);
+        if (nextHistoryRaw !== null) storage.setItem(historyKey, nextHistoryRaw);
         lastWriteMode = "normal";
         return true;
       } catch {
-        rollback(previousGraphRaw, previousHistoryRaw);
+        rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
         try {
           storage.setItem(graphKey, normalizedRaw || serializeGraph(graph));
           lastWriteMode = "without-new-history";
           return true;
         } catch {
-          rollback(previousGraphRaw, previousHistoryRaw);
+          rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
           try {
-            storage.removeItem(historyKey);
             storage.setItem(graphKey, normalizedRaw || serializeGraph(graph));
+            storage.removeItem(historyKey);
             lastWriteMode = "without-history";
             return true;
           } catch {
-            rollback(previousGraphRaw, previousHistoryRaw);
+            captureRaw(historyRecoveryKey, previousHistoryRaw);
+            rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
             lastWriteMode = "failed";
             return false;
           }
@@ -198,8 +262,13 @@ export function createGraphStore(storage, {
       let previousGraphRaw;
       let previousHistoryRaw;
       try {
-        previousGraphRaw = storage.getItem(graphKey);
-        previousHistoryRaw = storage.getItem(historyKey);
+        const snapshot = readRawSnapshot();
+        if (!snapshot) {
+          lastWriteMode = "failed";
+          return false;
+        }
+        previousGraphRaw = snapshot.graph;
+        previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
           || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
@@ -217,7 +286,7 @@ export function createGraphStore(storage, {
         lastWriteMode = "normal";
         return true;
       } catch {
-        rollback(previousGraphRaw, previousHistoryRaw);
+        rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
         lastWriteMode = "failed";
         return false;
       }
@@ -226,7 +295,20 @@ export function createGraphStore(storage, {
       let previousGraphRaw;
       let previousHistoryRaw;
       const normalizedGraph = normalizeGraph(graph);
-      let normalizedHistory = Array.isArray(history) ? trimHistory(history.filter(isGraphRecord)).map(normalizeGraph) : [];
+      const rawHistory = Array.isArray(history)
+        ? (() => {
+          try {
+            return JSON.stringify(history);
+          } catch {
+            return null;
+          }
+        })()
+        : null;
+      const validHistory = Array.isArray(history) ? history.filter(isGraphRecord) : [];
+      if (Array.isArray(history) && (validHistory.length !== history.length || validHistory.length > historyCapacity)) {
+        captureRaw(historyRecoveryKey, rawHistory);
+      }
+      let normalizedHistory = trimHistory(validHistory).map(normalizeGraph);
       if (preserveCurrent) {
         const current = read();
         const currentHasContent = current.nodes.length
@@ -234,7 +316,17 @@ export function createGraphStore(storage, {
           || current.documents.length
           || current.learning?.examples?.length;
         if (currentHasContent && JSON.stringify(current) !== JSON.stringify(normalizedGraph)) {
-          normalizedHistory = trimHistory([...normalizedHistory, current]);
+          const combinedHistory = [...normalizedHistory, current];
+          if (combinedHistory.length > historyCapacity) {
+            captureRaw(historyRecoveryKey, (() => {
+              try {
+                return JSON.stringify(combinedHistory);
+              } catch {
+                return null;
+              }
+            })());
+          }
+          normalizedHistory = trimHistory(combinedHistory);
         }
       }
       let normalizedGraphRaw;
@@ -247,8 +339,13 @@ export function createGraphStore(storage, {
         return false;
       }
       try {
-        previousGraphRaw = storage.getItem(graphKey);
-        previousHistoryRaw = storage.getItem(historyKey);
+        const snapshot = readRawSnapshot();
+        if (!snapshot) {
+          lastWriteMode = "failed";
+          return false;
+        }
+        previousGraphRaw = snapshot.graph;
+        previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
           || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
@@ -259,26 +356,33 @@ export function createGraphStore(storage, {
         storage.setItem(historyKey, normalizedHistoryRaw);
         lastWriteMode = "normal";
         return true;
-      } catch {
-        rollback(previousGraphRaw, previousHistoryRaw);
-        try {
-          storage.removeItem(historyKey);
-          storage.setItem(graphKey, normalizedGraphRaw);
-          lastWriteMode = "without-history";
-          return true;
         } catch {
-          rollback(previousGraphRaw, previousHistoryRaw);
-          lastWriteMode = "failed";
-          return false;
+          rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
+          try {
+            storage.setItem(graphKey, normalizedGraphRaw);
+            storage.removeItem(historyKey);
+            lastWriteMode = "without-history";
+            return true;
+          } catch {
+            captureRaw(historyRecoveryKey, previousHistoryRaw);
+            rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
+            lastWriteMode = "failed";
+            return false;
         }
       }
     },
     clear({ expectedVersion, expectedFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
+      let nextHistoryRaw = null;
       try {
-        previousGraphRaw = storage.getItem(graphKey);
-        previousHistoryRaw = storage.getItem(historyKey);
+        const snapshot = readRawSnapshot();
+        if (!snapshot) {
+          lastWriteMode = "failed";
+          return false;
+        }
+        previousGraphRaw = snapshot.graph;
+        previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
           || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
@@ -288,20 +392,26 @@ export function createGraphStore(storage, {
         if (current.nodes.length || current.documents.length || current.edges.length || current.learning?.examples?.length) {
           const history = readHistory();
           history.push(current);
-          storage.setItem(historyKey, serializeHistory(trimHistory(history)));
+          nextHistoryRaw = serializeHistory(trimHistory(history));
         }
+        // A clear is destructive: record the undo snapshot before removing
+        // the visible graph so an interrupted operation preserves recovery.
+        // If termination occurs after this write, the still-visible graph is
+        // safer than losing it before its snapshot exists.
+        if (nextHistoryRaw !== null) storage.setItem(historyKey, nextHistoryRaw);
         storage.removeItem(graphKey);
         lastWriteMode = "normal";
         return true;
       } catch {
-        rollback(previousGraphRaw, previousHistoryRaw);
+        rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
         try {
-          storage.removeItem(historyKey);
           storage.removeItem(graphKey);
+          storage.removeItem(historyKey);
           lastWriteMode = "without-history";
           return true;
         } catch {
-          rollback(previousGraphRaw, previousHistoryRaw);
+          captureRaw(historyRecoveryKey, previousHistoryRaw);
+          rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
           lastWriteMode = "failed";
           return false;
         }

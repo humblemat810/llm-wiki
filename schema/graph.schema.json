@@ -77,6 +77,18 @@
           "items": { "type": "string", "maxLength": 200 },
           "uniqueItems": true
         },
+        "conflictingNodeIds": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "maxLength": 200 },
+          "uniqueItems": true
+        },
+        "conflictingEdgeIds": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "maxLength": 200 },
+          "uniqueItems": true
+        },
         "truncated": {
           "type": "object",
           "properties": {
@@ -84,7 +96,11 @@
             "nodes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
             "edges": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
             "revisions": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-            "learningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+            "learningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "documentText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "evidenceText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "evidenceItems": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "sourceReferences": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
           },
           "additionalProperties": false
         },

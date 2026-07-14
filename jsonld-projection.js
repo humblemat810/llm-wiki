@@ -1,7 +1,9 @@
-import { fingerprintBackup, normalizeGraph } from "./graph-core.js";
+import { canonicalizeGraphForExport, fingerprintBackup } from "./graph-core.js";
 
 export const JSONLD_FORMAT = "llm-field-notes/jsonld@1";
 export const MAX_JSONLD_CANONICAL_DEPTH = 64;
+const INTEGRITY_ID_LIMIT = 100;
+const INTEGRITY_COUNT_MAX = 0xffffffff;
 
 function canonicalize(value, depth = 0) {
   if (depth > MAX_JSONLD_CANONICAL_DEPTH) throw new Error("JSON-LD projection nesting exceeds the safety limit.");
@@ -19,11 +21,29 @@ function canonicalize(value, depth = 0) {
 }
 
 export function buildJsonLd(graph) {
-  const normalizedGraph = normalizeGraph(graph);
+  const normalizedGraph = canonicalizeGraphForExport(graph);
   const graphFingerprint = fingerprintBackup(normalizedGraph);
   const graphId = `urn:llm-field-notes:graph:${graphFingerprint}`;
-  const safeIdPart = (value) => String(value).replace(/[^a-zA-Z0-9._~-]/g, (character) => `-${character.codePointAt(0).toString(16)}-`);
+  const safeIdPart = (value) => String(value).replace(/[^a-zA-Z0-9._~-]/g, (character) => `%u${character.codePointAt(0).toString(16).padStart(4, "0")}`);
   const entityId = (kind, id) => `${graphId}/${kind}/${safeIdPart(id)}`;
+  const boundedIds = (value) => Array.isArray(value)
+    ? [...new Set(value.filter((id) => typeof id === "string"))].sort().slice(0, INTEGRITY_ID_LIMIT)
+    : [];
+  const boundedCounts = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const counts = Object.fromEntries(Object.entries(value)
+      .filter(([, count]) => Number.isSafeInteger(count) && count >= 0)
+      .map(([key, count]) => [key, Math.min(INTEGRITY_COUNT_MAX, count)]));
+    return Object.keys(counts).length ? counts : undefined;
+  };
+  const integrity = {
+    ambiguousSourceIds: boundedIds(normalizedGraph.integrity?.ambiguousSourceIds),
+    ambiguousEdgeIds: boundedIds(normalizedGraph.integrity?.ambiguousEdgeIds),
+    ...(normalizedGraph.integrity?.conflictingNodeIds?.length ? { conflictingNodeIds: boundedIds(normalizedGraph.integrity.conflictingNodeIds) } : {}),
+    ...(normalizedGraph.integrity?.conflictingEdgeIds?.length ? { conflictingEdgeIds: boundedIds(normalizedGraph.integrity.conflictingEdgeIds) } : {}),
+    ...(boundedCounts(normalizedGraph.integrity?.truncated) ? { truncated: boundedCounts(normalizedGraph.integrity.truncated) } : {}),
+    ...(boundedCounts(normalizedGraph.integrity?.dropped) ? { dropped: boundedCounts(normalizedGraph.integrity.dropped) } : {})
+  };
   const sourceRef = (id) => entityId("source", id);
   const conceptRef = (id) => entityId("concept", id);
   const evidence = (items) => (items || []).map((item) => ({
@@ -67,6 +87,7 @@ export function buildJsonLd(graph) {
       "revisionCount": "lfn:revisionCount",
       "learningExampleCount": "lfn:learningExampleCount",
       "redacted": "lfn:redacted",
+      "integrity": "lfn:integrity",
       "format": "lfn:format",
       "graphSchema": "lfn:graphSchema"
     },
@@ -82,6 +103,7 @@ export function buildJsonLd(graph) {
     learningExampleCount: normalizedGraph.learning.examples.length,
     fingerprint: graphFingerprint,
     redacted: normalizedGraph.redacted === true,
+    integrity,
     "@graph": [
       ...normalizedGraph.documents.map((document) => ({
         "@id": sourceRef(document.id),

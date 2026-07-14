@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { resolve, relative, dirname } from "node:path";
+import { cp, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { resolve, relative, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, PUBLIC_ASSETS } from "./public-assets.mjs";
 import { normalizePublicOrigin } from "./public-origin.mjs";
@@ -23,6 +23,35 @@ const lexicalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0
 const rootRealPath = await realpath(root);
 const publicOrigin = normalizePublicOrigin(process.env.PUBLIC_ORIGIN);
 
+async function readBoundedUtf8(filePath, maxBytes) {
+  const byteLimit = Math.max(1, Math.floor(maxBytes));
+  const handle = await open(filePath, "r");
+  const chunks = [];
+  let total = 0;
+  try {
+    const chunkSize = Math.min(64 * 1024, byteLimit + 1);
+    while (total <= byteLimit) {
+      const buffer = Buffer.allocUnsafe(chunkSize);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, total);
+      if (!bytesRead) break;
+      total += bytesRead;
+      if (total > byteLimit) throw new Error(`file exceeds the ${byteLimit} byte safety limit`);
+      chunks.push(buffer.subarray(0, bytesRead));
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
+  } finally {
+    await handle.close();
+  }
+}
+const overlappingAsset = PUBLIC_FILES.find((asset) => {
+  const sourcePath = resolve(root, asset);
+  const relativeSource = relative(output, sourcePath);
+  return relativeSource === "" || (!relativeSource.startsWith("..") && !isAbsolute(relativeSource));
+});
+if (overlappingAsset) {
+  throw new Error(`Pages output overlaps a source asset and cannot be removed: ${overlappingAsset}`);
+}
+
 function isContained(candidate) {
   const relativePath = relative(rootRealPath, candidate);
   return relativePath && !relativePath.startsWith("..") && !relativePath.includes("/../");
@@ -38,6 +67,23 @@ async function copyPublicFile(asset) {
   const destination = resolve(output, asset);
   await mkdir(dirname(destination), { recursive: true });
   await cp(sourceRealPath, destination);
+}
+
+async function preflightPublicAssetBudget() {
+  let totalBytes = 0;
+  for (const asset of PUBLIC_FILES) {
+    const source = resolve(root, asset);
+    const sourceRealPath = await realpath(source);
+    if (!isContained(sourceRealPath)) throw new Error(`public asset escapes repository root: ${asset}`);
+    const metadata = await stat(sourceRealPath);
+    if (!metadata.isFile() || metadata.size === 0) throw new Error(`public asset is missing or empty: ${asset}`);
+    if (metadata.size > MAX_STATIC_ASSET_BYTES) throw new Error(`public asset exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit: ${asset}`);
+    totalBytes += metadata.size;
+    if (totalBytes > MAX_PUBLIC_ASSET_BYTES) {
+      throw new Error(`source public assets exceed the ${MAX_PUBLIC_ASSET_BYTES / (1024 * 1024)} MB aggregate limit`);
+    }
+  }
+  return totalBytes;
 }
 
 function xmlEscape(value) {
@@ -89,7 +135,7 @@ async function readLearningNotes() {
     .filter((asset) => asset.startsWith("notes/") && asset.endsWith(".md") && asset !== "notes/README.md")
     .sort();
   for (const asset of assets) {
-    const content = await readFile(resolve(root, asset), "utf8");
+    const content = await readBoundedUtf8(resolve(root, asset), MAX_STATIC_ASSET_BYTES);
     const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() || fallbackNoteTitle(asset);
     notes.push({
       asset,
@@ -168,6 +214,7 @@ async function buildStaticSitemap(origin) {
   ].join("\n");
 }
 
+await preflightPublicAssetBudget();
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await mapWithConcurrency(PUBLIC_FILES, copyPublicFile);

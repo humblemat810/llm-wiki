@@ -1,4 +1,4 @@
-import { FEEDBACK_FORMAT, GRAPH_SCHEMA, matchesFeedbackFingerprint, matchesGraphFingerprint } from "../graph-core.js";
+import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_FEEDBACK_EXPORT_OMITTED, matchesFeedbackFingerprint, matchesGraphFingerprint } from "../graph-core.js";
 import { evaluateExtraction, MAX_EVALUATION_EXAMPLES } from "../evaluation.js";
 import { readBoundedTextFile } from "./bounded-file.mjs";
 
@@ -58,6 +58,13 @@ if (!feedbackPath || !extractionPath) {
     }
     const examples = Array.isArray(feedback) ? feedback : feedback.examples;
     if (!Array.isArray(examples)) throw new Error("Feedback JSON must be an array or contain an examples array.");
+    if (!Array.isArray(feedback) && feedback.truncatedExamples !== undefined
+      && (!Number.isSafeInteger(feedback.truncatedExamples) || feedback.truncatedExamples < 0 || feedback.truncatedExamples > MAX_FEEDBACK_EXPORT_OMITTED)) {
+      throw new Error("Feedback JSON contains an invalid truncation diagnostic.");
+    }
+    if (!Array.isArray(feedback) && feedback.truncatedExamples > 0) {
+      throw new Error(`Feedback JSON is a partial export: ${feedback.truncatedExamples} reviewed examples were omitted. Evaluation requires a complete reviewed dataset.`);
+    }
     if (!Array.isArray(feedback) && feedback.datasetFingerprint !== undefined
       && !matchesFeedbackFingerprint(examples, feedback.datasetFingerprint)) {
       throw new Error("Feedback JSON dataset fingerprint does not match its examples.");

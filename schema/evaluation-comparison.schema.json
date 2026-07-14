@@ -52,7 +52,7 @@
     },
     "metrics": {
       "type": "array",
-      "maxItems": 6,
+      "maxItems": 12,
       "items": {
         "type": "object",
         "required": ["name", "baseline", "candidate", "delta", "regression"],
@@ -69,7 +69,7 @@
     "passed": { "type": "boolean" },
     "regressions": {
       "type": "array",
-      "maxItems": 6,
+      "maxItems": 12,
       "items": { "type": "string" }
     }
   },

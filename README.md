@@ -30,6 +30,8 @@ path stays local in the browser; no provider or API key is required.
 The browser prototype supports:
 
 - Pasting a document or loading a local `.txt` / `.md` file.
+- Building the graph from the document editor with `Ctrl+Enter` or
+  `Cmd+Enter`.
 - Trying a one-click local sample graph from the landing page so the full
   ingest, inspect, and projection loop is visible immediately.
 - Launching that sample walkthrough directly from an installed app shortcut.
@@ -57,6 +59,8 @@ The browser prototype supports:
   ranking, so adversarial documents cannot force unbounded pre-normalization
   memory or quadratic phrase analysis, while reserving capacity for phrases and
   structural candidates after generic terms.
+- Disclosing when the bounded feedback export window omits reviewed items, with
+  an explicit confirmation before a partial feedback dataset is imported.
 - Keeping Unicode segmentation itself behind an explicit character budget and
   ignoring numeric-only tokens to reduce low-value graph noise.
 - Making offline shell fallback query-tolerant so cache-busted static assets
@@ -85,6 +89,8 @@ The browser prototype supports:
   unprocessed files in the queue and committing any completed partial batch.
 - Capping the serialized remote feedback context at 500,000 characters to keep
   provider requests predictable.
+- Rejecting remote extraction when reviewed guidance would exceed that
+  serialized bound, so providers never receive an undisclosed partial context.
 - Rejecting oversized browser document files before reading them, with a 10 MB
   JSON import safety limit and a 50 MB Obsidian ZIP limit.
 - Bounding batch ingestion to 100 files and 10 MB of aggregate text so a
@@ -92,6 +98,10 @@ The browser prototype supports:
 - Merging new documents into the existing graph instead of replacing it.
 - Confirming or dismissing concepts to update confidence and create a revision.
 - Confirming or dismissing relations with the same persistent feedback loop.
+- Re-confirming an existing manual relation increments its feedback history,
+  keeping relation learning counts consistent with concept review.
+- Rejecting feedback imports above the published example bound instead of
+  silently dropping the tail of a human decision dataset.
 - Re-ingesting later documents without silently overriding dismissed knowledge.
 - Canceling a remote source replacement before it can mutate the graph, while
   preserving the existing source if extraction is interrupted.
@@ -101,6 +111,18 @@ The browser prototype supports:
   identity.
 - Preserving bounded-import truncation diagnostics so an oversized or partial
   graph cannot look complete without an explicit warning.
+- Applying the aggregate source-text budget during graph imports as well as
+  live ingestion, retaining the newest deterministic source window and
+  disclosing older source records omitted by that bound.
+- Reporting document-text and evidence-text clipping separately from
+  collection overflow, so bounded imports cannot hide lost source material.
+- Disclosing contradictory review statuses when duplicate imported concept or
+  relation records are merged, instead of presenting the result as a clean
+  duplicate.
+- Carrying those contradiction diagnostics into Markdown/Obsidian projections
+  and revision previews, keeping external views as auditable as the browser.
+- Explaining text-level import clipping directly in the live health strip so
+  recovery actions are understandable without opening a health export.
 - Enforcing document-size limits inside the extractor, not only in the browser UI.
 - Canonicalizing labels and titles so external text cannot break projections.
 - Bounding graph collections to keep imports and model responses within a
@@ -110,6 +132,8 @@ The browser prototype supports:
   valid.
 - Bounding evidence text and provenance-reference arrays at the same
   normalization boundary.
+- Reporting omitted nested evidence records and provenance references
+  separately, so bounded imports cannot hide incomplete grounding.
 - Retaining a bounded revision timeline so backups and browser state remain
   predictable.
 - Treating relation labels case-insensitively when merging repeated evidence.
@@ -117,11 +141,15 @@ The browser prototype supports:
   detection while preserving original source text.
 - Falling back to canonical source content when imported graphs contain legacy
   or custom fingerprints.
+- Treating custom fingerprint collisions as identity ambiguity rather than
+  silently merging distinct source text.
 - Using a dual-lane deterministic content digest for newly generated source
   fingerprints so accidental identity collisions remain extremely unlikely.
 - Deriving heuristic source IDs from normalized content as well as fingerprints,
   making repeated standalone extraction results reproducible.
 - Editing concept and relation labels without changing their stable IDs.
+- Rejecting relation label edits that would silently merge an existing
+  same-endpoint relation, preserving both semantic edges for an explicit merge.
 - Merging duplicate concepts into a canonical concept while preserving aliases,
   evidence, provenance, feedback memory, and relations; the merge is recorded
   as an undoable graph revision.
@@ -143,6 +171,14 @@ The browser prototype supports:
   instead of silently discarding it.
 - Preserving malformed undo-history data as a separate downloadable recovery
   snapshot instead of silently losing prior revisions.
+- Preserving over-capacity undo-history data in that recovery snapshot before
+  applying the configured history bound.
+- Preserving discarded or malformed history supplied by a backup restore in
+  the same recovery snapshot before applying the local undo-history bound.
+- Preserving imported history evicted when a restore also keeps the current
+  graph as an undo snapshot.
+- Failing graph writes, undo, restore, and clear closed before mutation when
+  their pre-mutation storage snapshot cannot be read.
 - Best-effort persistent browser storage requests after the user starts
   building a graph.
 - Hydrating graph state from IndexedDB when available, migrating existing
@@ -154,6 +190,8 @@ The browser prototype supports:
 - Recording a bounded pending-write marker beside the synchronous mirror so an
   interrupted IndexedDB commit cannot make the next hydration prefer stale
   graph state.
+- Giving pending-write generations a storage-instance identity so rapid
+  same-key writes from multiple tabs cannot clear one another's recovery marker.
 - Surfacing asynchronous durable-storage failures in the privacy note and graph
   health strip so users know when to export a backup, with a direct backup
   action available from the warning.
@@ -165,8 +203,13 @@ The browser prototype supports:
 - Undo and clear also refuse to overwrite a graph that changed in another tab.
 - Undo history configuration is sanitized so zero or invalid capacities cannot
   accidentally disable the storage bound.
+- Persisted graph JSON is bounded by both character count and UTF-8 byte size,
+  so Unicode-heavy state cannot bypass the storage safety budget.
 - Refreshing the workbench when another tab changes the saved graph, with a
   visible synchronization notice.
+- Repairing stale cross-tab graph events through the same version and content
+  fingerprint preconditions as user mutations, so a newer concurrent update
+  cannot be overwritten during repair.
 - Preserving the latest graph when undo-history storage fills first, with a
   safe degraded write that discards only history.
 - Showing a health warning when a save succeeds with reduced undo history.
@@ -192,9 +235,16 @@ The browser prototype supports:
 - Coalescing expensive search renders per animation frame so filtering remains
   responsive as the graph grows.
 - Reusing fingerprinted health, review-queue, and Markdown projection work
-  while search changes, avoiding repeated full-graph scans.
+  while search changes, avoiding repeated full-graph scans, with a non-sliding
+  30-second expiry so time-sensitive review status cannot remain cached
+  forever.
+- Building the live health strip and review queue from one bounded graph
+  inspection pass, so evidence-grounding work is not repeated for the same
+  render.
 - Searching graph evidence and bounded source text as well as concept/relation labels.
 - Searching source quality and review metadata through the same graph index.
+- Honoring `prefers-reduced-motion` by disabling the ticker and shortening
+  interface transitions for readers who request less animation.
 - Retaining optional bounded source URIs through graph JSON, remote extraction,
   and Obsidian source notes.
 - Rendering safe HTTP(S) source URIs as clickable links in the Markdown
@@ -222,6 +272,11 @@ The browser prototype supports:
   waiting for the time-based stale window.
 - Reporting stale-review pressure in graph health exports and the workbench,
   making representation drift visible to operators and quality gates.
+- Reporting evidence-grounding coverage separately from source-ID provenance:
+  exact normalized quotes are counted as anchored, while useful paraphrases
+  remain visible as unanchored evidence for review.
+- Using one explicit inspection timestamp for stale-review health, guidance
+  counts, and extractor feedback at the freshness boundary.
 - Separating historical source-review coverage from fresh source-review
   coverage, so old metadata is not counted as current trust.
 - Recording the latest human review time on concepts, relations, and reusable
@@ -259,6 +314,11 @@ The browser prototype supports:
 - Restricting graph and revision versions to JavaScript-safe integers so
   optimistic concurrency remains reliable.
 - Importing those source metadata edits back from Obsidian source notes.
+- Refreshing review time when an Obsidian concept or relation is substantively
+  corrected, so unchanged exported frontmatter cannot make new human learning
+  immediately stale, while older projections cannot roll a newer review back.
+- Refreshing source review time when source title, URI, or quality metadata is
+  substantively edited without an explicit replacement review date.
 - Verifying projection identity on every feedback note inside a vault, not
   only on the vault manifest, so stale individual edits are disclosed before
   import.
@@ -270,6 +330,11 @@ The browser prototype supports:
 - Showing the bounded prioritized review queue itself, including each
   candidate's reason and priority, so the self-improvement loop remains
   inspectable rather than hidden behind a single “review next” action.
+- Disclosing when the review queue safety cap hides lower-priority candidates,
+  so the visible queue is not mistaken for the complete review workload.
+- Routing exact evidence-grounding failures back to the affected concept or
+  relation with a bounded unanchored-evidence count, without exporting source
+  text, evidence quotes, or source URIs.
 - Exporting the internal representation as JSON.
 - Including an optional deterministic graph fingerprint in JSON exports so
   imports can detect accidental edits or truncation without treating harmless
@@ -279,8 +344,17 @@ The browser prototype supports:
   notes can be traced back to the exact representation that produced them.
 - Copying the current Markdown projection directly to the clipboard for quick
   sharing into Obsidian, issues, or chat.
+- Copying a redacted Markdown projection directly to the clipboard, removing
+  source text, evidence quotes, and URIs before sharing.
+- Sharing the redacted Markdown projection through the native file-share
+  surface when available, with clipboard and download fallbacks.
 - Exporting a redacted graph that preserves structure and review state while
   removing source text, evidence quotes, and source URIs for safer sharing.
+- Bounding Obsidian archive file count and validating every generated file
+  record before allocating ZIP parts.
+- Preflighting source and evidence bytes before building large Markdown,
+  Obsidian, feedback, and revision-diff projections, so oversized exports fail
+  before expensive serialization.
 - Exporting a redacted Markdown projection for quick, privacy-safe sharing in
   issues, chat, and Obsidian-compatible viewers.
 - Exporting a redacted Obsidian vault with the same privacy boundary, so
@@ -302,6 +376,10 @@ The browser prototype supports:
 - Exporting a versioned feedback dataset containing reviewed concepts and
   relations, including aliases, for future extractor evaluation or
   improvement.
+- Reserving feedback-export capacity for current reviewed graph decisions so
+  detached reusable memory cannot hide the newest human correction.
+- Ordering reusable learning examples by review freshness before bounded
+  export selection, so import order cannot evict newer corrections.
 - Stamping feedback exports with a deterministic reviewed-dataset fingerprint
   so evaluation runs can prove they used the intended examples; new exports
   use a dual-lane 64-bit digest while legacy fingerprints remain importable.
@@ -315,6 +393,22 @@ The browser prototype supports:
   suppression worsens beyond an explicit tolerance, while rejecting reports
   generated from different reviewed datasets, empty reviewed benchmarks, or
   contradictory reviewed decisions.
+- Validating that recall, suppression, and evidence-coverage ratios agree with
+  their counts before a promotion comparison trusts them.
+- Requiring bounded, parseable evaluation timestamps so promotion artifacts
+  retain machine-readable provenance.
+- Requiring full RFC3339-style date-time values rather than ambiguous date-only
+  provenance.
+- Rejecting unknown evaluation fields so runtime validation and the closed
+  published schema cannot silently drift.
+- Rejecting reviewed datasets above the evaluation bound instead of silently
+  truncating a benchmark while retaining its original fingerprint.
+- Rejecting candidate concept or relation collections above graph limits before
+  normalization, so evaluation never scores a silently truncated extraction.
+- Rejecting malformed or unreviewed benchmark examples instead of silently
+  filtering them out of evaluation metrics.
+- Rejecting oversized reviewed-example identities, aliases, evidence, and
+  provenance arrays before evaluation matching or fingerprint work.
 - Validating relation labels and endpoint pairs during evaluation even when a
   candidate reuses the reviewed relation ID, while treating reversed endpoint
   order as the same graph relation.
@@ -328,8 +422,9 @@ including reviewed aliases, so decisions can travel between projects without
 double-counting. When IDs differ, concept feedback falls back to canonical
 labels and aliases; import counts refer to reviewed items rather than individual
 field changes, unmatched or invalid examples are reported as skipped, and
-contradictory decisions for one identity are disclosed while the later decision
-retains the existing correction semantics.
+contradictory decisions for one identity are disclosed while the newest
+timestamp wins; equally undated decisions use a stable deterministic
+tie-break rather than file or dataset order.
 - Resetting completed file imports so selecting the same source again reliably
   starts a new import.
 - Saving learning-map progress through the same browser storage boundary as
@@ -455,14 +550,22 @@ example counts.
 To inspect graph quality in automation:
 
 ```bash
-npm run health -- graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-truncated-items 0 --max-dropped-items 0
+npm run health -- graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-conflicting-items 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-review-queue-truncated 0 --max-evidence-grounding-truncated 0 --max-feedback-context-truncated 0 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-unanchored-evidence 0 --max-truncated-items 0 --max-dropped-items 0
 ```
 
 This emits the privacy-safe health contract and exits non-zero when the
 requested quality thresholds are missed.
+Use `--max-review-queue-truncated 0` when automation must fail if the bounded
+review queue omits lower-priority candidates, and
+`--max-evidence-grounding-truncated 0` when grounding coverage must be based on
+a complete inspection rather than a bounded sample. Use
+`--max-feedback-context-truncated 0` when extraction guidance must include the
+complete retained learning context.
 The report and gate reuse the same normalized diagnostic pass, so large graphs
 are not scanned twice; `--max-ambiguous` includes duplicate canonical concept
-labels as well as provenance and identifier ambiguity. The unsupported-node
+labels as well as provenance and identifier ambiguity. `--max-conflicting-items
+0` rejects duplicate concept or relation records whose review statuses disagree.
+The unsupported-node
 and unsupported-edge gates require every active item to retain valid evidence
 or provenance. Use `--max-truncated-items 0 --max-dropped-items 0` when partial
 or malformed imports must fail the gate rather than remain diagnostic-only.
@@ -493,6 +596,8 @@ timeouts, one bounded retry for transient network/HTTP failures, bounded
 document input and response size, and normalized responses. It is intentionally
 not wired to a vendor or API key, so deployments can add a server-side provider
 without putting credentials in the browser.
+The timeout races the underlying fetch as well as aborting its signal, so a
+non-conforming provider client cannot leave extraction pending forever.
 Remote extraction treats the submitted title, text, URI, and content fingerprint
 as authoritative source metadata; a provider can contribute graph nodes and
 relations but cannot rewrite the document provenance envelope or attach
@@ -541,14 +646,21 @@ falls back to `127.0.0.1`, while a non-empty host is passed to Node for
 normal hostname validation. The reference endpoint requires JSON, validates
 the feedback format,
 sets no-store response behavior, and emits baseline security headers.
-Set `EXTRACTOR_AUTH_TOKEN` to require a bearer token for extraction requests;
-leave it unset for the local development default. The token is compared
-constant-time and is never logged. Public deployments should still use TLS,
-gateway authentication, and a shared rate limiter. Browser deployments that
-use a gateway session can rely on same-origin cookies; the app never stores or
-exposes provider credentials.
+Provider concurrency is bounded to 8 in-flight extractions by default; configure
+`EXTRACTOR_CONCURRENCY` to a value from 1 to 1,024 when provider capacity
+requires a different ceiling. Excess work receives HTTP 503 with
+`Retry-After: 1`.
+Set `EXTRACTOR_AUTH_TOKEN` to require a bearer token for extraction requests.
+Loopback development keeps extraction open when it is unset; non-loopback
+server hosts fail extraction closed with HTTP 503 until a token is configured.
+The token is compared constant-time and is never logged. Public deployments
+should still use TLS, gateway authentication, and a shared rate limiter.
+Browser deployments that use a gateway session can rely on same-origin cookies;
+the app never stores or exposes provider credentials.
 Set `METRICS_AUTH_TOKEN` independently when `/metrics` should require a bearer
-token; keeping metrics behind a gateway is recommended even when the endpoint
+token. Loopback development keeps metrics open when it is unset; non-loopback
+server hosts fail metrics closed with HTTP 503 until a token is configured.
+Keeping metrics behind a gateway remains recommended even though the endpoint
 contains no document content.
 Set `PUBLIC_ORIGIN` to the externally visible HTTPS origin to enable
 `/sitemap.xml` and a deployment-aware `robots.txt` with crawlable learning-note
@@ -570,13 +682,24 @@ the process is draining after shutdown begins, so orchestrators stop routing
 new traffic before the server exits. Both health endpoints report the package
 version, and `/metrics` exposes a version-labelled build-info gauge alongside
 privacy-safe Prometheus text counters for total requests, extraction outcomes,
-authentication failures, rate-limited requests, and in-flight provider work
+authentication failures, rate-limited and concurrency-limited requests, and
+in-flight provider work, and the configured extractor concurrency ceiling
 plus HTTP response status counters and a bounded extraction latency histogram; it never includes document
 content or credentials. Metrics also support bodyless `HEAD` probes and expose
 a process-uptime gauge for restart correlation. Operational JSON and metrics
 responses explicitly opt out of search indexing. Public static assets, including learning notes, are
 bounded to 10 MB so readiness and serving cannot buffer an unexpectedly large
 deployment file.
+After a timeout or client disconnect, the in-flight extraction gauge remains
+set until the provider promise actually settles; this keeps capacity and
+graceful-drain signals accurate even when a provider ignores the abort signal.
+Standalone shutdown waits for both HTTP connections and active provider
+promises to drain, with a bounded five-second force-exit fallback.
+Programmatic `server.waitForIdle({ timeoutMs })` calls are also bounded and
+resolve `false` when a provider ignores cancellation, while in-flight metrics
+remain set until the provider promise actually settles.
+Standalone shutdown treats that timed-out drain as an unsuccessful exit so
+orchestrators can distinguish a clean stop from forced provider abandonment.
 Every server response includes an `X-Request-ID` UUID for operational
 correlation; the browser adapter preserves extraction IDs in remote errors.
 The standalone server logs structured extraction request ID, status, duration,
@@ -611,24 +734,30 @@ The reference server can also run in a container:
 
 ```bash
 docker build -t llm-field-notes .
-docker run --rm -p 8000:8000 llm-field-notes
+docker run --rm --read-only --tmpfs /tmp --cap-drop=ALL \
+  --security-opt=no-new-privileges -p 8000:8000 llm-field-notes
 ```
 
 Generic Node hosts can use `npm start`; the server honors `PORT`, `HOST`,
-`EXTRACTOR_RATE_LIMIT`, and `EXTRACTOR_TIMEOUT_MS`. The container intentionally
+`EXTRACTOR_RATE_LIMIT`, `EXTRACTOR_CONCURRENCY`, and `EXTRACTOR_TIMEOUT_MS`. The container intentionally
 execs Node directly so orchestrator signals reach graceful shutdown handling
 without an npm intermediary.
 Before a public deployment, follow the [production launch checklist](SECURITY.md#production-launch-checklist)
 for TLS, secret management, gateway controls, monitoring, backups, and
 projection round-trip verification.
 
-The image binds to `0.0.0.0`, includes a Docker health check, and keeps the
-runtime dependency-free. It runs as the non-root `node` user; the Node server
+The image binds to `0.0.0.0`, includes a Docker health check with a 10-second
+startup/probe window for bounded readiness rendering, and keeps the runtime
+dependency-free. It runs as the non-root `node` user; the Node server
 aborts active provider calls, closes idle keep-alive sockets, and drains
 requests during SIGINT/SIGTERM shutdown. Programmatic hosts can call the
-idempotent `server.beginDrain()` before `server.close()` to use the same
+idempotent `server.beginDrain()` before `server.close()` and await
+`server.waitForIdle()` (or pass a bounded `timeoutMs`) to use the same
 lifecycle behavior.
 The base image is digest-pinned for reproducible builds.
+The server does not require a writable application filesystem, so production
+containers should use a read-only root filesystem, a bounded temporary
+filesystem, dropped Linux capabilities, and `no-new-privileges` as shown above.
 The Docker context excludes environment files, local exports, development
 tests and experiment modules, build/release-only scripts, common
 backup/database artifacts, and private-key material; it retains only the
@@ -641,12 +770,15 @@ npm test
 ```
 
 The same checks run in GitHub Actions on every push to `main` and every pull
-request across Node 18, 20, and 22.
+request across Node 18, 20, 22, and 24.
 CI also builds the Docker image to catch deployment drift.
 CI starts that image, probes `/readyz`, and waits for Docker’s health status to
-become `healthy` so the runtime and its own health check agree.
+become `healthy` so the runtime and its own health check agree. Superseded
+verification runs are canceled and each matrix job has a 20-minute timeout, so
+stalled builds cannot consume CI capacity indefinitely.
 GitHub Actions in the verification and Pages workflows are pinned to immutable
-commit references; Dependabot tracks their updates without making releases
+commit references; Dependabot tracks workflow, npm, and Docker base-image
+updates without making releases
 depend on mutable tags.
 
 The test suite also serves the static asset graph through a local HTTP server,
@@ -780,9 +912,9 @@ a model-backed extraction implementation behind the same graph contract.
   Pages sitemaps publish the same source-note and canonical HTML landing URLs.
 - The repo should be easy to fork, improve, and deploy on GitHub Pages.
 - The service worker prefers fresh shell assets and only falls back to its
-  cache when offline, when the network stalls for three seconds, or when a
-  transient non-OK shell response arrives; API and non-shell requests are not
-  cached.
+  cache when offline, when the network or response body stalls for three
+  seconds, or when a transient non-OK shell response arrives; API and
+  non-shell requests are not cached.
 - Service-worker activation removes only older `llm-field-notes-*` caches, so
   deploying beside another app on the same origin does not erase its cache.
 - Later service-worker releases wait for user approval before taking over an
@@ -793,7 +925,8 @@ a model-backed extraction implementation behind the same graph contract.
 - The service-worker script itself is served `no-cache` so worker updates are
   discovered promptly.
 - Cache quota or availability failures do not replace a successful fresh
-  network response.
+  network response, and cache read failures degrade to the network response or
+  the browser's normal failed-fetch behavior.
 
 ## Roadmap
 

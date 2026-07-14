@@ -41,7 +41,11 @@
       "required": ["ambiguousSourceIds", "ambiguousEdgeIds"],
       "properties": {
         "ambiguousSourceIds": { "$ref": "#/$defs/stringSet" },
-        "ambiguousEdgeIds": { "$ref": "#/$defs/stringSet" }
+        "ambiguousEdgeIds": { "$ref": "#/$defs/stringSet" },
+        "conflictingNodeIds": { "$ref": "#/$defs/stringSet" },
+        "conflictingEdgeIds": { "$ref": "#/$defs/stringSet" },
+        "truncated": { "$ref": "#/$defs/diagnosticDiff" },
+        "dropped": { "$ref": "#/$defs/diagnosticDiff" }
       },
       "additionalProperties": false
     }
@@ -56,7 +60,7 @@
         "identity": { "type": "string", "minLength": 1, "maxLength": 200 },
         "title": { "type": "string", "maxLength": 200 },
         "label": { "type": "string", "maxLength": 120 },
-        "aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 } },
+        "aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "uniqueItems": true },
         "fingerprint": { "type": "string", "maxLength": 200 },
         "uri": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^(?:(?:https?|file):\\/\\/[^\\s@<>]+|(?:urn|doi):[^\\s<>]+|[^:\\s<>]+)$" },
         "source": { "type": "string", "maxLength": 200 },
@@ -68,7 +72,7 @@
         "confidence": { "type": "number", "minimum": 0.01, "maximum": 0.99 },
         "mentions": { "type": "integer", "minimum": 1, "maximum": 1000000 },
         "feedback": { "type": "integer", "minimum": -1000000, "maximum": 1000000 },
-        "sources": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 200 } },
+        "sources": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 200 }, "uniqueItems": true },
         "evidenceCount": { "type": "integer", "minimum": 0, "maximum": 8 }
       },
       "additionalProperties": false
@@ -99,6 +103,32 @@
       "properties": {
         "added": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 200 } },
         "removed": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 200 } }
+      },
+      "additionalProperties": false
+    },
+    "diagnosticCounts": {
+      "type": "object",
+      "required": ["documents", "nodes", "edges", "revisions", "learningExamples"],
+      "properties": {
+        "documents": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "nodes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "edges": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "revisions": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "learningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "documentText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "evidenceText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "evidenceItems": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "sourceReferences": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      },
+      "additionalProperties": false
+    },
+    "diagnosticDiff": {
+      "type": "object",
+      "required": ["before", "after", "changed"],
+      "properties": {
+        "before": { "$ref": "#/$defs/diagnosticCounts" },
+        "after": { "$ref": "#/$defs/diagnosticCounts" },
+        "changed": { "type": "boolean" }
       },
       "additionalProperties": false
     }

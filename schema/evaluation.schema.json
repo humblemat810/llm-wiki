@@ -22,13 +22,13 @@
       "type": "object",
       "required": ["examples", "datasetFingerprint", "freshExamples", "staleExamples", "undatedExamples", "untrustedExamples", "conflicts", "concepts", "relations"],
       "properties": {
-        "examples": { "type": "integer", "minimum": 0 },
+        "examples": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}(?:[0-9a-f]{8})?$" },
         "freshExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "staleExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "undatedExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "untrustedExamples": { "type": "integer", "minimum": 0, "maximum": 15000 },
-        "conflicts": { "type": "integer", "minimum": 0 },
+        "conflicts": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "concepts": { "$ref": "#/$defs/category" },
         "relations": { "$ref": "#/$defs/category" }
       },
@@ -49,12 +49,12 @@
       "type": "object",
       "required": ["expected", "found", "missed", "recall"],
       "properties": {
-        "expected": { "type": "integer", "minimum": 0 },
-        "found": { "type": "integer", "minimum": 0 },
-        "missed": { "type": "integer", "minimum": 0 },
+        "expected": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "found": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "missed": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "recall": { "type": "number", "minimum": 0, "maximum": 1 },
         "reviewedPrecision": { "type": "number", "minimum": 0, "maximum": 1 },
-        "evidenceBacked": { "type": "integer", "minimum": 0 },
+        "evidenceBacked": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "evidenceCoverage": { "type": "number", "minimum": 0, "maximum": 1 }
       },
       "additionalProperties": false
@@ -63,9 +63,9 @@
       "type": "object",
       "required": ["expected", "suppressed", "present", "suppressionRate"],
       "properties": {
-        "expected": { "type": "integer", "minimum": 0 },
-        "suppressed": { "type": "integer", "minimum": 0 },
-        "present": { "type": "integer", "minimum": 0 },
+        "expected": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "suppressed": { "type": "integer", "minimum": 0, "maximum": 15000 },
+        "present": { "type": "integer", "minimum": 0, "maximum": 15000 },
         "suppressionRate": { "type": "number", "minimum": 0, "maximum": 1 }
       },
       "additionalProperties": false

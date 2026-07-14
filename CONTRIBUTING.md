@@ -85,6 +85,10 @@ Open an issue or pull request with the smallest coherent change. The project
 maintains a friendly bar: clarity, reproducibility, and intellectual honesty
 matter more than polish.
 
+Every pull request runs the dependency-free verification matrix across Node 18,
+20, 22, and 24, plus the Node and Docker runtime smoke checks. Keep changes
+bounded enough to complete within the repository’s 20-minute CI job limit.
+
 For a new learning page, use the Learning note issue template first. It keeps
 the question, build, failure modes, sources, and reproducible exercise visible
 before prose or code is added.

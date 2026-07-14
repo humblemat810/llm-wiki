@@ -8,12 +8,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
-        node-version: ["18.x", "20.x", "22.x"]
+        node-version: ["18.x", "20.x", "22.x", "24.x"]
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -55,11 +60,15 @@ jobs:
           fi
           trap - EXIT
       - name: Build container
-        run: docker build --tag llm-field-notes:ci .
+        run: |
+          set -e
+          version=$(node -p "require('./package.json').version")
+          docker build --build-arg APP_VERSION="$version" --tag llm-field-notes:ci .
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' llm-field-notes:ci)" = "$version"
       - name: Smoke test container readiness
         run: |
           trap 'docker rm --force llm-field-notes-smoke >/dev/null 2>&1 || true' EXIT
-          docker run --detach --name llm-field-notes-smoke --publish 18000:8000 llm-field-notes:ci
+          docker run --read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges --detach --name llm-field-notes-smoke --publish 18000:8000 llm-field-notes:ci
           ready=0
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18000/readyz; then
@@ -72,6 +81,15 @@ jobs:
             docker logs llm-field-notes-smoke
             exit 1
           fi
+          status=$(curl --silent --output /tmp/llm-field-notes-auth-response.json --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data '{"operation":"extract-graph","schema":"llm-field-notes/graph@1","feedbackFormat":"llm-field-notes/feedback@1","feedback":[],"document":{"title":"Auth smoke","text":"Attention uses context to create a useful graph representation for review."}}' \
+            http://127.0.0.1:18000/api/extract-graph)
+          test "$status" = "503"
+          metrics_status=$(curl --silent --output /tmp/llm-field-notes-metrics-response.txt --write-out '%{http_code}' \
+            http://127.0.0.1:18000/metrics)
+          test "$metrics_status" = "503"
           healthy=0
           for attempt in $(seq 1 30); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' llm-field-notes-smoke)" = "healthy" ]; then

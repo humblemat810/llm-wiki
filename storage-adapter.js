@@ -4,8 +4,12 @@ const DATABASE_VERSION = 1;
 const STORE_NAME = "values";
 const CHANNEL_NAME = "llm-field-notes-storage";
 const HYDRATION_TIMEOUT_MS = 1500;
+export const IDB_OPERATION_TIMEOUT_MS = 5000;
 export const PENDING_WRITES_KEY = `${STORAGE_PREFIX}pending-writes`;
+export const MAX_STORAGE_KEY_CHARS = 256;
+export const MAX_BROADCAST_VALUE_CHARS = 50 * 1024 * 1024;
 const MAX_PENDING_WRITES = 100;
+let storageInstanceSequence = 0;
 
 export function createMemoryStorage() {
   const values = new Map();
@@ -23,9 +27,9 @@ function readLocalValues(storage) {
   try {
     for (let index = 0; index < storage.length; index += 1) {
       const key = storage.key(index);
-      if (typeof key === "string" && key.startsWith(STORAGE_PREFIX) && key !== PENDING_WRITES_KEY) {
+      if (isValidStorageKey(key) && key !== PENDING_WRITES_KEY) {
         const value = storage.getItem(key);
-        if (value !== null) values.set(key, value);
+        if (isValidBroadcastValue(value)) values.set(key, value);
       }
     }
   } catch {
@@ -41,20 +45,28 @@ function readPendingWrites(storage) {
     const pending = new Map();
     if (Array.isArray(parsed)) {
       parsed
-        .filter((key) => typeof key === "string" && key.startsWith(STORAGE_PREFIX) && key !== PENDING_WRITES_KEY)
+        .filter((key) => isValidStorageKey(key) && key !== PENDING_WRITES_KEY)
         .slice(-MAX_PENDING_WRITES)
         .forEach((key) => pending.set(key, "legacy"));
       return pending;
     }
     if (!parsed || typeof parsed !== "object") return pending;
     Object.entries(parsed)
-      .filter(([key, token]) => key.startsWith(STORAGE_PREFIX) && key !== PENDING_WRITES_KEY && typeof token === "string" && token.length <= 128)
+      .filter(([key, token]) => isValidStorageKey(key) && key !== PENDING_WRITES_KEY && typeof token === "string" && token.length <= 128)
       .slice(-MAX_PENDING_WRITES)
       .forEach(([key, token]) => pending.set(key, token));
     return pending;
   } catch {
     return new Map();
   }
+}
+
+function isValidBroadcastValue(value) {
+  return value === null || (typeof value === "string" && value.length <= MAX_BROADCAST_VALUE_CHARS);
+}
+
+function isValidStorageKey(key) {
+  return typeof key === "string" && key.length <= MAX_STORAGE_KEY_CHARS && key.startsWith(STORAGE_PREFIX);
 }
 
 function openDatabase(indexedDB) {
@@ -86,7 +98,7 @@ function readDatabaseValues(database) {
         resolve(values);
         return;
       }
-      if (typeof cursor.key === "string" && typeof cursor.value === "string") values.set(cursor.key, cursor.value);
+      if (isValidStorageKey(cursor.key) && isValidBroadcastValue(cursor.value)) values.set(cursor.key, cursor.value);
       cursor.continue();
     };
     request.onerror = () => reject(request.error || new Error("IndexedDB could not be read."));
@@ -95,22 +107,39 @@ function readDatabaseValues(database) {
 }
 
 function writeDatabaseValue(database, key, value) {
-  return new Promise((resolve, reject) => {
-    const transaction = database.transaction(STORE_NAME, "readwrite");
-    transaction.objectStore(STORE_NAME).put(value, key);
-    transaction.oncomplete = resolve;
-    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB could not be written."));
-    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB write was aborted."));
-  });
+  return runDatabaseWrite(database, (store) => store.put(value, key), "IndexedDB could not be written.");
 }
 
 function removeDatabaseValue(database, key) {
+  return runDatabaseWrite(database, (store) => store.delete(key), "IndexedDB could not be updated.");
+}
+
+function runDatabaseWrite(database, operation, failureMessage) {
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, "readwrite");
-    transaction.objectStore(STORE_NAME).delete(key);
-    transaction.oncomplete = resolve;
-    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB could not be updated."));
-    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB delete was aborted."));
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback(value);
+    };
+    const timeout = setTimeout(() => {
+      finish(reject, new Error(`${failureMessage} Transaction timed out.`));
+      try {
+        transaction.abort?.();
+      } catch {
+        // A non-conforming transaction must not suppress fallback persistence.
+      }
+    }, IDB_OPERATION_TIMEOUT_MS);
+    transaction.oncomplete = () => finish(resolve);
+    transaction.onerror = () => finish(reject, transaction.error || new Error(failureMessage));
+    transaction.onabort = () => finish(reject, transaction.error || new Error(`${failureMessage} Transaction aborted.`));
+    try {
+      operation(transaction.objectStore(STORE_NAME));
+    } catch (error) {
+      finish(reject, error);
+    }
   });
 }
 
@@ -167,10 +196,19 @@ function createDurableStorage(owner, localStorage) {
     else fallbackWrite(PENDING_WRITES_KEY, null);
   };
   let pendingSequence = 0;
+  const instanceId = (() => {
+    try {
+      if (typeof owner.crypto?.randomUUID === "function") return owner.crypto.randomUUID();
+    } catch {
+      // Fall back to a process-local identity for test and restricted contexts.
+    }
+    storageInstanceSequence += 1;
+    return `instance-${storageInstanceSequence}`;
+  })();
   const markPending = (key) => {
     if (!key || key === PENDING_WRITES_KEY) return null;
     pendingSequence += 1;
-    const token = `${Date.now()}-${pendingSequence}`;
+    const token = `${Date.now()}-${instanceId}-${pendingSequence}`;
     pendingWrites.set(key, token);
     persistPendingWrites();
     return token;
@@ -195,10 +233,15 @@ function createDurableStorage(owner, localStorage) {
   const storage = {
     getItem(key) {
       if (hydrated) return values.has(key) ? values.get(key) : null;
-      return values.has(key) ? values.get(key) : fallbackStorage.getItem(key);
+      if (values.has(key)) return values.get(key);
+      const fallbackValue = fallbackStorage.getItem(key);
+      return isValidBroadcastValue(fallbackValue) ? fallbackValue : null;
     },
     setItem(key, value) {
       const normalized = String(value);
+      if (!isValidBroadcastValue(normalized)) {
+        throw new Error("Storage value exceeds the safety limit.");
+      }
       values.set(key, normalized);
       if (!hydrated) dirtyBeforeReady.set(key, normalized);
       const pendingToken = owner.indexedDB ? markPending(key) : null;
@@ -217,15 +260,16 @@ function createDurableStorage(owner, localStorage) {
       notify(key, null);
     },
     clear() {
-      [...values.keys()].forEach((key) => storage.removeItem(key));
+      new Set([...values.keys(), ...pendingWrites.keys()]).forEach((key) => storage.removeItem(key));
     }
   };
 
   const onStorage = (event) => {
     if (localStorage && event.storageArea && event.storageArea !== localStorage) return;
-    if (typeof event.key !== "string" || !event.key.startsWith(STORAGE_PREFIX) || event.key === PENDING_WRITES_KEY) return;
+    if (!isValidStorageKey(event.key) || event.key === PENDING_WRITES_KEY) return;
     if (event.newValue === null) values.delete(event.key);
-    else values.set(event.key, event.newValue);
+    else if (isValidBroadcastValue(event.newValue)) values.set(event.key, event.newValue);
+    else return;
     const pendingToken = owner.indexedDB ? markPending(event.key) : null;
     if (!hydrated) dirtyBeforeReady.set(event.key, event.newValue);
     else if (durable && database) {
@@ -239,8 +283,9 @@ function createDurableStorage(owner, localStorage) {
     channel = typeof owner.BroadcastChannel === "function" ? new owner.BroadcastChannel(CHANNEL_NAME) : null;
     channel?.addEventListener("message", (event) => {
       const key = event.data?.key;
-      if (typeof key !== "string" || !key.startsWith(STORAGE_PREFIX)) return;
-      const value = event.data.value === null ? null : String(event.data.value);
+      if (!isValidStorageKey(key) || key === PENDING_WRITES_KEY) return;
+      const value = event.data.value;
+      if (!isValidBroadcastValue(value)) return;
       if (value === null) values.delete(key);
       else values.set(key, value);
       const pendingToken = owner.indexedDB ? markPending(key) : null;
@@ -371,12 +416,80 @@ export function getBrowserStorage(owner = globalThis) {
   }
   if (owner.indexedDB) return createDurableStorage(owner, localStorage);
   if (localStorage) {
+    const subscribers = new Set();
+    let channel = null;
+    const publish = (key, value) => {
+      try {
+        channel?.postMessage({ key, value });
+      } catch {
+        // BroadcastChannel is an optional synchronization enhancement.
+      }
+    };
+    const notify = (event) => {
+      if (event?.storageArea && event.storageArea !== localStorage) return;
+      if (!isValidStorageKey(event?.key) || event.key === PENDING_WRITES_KEY) return;
+      if (!isValidBroadcastValue(event.newValue)) return;
+      const change = {
+        type: "change",
+        key: event.key,
+        newValue: event.newValue,
+        storageArea: localStorage,
+        external: true,
+        broadcast: false
+      };
+      subscribers.forEach((subscriber) => {
+        try {
+          subscriber(change);
+        } catch {
+          // A subscriber must not break fallback storage synchronization.
+        }
+      });
+    };
+    owner.addEventListener?.("storage", notify);
+    try {
+      channel = typeof owner.BroadcastChannel === "function" ? new owner.BroadcastChannel(CHANNEL_NAME) : null;
+      channel?.addEventListener("message", (event) => {
+        const key = event.data?.key;
+        if (typeof key !== "string") return;
+        notify({ key, newValue: event.data.value, storageArea: localStorage });
+      });
+    } catch {
+      channel = null;
+    }
+    const storage = {
+      getItem: (key) => {
+        const value = localStorage.getItem(key);
+        return isValidBroadcastValue(value) ? value : null;
+      },
+      setItem: (key, value) => {
+        const normalized = String(value);
+        if (!isValidBroadcastValue(normalized)) throw new Error("Storage value exceeds the safety limit.");
+        localStorage.setItem(key, normalized);
+        publish(key, normalized);
+      },
+      removeItem: (key) => {
+        localStorage.removeItem(key);
+        publish(key, null);
+      },
+      clear: () => {
+        const keys = [];
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const key = localStorage.key(index);
+          if (typeof key === "string" && key.startsWith(STORAGE_PREFIX)) keys.push(key);
+        }
+        keys.forEach((key) => storage.removeItem(key));
+      }
+    };
     return {
-      storage: localStorage,
+      storage,
       persistent: true,
       durable: false,
       ready: Promise.resolve(),
-      subscribe: () => () => {}
+      subscribe(callback) {
+        if (typeof callback !== "function") return () => {};
+        subscribers.add(callback);
+        return () => subscribers.delete(callback);
+      }
     };
   }
   return {

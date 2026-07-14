@@ -12,6 +12,15 @@ The default application is local-first:
   document, optional source URI, and bounded reviewed feedback are sent to that
   endpoint; deployers must protect and document that service separately.
 - The service worker only caches same-origin application assets.
+- Service-worker cache read failures are treated as misses, so an unavailable
+  or damaged Cache API does not become an application-level fetch rejection
+  when a network response is available.
+- Static shell response bodies are bounded by the same timeout and byte ceiling
+  as the worker's revalidation path, preventing a stalled or oversized asset
+  from hanging the workbench.
+- Cross-tab stale graph repair is conditional on the observed version and
+  content fingerprint, preventing delayed browser events from overwriting a
+  newer graph.
 - Service-worker updates do not silently take over an active workbench tab;
   later releases require an explicit reload, reducing mixed-version behavior
   while a graph mutation is in progress.
@@ -19,9 +28,32 @@ The default application is local-first:
 - The optional extractor endpoint path is remembered locally only after
   same-origin and embedded-credential validation; endpoint configuration never
   stores a bearer token or provider secret.
+- Remote extraction has an explicit timeout race around the fetch operation,
+  including integrations that fail to honor `AbortSignal`.
 
 Treat downloaded graph JSON, backups, and Obsidian vaults as sensitive if the
 source documents are sensitive. They contain source text and derived evidence.
+All source-bearing projection paths preflight the shared source/evidence byte
+budget before constructing large export strings.
+Obsidian archive generation validates file records and enforces the same
+bounded file-count and byte limits as vault import.
+Evaluation reports are not trusted from their displayed ratios alone; runtime
+validation recomputes ratio/count consistency before promotion decisions.
+Their timestamps are bounded and parseable before they are used as provenance.
+Date-only values are rejected so evaluation chronology remains unambiguous.
+Unknown report fields are rejected at every layer, preventing unsupported
+metadata from silently entering promotion artifacts.
+Reviewed datasets above the matching bound are rejected rather than truncated,
+preventing a partial benchmark from masquerading as the full fingerprinted set.
+Candidate graph collections above the published concept or relation limits are
+also rejected before evaluation normalization.
+Malformed or unreviewed benchmark examples are rejected rather than silently
+removed from the scored dataset.
+Reviewed-example identities, aliases, evidence, and provenance arrays are
+bounded before evaluation matching or fingerprinting, preventing a small
+example count from hiding oversized nested input.
+Persistence operations fail closed if their pre-mutation graph/history snapshot
+cannot be read, avoiding destructive rollback from an unknown prior state.
 Use the redacted graph or redacted Obsidian vault export for public issue
 reports, examples, or shared review; they remove source text, evidence quotes,
 and source URIs—including evidence retained in reusable learning memory—while
@@ -29,6 +61,9 @@ preserving reviewable graph structure. The `redacted`
 marker survives normalization and import so downstream tools can keep the
 privacy boundary visible; normalization also enforces the marker by scrubbing
 source text, URIs, and evidence if a marked payload was tampered with.
+The workbench's native graph-share action sends only the redacted Markdown
+projection; browsers without file sharing receive the same redacted content
+through clipboard or download fallback.
 The release smoke suite also scans complete redacted Markdown and vault
 payloads for the original source text and URI, guarding against leakage through
 non-source projection files.
@@ -50,6 +85,13 @@ deployments set `HOST=0.0.0.0` for connectivity, so public deployments should
 place authentication, TLS, and a shared rate limiter in a trusted reverse
 proxy. The built-in `EXTRACTOR_RATE_LIMIT` is an in-process safety net, not a
 replacement for multi-instance gateway controls.
+The command-line server also fails extraction closed on non-loopback hosts when
+`EXTRACTOR_AUTH_TOKEN` is absent; local loopback development remains available
+without a token.
+Provider concurrency is also capped at 8 in-flight extractions by default;
+configure `EXTRACTOR_CONCURRENCY` between 1 and 1,024 to match provider
+capacity. Requests above the ceiling receive a short-lived 503 response, and
+the limit is process-local.
 
 The reference endpoint intentionally does not accept browser API keys. Keep
 provider credentials in the server-side extraction implementation or proxy.
@@ -69,6 +111,12 @@ accidental embedding or cross-origin data exposure.
 Early extraction rejections drain request bodies before responding, preserving
 keep-alive connection framing and preventing unread upload bytes from affecting
 the next request.
+The extraction root envelope, document metadata, and feedback hints are also
+closed against unknown fields, matching `schema/extractor-request.schema.json`;
+unrecognized metadata fails validation instead of being silently discarded.
+Obsidian feedback frontmatter uses the same fail-closed rule: keys outside the
+exported type-specific concept, relation, and source contracts, or malformed
+read-only metadata, are rejected rather than silently ignored.
 When `PUBLIC_ORIGIN` is an HTTPS origin, the reference server also emits HSTS
 (`max-age=31536000; includeSubDomains`); local HTTP development does not receive
 that browser-persistent policy.
@@ -79,8 +127,9 @@ the public note surface. Markdown links in those pages are independently
 restricted to HTTP(S) URLs without embedded credentials before rendering.
 The `/metrics` endpoint contains only aggregate operational counters and no
 document content or credentials. Set `METRICS_AUTH_TOKEN` for a simple
-single-instance guard, and restrict it at the gateway if traffic statistics
-are considered sensitive.
+single-instance guard; non-loopback command-line hosts fail metrics closed
+without it. Restrict the endpoint at the gateway if traffic statistics are
+considered sensitive.
 The reference extraction server compacts reviewed feedback at its trust
 boundary, forwarding only bounded labels, aliases, statuses, and relation
 endpoints; unrecognized fields such as evidence or source text are discarded
@@ -122,11 +171,21 @@ Before exposing the reference server to real users:
 - Keep the published asset footprint within the shared 100 MB aggregate budget
   and the 10 MB per-asset limit; these checks protect both Pages publication
   and runtime readiness from unbounded learning-note collections.
+- Run the container with a read-only root filesystem and a bounded `/tmp`
+  filesystem, no Linux capabilities, and `no-new-privileges`
+  (`--read-only --tmpfs /tmp --cap-drop=ALL
+  --security-opt=no-new-privileges`) because the reference server does not
+  require writable application state or elevated privileges.
 - Export and verify graph backups before browser storage is cleared, a device
   is replaced, or an Obsidian vault is shared. Use redacted graph, vault, or
   JSON-LD exports for public examples and issue reports.
 - Run `npm test` in CI and perform one real Obsidian export/import review before
   upgrading the application or changing graph or projection schemas.
+- For production graph promotion, run the health CLI with
+  `--max-review-queue-truncated 0 --max-evidence-grounding-truncated 0
+  --max-feedback-context-truncated 0 --max-truncated-items 0
+  --max-dropped-items 0` so sampled review, grounding, or learning context
+  cannot pass as complete.
 - Treat browser storage, downloaded backups, and full vaults as user data.
   Define retention and deletion procedures for each deployment that collects
   documents or model-provider requests.

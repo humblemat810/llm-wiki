@@ -6,6 +6,375 @@ All notable changes to LLM Field Notes are documented here.
 
 ### Added
 
+- Made release verification enforce the digest-pinned Node 22 container
+  baseline, keeping deployment runtime drift visible before publication.
+- Added package-synchronized OCI version metadata to production container
+  images for registry and incident-response traceability.
+- Made container CI pass and verify the repository version label explicitly,
+  catching image metadata drift before deployment.
+- Added one-click native sharing for the privacy-safe Markdown graph projection,
+  with clipboard and download fallbacks for browsers without file sharing.
+- Added a guarded `Ctrl/Cmd+Enter` document-editor shortcut for the main ingest
+  action.
+- Added a visible keyboard hint beside the graph-build action so the shortcut
+  is discoverable without opening documentation.
+- Made the ingest action row wrap on narrow screens so the keyboard hint and
+  cancellation controls remain usable on mobile.
+- Declared the published CC BY 4.0 license in package metadata and release
+  validation for machine-readable distribution tooling.
+- Extended the CI compatibility matrix through Node 24 while retaining the
+  Node 18, 20, and 22 lanes.
+- Made oversized-upload smoke checks portable across Node runtime versions
+  whose clients surface the server's deliberate early connection close as
+  `ECONNRESET`.
+- Made container CI run the production image read-only with a bounded temporary
+  filesystem, catching accidental runtime writes before deployment.
+- Documented the read-only container invocation in deployment and security
+  guidance for operators.
+- Added least-privilege container smoke coverage with all Linux capabilities
+  dropped and `no-new-privileges` enabled.
+- Added weekly Dependabot coverage for the digest-pinned Docker base image,
+  alongside workflow-action and npm metadata updates.
+- Updated the digest-pinned production container baseline from Node 20 to
+  Node 22 while retaining the existing Node 18/20/22 compatibility matrix.
+- Added a type-specific, fail-closed Obsidian frontmatter contract that
+  rejects unknown keys, incompatible fields, and malformed read-only metadata
+  before projection edits can reach the graph.
+- Added crash-consistent graph-store write ordering: ordinary mutations commit
+  the newest graph before undo history, while destructive clears preserve the
+  undo snapshot before removing graph state.
+- Added static DOM and ARIA contract checks for unique IDs and resolvable
+  accessibility references in the public workbench.
+- Fixed health validation bounds for the complete 15,500-item live-plus-
+  reusable extractor-guidance inventory, keeping runtime validation aligned
+  with the published health schema.
+- Made every runtime health-count limit part of the exported contract audit
+  and declared the previously implicit graph, provenance, review, learning,
+  and integrity counts in `health.schema.json`.
+- Extended exhaustive health-contract parity to percentage and boolean
+  diagnostics, including provenance, source-review, evidence-grounding, and
+  redaction fields.
+- Added schema-integrity validation that rejects duplicate JSON object keys
+  before published contracts are parsed by the runtime audit.
+- Corrected health maxima for orphaned and ambiguous provenance references to
+  include direct references plus all retained evidence records.
+- Closed health validation gaps for emitted grounding, dropped-item, review,
+  ambiguity, and source-quality diagnostics.
+- Added cross-field health invariants for graph partitions, support totals,
+  source-quality counts, feedback retention, and evidence grounding.
+- Bounded reviewed-example fields before evaluation matching and fingerprinting,
+  including identities, aliases, evidence, and provenance references.
+- Reserved bounded feedback-export capacity for current reviewed decisions so
+  detached learning memory cannot hide a newer human correction.
+- Made bounded feedback exports deterministic by review freshness, preventing
+  arbitrary learning-memory array order from evicting newer corrections.
+- Made empty Obsidian vault exports byte-stable by using the graph domain's
+  deterministic epoch timestamp instead of the wall clock.
+- Made direct Markdown projections canonicalize set-like graph collections,
+  keeping downloads byte-stable when equivalent graph arrays are reordered.
+- Added a dependency-free runtime/schema contract audit that fails when
+  public graph, feedback, diff, JSON-LD, extractor-request, or vault-manifest
+  bounds drift from `graph-core.js`.
+- Made the extraction server enforce the closed extractor-request root,
+  document, and feedback shapes instead of silently discarding unknown fields.
+- Added omission diagnostics to bounded feedback exports and an explicit
+  confirmation before importing a partial feedback dataset.
+- Added a `reviewQueueTruncated` health diagnostic so large graphs disclose
+  when lower-priority review candidates are outside the bounded queue.
+- Tightened health-report validation to reject malformed boolean diagnostics
+  before reports reach automation or promotion gates.
+- Made the evaluation CLI reject feedback exports marked as partial, preventing
+  incomplete review datasets from being scored as complete benchmarks.
+- Added graph, health, diff, and UI diagnostics for evidence records and
+  provenance references omitted by nested safety limits, and made source
+  merges/replacements refuse any truncated import until the original export is
+  restored.
+- Added bounded graph-integrity diagnostics to JSON-LD projections so external
+  consumers can see truncation, dropped-entry, ambiguity, and contradiction
+  state alongside the verified graph fingerprint.
+- Made browser and server extractor boundaries reject oversized nested evidence,
+  evidence text, and provenance-reference collections before normalization,
+  preventing provider output from silently losing grounding.
+- Made the browser extractor reject oversized reviewed-guidance collections or
+  serialized feedback before making a request, preventing partial learning
+  context from reaching a provider.
+- Added a centralized graph-store integrity guard that rejects mutations to
+  truncated imports while allowing a clean original-export restore.
+- Added actionable workbench messaging for integrity-blocked writes, directing
+  users to restore the original export instead of retrying a guaranteed failure.
+- Added explicit omission counts to bounded Mermaid Markdown views so external
+  Obsidian projections distinguish the visual safety cap from complete indexes.
+- Aligned graph normalization and provider responses with the published
+  eight-record evidence bound, disclosing imported evidence records omitted
+  beyond that retained representation.
+- Quantified live graph-rendering omissions in the workbench summary so
+  viewport safety caps are distinguishable from missing graph data.
+- Extended the runtime/schema contract audit to cover JSON-LD evidence
+  cardinality, keeping semantic projections tied to the retained graph bound.
+- Extended evidence-bound contract checks to diff and health projections,
+  preventing downstream artifact drift.
+- Added a health CLI gate for bounded review-queue truncation, allowing
+  production automation to fail when actionable review work is incomplete.
+- Added a health CLI gate for sampled evidence grounding, allowing production
+  automation to reject coverage metrics derived from incomplete inspection.
+- Added a health CLI gate for truncated extractor guidance, allowing learning
+  evaluations to require the complete retained review context.
+- Promoted health-gate bounds into the shared runtime/schema contract audit so
+  automation thresholds cannot drift from their published schema limits.
+- Made the health CLI consume the same exported runtime gate limits, removing a
+  second independently maintained threshold table.
+- Added the new completeness gates to the production security checklist so
+  deployments can reject sampled review, grounding, and learning diagnostics.
+- Made the contract checker iterate every exported health-gate limit, so new
+  automation thresholds cannot be added without a matching schema bound.
+- Fixed bounded server note reads to decode UTF-8 incrementally, so valid
+  multibyte text at a read boundary is retained without weakening malformed
+  encoding rejection.
+- Required runtime UTF-8 character windows to be finite and positive, closing
+  an unbounded-read fallback if a caller supplies an invalid limit.
+- Added a pre-serialization source/evidence budget for graph, backup, and
+  JSON-LD exports so oversized payloads fail before duplicating large text in a
+  second in-memory string.
+- Made the command-line server fail extraction closed on non-loopback hosts
+  without `EXTRACTOR_AUTH_TOKEN`, while keeping unauthenticated loopback
+  development convenient.
+- Enforced the aggregate source-text budget during graph imports, retaining
+  the newest deterministic documents and reporting older source records
+  omitted by the bound.
+- Prevented new source merges and replacements from mutating a graph whose
+  imported source text was already truncated, requiring restoration of the
+  original export first.
+- Extended container CI smoke coverage to verify that non-loopback extraction
+  is unavailable without configured authentication.
+- Applied the same non-loopback fail-closed default to operational metrics
+  when `METRICS_AUTH_TOKEN` is absent.
+- Bounded localStorage and IndexedDB hydration, native storage events, and
+  durable writes with the same cross-tab value ceiling.
+- Preserved failed graph and history rollback inputs in recovery snapshots when
+  storage errors prevent atomic restoration.
+- Routed browser cross-tab updates through the storage adapter alone, removing
+  the duplicate raw listener that could render stale graph state before the
+  freshness check.
+- Made offline navigations fall back to the cached app shell after transient
+  non-OK network responses, not only after transport failures.
+- Treated service-worker cache read failures as cache misses so an unavailable
+  Cache API cannot reject a recoverable network response.
+- Bounded service-worker static response bodies as well as response headers, so
+  stalled or oversized assets fall back to the cached shell.
+- Made stale cross-tab graph repair use optimistic version and fingerprint
+  preconditions so concurrent newer commits cannot be overwritten.
+- Extended source/evidence export preflights to Markdown, Obsidian, feedback,
+  and revision-diff projections before their large strings are serialized.
+- Hardened the Obsidian ZIP writer with file-count, file-shape, and archive-limit
+  validation before allocating archive parts.
+- Added an explicit abort race around remote extractor fetches so ignored
+  cancellation signals cannot leave requests pending beyond the configured
+  timeout.
+- Extended the remote extractor timeout race through non-streaming
+  `arrayBuffer()` response reads, preventing a stalled provider body from
+  outliving the request timeout.
+- Applied the same timeout race to browser learning-note and release-metadata
+  `arrayBuffer()` reads, with a focused smoke test for permanently pending
+  response bodies.
+- Made browser and remote streamed response reads race cancellation signals,
+  so adapters that ignore `reader.cancel()` cannot leave requests pending.
+- Routed service-worker install precaching through the bounded fetch and
+  response-body checks, preventing stalled or oversized shell assets from
+  hanging first install.
+- Capped exported server reader arguments at the shared per-asset ceiling,
+  closing the finite-but-enormous limit bypass as well as the infinite case.
+- Made retryable remote response cleanup non-blocking, preventing a hanging
+  provider `body.cancel()` promise from suppressing bounded retries.
+- Made oversized browser and remote stream cleanup non-blocking, preventing
+  a hanging `reader.cancel()` from masking the response-size rejection.
+- Added bounded IndexedDB write/delete transaction timeouts so stalled durable
+  operations fall back visibly instead of leaving `flush()` pending forever.
+- Added bounded service-worker Cache API operations so cache pressure cannot
+  hold fresh responses, installation, or activation indefinitely.
+- Fixed repeated manual confirmation of an existing relation so its feedback
+  history increments consistently with concept review and new relation edits.
+- Made oversized feedback-file imports fail closed instead of silently
+  slicing human decisions beyond the published dataset bound.
+- Made evaluation validation recompute recall, suppression, and evidence
+  coverage from counts, rejecting fabricated promotion metrics.
+- Required bounded, parseable evaluation timestamps so promotion artifacts retain
+  machine-readable provenance.
+- Required full RFC3339-style evaluation date-times instead of accepting
+  ambiguous date-only provenance.
+- Aligned runtime evaluation validation with the closed schema by rejecting
+  unknown fields at every report layer.
+- Made oversized reviewed datasets fail closed before evaluation matching,
+  preventing silent benchmark truncation under a full dataset fingerprint.
+- Made oversized candidate concept and relation collections fail closed before
+  evaluation normalization instead of scoring silently truncated output.
+- Made evaluation reject malformed or unreviewed benchmark examples instead of
+  silently filtering them from the scored dataset.
+- Made graph writes, undo, restore, and clear fail closed when their raw
+  pre-mutation storage snapshot cannot be read, preventing destructive rollback
+  from unknown state.
+- Added runtime validation for privacy-safe health reports so malformed counts,
+  derived relationships, timestamps, and review metadata fail closed before
+  CLI automation consumes them.
+- Extended health validation to cover CLI quality-gate thresholds and
+  pass/fail consistency.
+- Capped oversized graph-store configuration values so custom undo-history and
+  persisted-state limits cannot bypass the module’s memory and storage bounds.
+- Added UTF-8 byte accounting to persisted graph limits so Unicode-heavy state
+  cannot bypass the safety budget through a character-count mismatch.
+- Bounded Pages learning-note reads after preflight so a file-size race cannot
+  turn a valid deployment asset into an unbounded build-memory read.
+- Made release asset checks resolve real paths and reject public symlinks that
+  escape the repository, matching runtime and Pages containment guarantees.
+- Rejected malformed UTF-8 at CLI, HTTP, browser note, and remote-extractor
+  text boundaries instead of silently replacing bytes.
+- Applied the same fatal decoding rule to non-streaming `arrayBuffer()`
+  fallbacks used by browser and remote extraction clients.
+- Routed browser document and graph-file imports through bounded fatal UTF-8
+  decoding before parsing.
+- Made browser file and learning-note response fallbacks fail closed when byte
+  access is unavailable, avoiding replacement-decoded text.
+- Made remote extractor responses without raw byte access fail closed instead
+  of using replacement-decoded `response.json()` fallbacks.
+- Made browser document and feedback imports use Unicode-safe byte envelopes
+  before applying their exact decoded character limits.
+- Connected browser learning-note timeouts to their active response readers so
+  stalled bodies are canceled instead of remaining live after a request abort.
+- Rejected oversized extractor feedback arrays before mapping or serializing
+  their entries, reducing input-amplification pressure at the HTTP boundary.
+- Aligned gateway feedback validation with the browser adapter by rejecting
+  duplicate aliases before provider requests.
+- Aligned feedback, diff, and JSON-LD schemas with runtime alias
+  canonicalization by requiring unique alias arrays.
+- Applied the same canonical uniqueness rule to exported provenance source
+  references.
+- Isolated the durable storage pending-write marker from BroadcastChannel
+  synchronization so internal recovery bookkeeping cannot enter graph state.
+- Bounded and type-checked cross-tab BroadcastChannel values before they enter
+  browser storage or subscriber notifications.
+- Added a bounded key-name check to cross-tab storage messages before they reach
+  the browser storage map.
+- Made fallback storage clearing namespace-safe so it cannot delete unrelated
+  localStorage data from the hosting origin.
+- Made durable storage clearing include keys still represented only by the
+  pending-write recovery marker.
+- Aligned Node learning-note rendering and readiness with the same fatal
+  UTF-8 contract used by Pages publication.
+- Capped recovery snapshots so oversized malformed state cannot be duplicated
+  into a second unsafe storage payload.
+- Surfaced suppressed recovery captures in the workbench with a direct backup
+  action instead of hiding the safety refusal.
+- Preflighted the aggregate Pages source-asset budget before loading learning-note contents, preventing large valid note collections from exhausting build memory before the final artifact check.
+- Increased the container readiness probe window to 10 seconds so bounded static startup validation does not flap unhealthy on slower hosts.
+- Canonicalized service-worker shell cache keys to pathnames, and excluded query-bearing responses from writes, so arbitrary variants cannot create or overwrite duplicate cached assets.
+- Kept unknown same-origin navigations eligible for offline index fallback without caching arbitrary successful paths, preventing service-worker cache growth from unbounded routes.
+- Aligned backup fingerprints with the newest retained undo-history window so oversized imports cannot authenticate discarded history as if it were restored.
+- Refused Pages output paths that overlap published source assets, preventing an invalid custom destination from deleting notes before the build fails.
+- Made release validation enforce the same 10 MB per-asset publication limit as Node serving and Pages builds.
+- Escaped enum-derived status and source-quality labels in workbench HTML alongside user-authored graph text.
+- Retained the newest deterministic source window when normalizing oversized document imports, preventing old sources from crowding out newly ingested knowledge.
+- Implemented newest-source retention with bounded intermediate memory, preserving import safety for unusually large document arrays.
+- Bounded document identity inputs used by newest-source selection before timestamp and tie-break comparison.
+- Precomputed bounded document retention keys once per candidate, avoiding repeated large-text hashing during import selection.
+- Made feedback dataset imports atomic at the graph revision ceiling, preventing early decisions from being committed when later entries cannot fit.
+- Added a final fail-closed revision guard to Obsidian feedback batches so a future version-boundary failure cannot report a successful partial mutation.
+- Made JSON-LD entity-ID escaping unambiguous so literal IDs cannot collide with IDs containing encoded punctuation.
+- Added shared runtime validation for evaluation artifacts, rejecting impossible counts, inconsistent aggregate metrics, incomplete freshness diagnostics, and oversized promotion reports before comparison.
+- Align malformed-learning diagnostics with the same newest retained window used by normalization, preventing integrity reports from describing evicted entries.
+- Preserve the freshest reusable learning examples by review timestamp when bounded extractor guidance must reserve capacity for current reviewed graph items.
+- Added integrity and health diagnostics for clipped document and evidence
+  text during graph normalization, making content loss visible and gateable
+  alongside collection truncation.
+- Explained collection and text-level import truncation in the live health
+  strip so users can distinguish omitted records from clipped source material.
+- Added bounded diagnostics for contradictory review statuses found while
+  duplicate concept or relation records are normalized, including health and
+  live-workbench warnings.
+- Included contradictory-review diagnostics in Markdown/Obsidian projections
+  and revision-diff previews so external views retain the same audit trail.
+- Updated the revision-diff schema and tests to accept contradictory-review
+  identity changes emitted by the normalized graph diff.
+- Added clipped document/evidence text counters to the revision-diff schema so
+  integrity-only diffs remain valid for standard JSON Schema validators.
+- Expanded the evaluation-comparison bounds to cover all emitted quality
+  metrics and regression names, keeping promotion reports schema-valid.
+- Made the evaluation comparison CLI import-safe so tests and automation can
+  reuse its promotion function without triggering command-line usage failures.
+- Restricted extractor guidance to the declared request fields, preventing
+  evidence-bearing reusable memory from leaking into or invalidating provider
+  requests.
+- Added the same strict feedback compaction at the remote adapter boundary, so
+  direct callers cannot send malformed or evidence-bearing hints upstream.
+- Added a serialized UTF-8 request-size guard so Unicode-heavy extraction
+  requests fail locally before crossing the server’s 2 MB body boundary.
+- Made the backup schema identifier file-relative so standard validators can
+  resolve its bundled graph reference without attempting a network fetch.
+- Shared the extractor adapter’s 2 MB request-byte limit with the server so
+  client and gateway bounds cannot drift independently.
+- Centralized the extractor feedback-label length bound in the graph contract,
+  keeping adapter and server validation aligned.
+- Reused that same graph constant for normalized concept, alias, and relation
+  endpoint labels, eliminating duplicated domain truncation literals.
+- Applied the shared concept-label bound to Obsidian alias parsing as well,
+  keeping external corrections consistent with graph normalization.
+- Abort incomplete extraction uploads immediately when the client closes the
+  request stream, avoiding timeout-sized resource retention for truncated
+  bodies.
+- Surface cross-tab localStorage and BroadcastChannel changes through the
+  fallback storage adapter when IndexedDB is unavailable, keeping the
+  workbench synchronized in degraded persistence environments.
+- Keep undo history intact when a quota fallback cannot write the replacement
+  graph, and restore graph/history keys independently during rollback.
+- Make remote response-stream cancellation fail closed even when a provider
+  reader ignores or throws during cancellation.
+- Bound simultaneous server-side provider extractions and expose capacity
+  rejections through metrics, preventing long-running requests from exhausting
+  provider resources.
+- Bound the GitHub Pages deployment job to 20 minutes so stalled publication
+  cannot consume CI capacity indefinitely.
+- Reserve bounded extractor-guidance capacity for current reviewed graph items
+  so a full historical learning ledger cannot completely crowd out new live
+  representation decisions.
+- Reject extraction requests early when provider capacity is already full,
+  before buffering their request bodies, while retaining a race-safe final
+  capacity check after validation.
+- Expose the configured extractor concurrency ceiling in operational metrics,
+  making capacity incidents diagnosable without process inspection.
+- Add accessible names and live-region semantics to graph health diagnostics
+  and the dynamic review queue.
+- Give the live review queue an explicit region role so its accessible name is
+  exposed consistently across assistive technologies.
+- Map remote source-replacement cancellation errors to the explicit
+  source-preserved message instead of exposing a generic extractor failure.
+- Make single-document cancellation explicitly disclose that no graph changes
+  were written.
+- Rejected relation label edits that would collide with an existing
+  same-endpoint relation instead of silently collapsing semantic edges.
+- Projection feedback imports now report malformed direct feedback items as
+  skipped, keeping the shared Obsidian mutation boundary auditable when a batch
+  contains both valid and invalid entries.
+- Routed bounded evidence-grounding failures into the affected concept or
+  relation's review-queue candidate, making paraphrased evidence actionable
+  without exposing source text or evidence quotes in health exports.
+- Made programmatic server idle waits time-bounded when a provider ignores
+  cancellation, while keeping in-flight metrics truthful until the provider
+  promise actually settles.
+- Made standalone shutdown return a non-zero exit when its bounded provider
+  drain expires instead of reporting a clean stop.
+- Refreshed review timestamps for substantive Obsidian corrections so exported
+  stale frontmatter cannot suppress newly imported learning, while older
+  projections cannot roll newer review time backward.
+- Reused one bounded graph inspection for the live health strip and review queue,
+  avoiding duplicate evidence-grounding scans during a workbench render.
+- Preserved malformed or over-capacity undo history supplied by backup restores
+  before applying the local history bound.
+- Preserved imported history evicted when backup restore also retains the
+  current graph as an undo snapshot.
+- Refreshed source review time for substantive title, URI, and quality metadata
+  edits when no replacement review date was explicitly supplied.
+- Reused the emitted health report as the gate input in the health CLI, avoiding
+  a second full normalization and grounding pass on large graphs.
+- Made pending IndexedDB-write generations instance-unique so rapid same-key
+  writes from separate tabs cannot clear one another's recovery marker.
 - Equal-timestamp learning conflicts now use a stable canonical tie-break instead
   of depending on import order.
 - Canonicalized live reviewed-concept and relation ordering in extractor
@@ -28,6 +397,65 @@ All notable changes to LLM Field Notes are documented here.
   the order of evidence records themselves.
 - Canonicalized evidence record ordering only for graph fingerprints, preserving
   display context while preventing equivalent imports from changing identity.
+- Deduplicated identical evidence quotes during normalization while retaining
+  the union of their bounded provenance references.
+- Added a separate bounded evidence-input scan budget so duplicate quote prefixes
+  cannot hide later unique evidence while normalization remains resource-limited.
+- Canonicalized Obsidian projection path allocation so sanitized filename
+  collisions cannot swap identities after graph collection reordering.
+- Made complete Obsidian vault graph/Markdown artifacts byte-stable across
+  equivalent document, concept, and relation collection orderings.
+- Reused one canonical graph-export boundary for direct JSON, backups, and
+  JSON-LD so top-level collection order cannot change external artifacts.
+- Made evaluation matching prioritize constrained reviewed identities before
+  overlapping aliases, preventing feedback order from distorting recall.
+- Added cross-tab graph freshness checks so delayed older revisions cannot
+  replace a newer in-memory representation.
+- Bound streaming provider-response reads to the extractor abort signal so
+  canceled model requests stop consuming response data promptly.
+- Added a bounded evaluator matching budget so oversized reviewed datasets fail
+  closed before allocating an unsafe pairwise match matrix.
+- Made Obsidian alias feedback order-independent so equivalent edits do not
+  create spurious graph revisions.
+- Extended graph diffs to expose truncation and malformed-entry diagnostic
+  changes, so data-loss warnings cannot disappear between revisions.
+- Surfaced those integrity-only diff changes in the live workbench revision
+  preview, not only in the downloaded diff JSON.
+- Clarified contradictory-feedback messaging so users can distinguish
+  timestamp freshness from deterministic tie-breaking.
+- Recorded contradictory-feedback resolution in graph revision history so
+  deterministic learning choices remain auditable after import.
+- Upgraded evaluation matching to find maximum one-to-one assignments across
+  overlapping aliases instead of allowing greedy matches to lower recall.
+- Made health reports use one inspection timestamp for stale-review counts and
+  their exported review queue, avoiding boundary-time inconsistencies.
+- Applied the same shared freshness snapshot to the live workbench health strip
+  and review queue.
+- Added a non-sliding 30-second expiry to the live workbench’s graph-derived
+  health, review, and Markdown cache so stale-review status refreshes even when
+  the graph itself is unchanged.
+- Kept timed-out or disconnected provider operations in the in-flight metric
+  until their promises settle, so capacity and graceful-drain telemetry cannot
+  report idle while work is still executing.
+- Preserved over-capacity undo-history payloads in the history recovery
+  snapshot before trimming them to the configured local bound.
+- Made canonical source text authoritative for duplicate detection so custom
+  fingerprint collisions cannot discard distinct documents.
+- Bounded verification CI with a 20-minute job timeout and cancellation of
+  superseded runs to protect shared CI capacity.
+- Added a reduced-motion browser mode that disables persistent animation and
+  shortens transitions for accessibility.
+- Added direct clipboard export for redacted Markdown, making privacy-safe
+  graph sharing easier in issues, chat, and Obsidian.
+- Added non-destructive evidence-grounding diagnostics and an optional
+  `--max-unanchored-evidence` health gate; paraphrases remain available but
+  are no longer indistinguishable from exact source quotes.
+- Made graceful shutdown wait for active provider promises after aborting them,
+  while retaining a bounded five-second force-exit fallback.
+- Threaded one explicit freshness timestamp through health guidance counts and
+  extractor feedback so stale-boundary decisions remain internally consistent.
+- Canonicalized ambiguous source and edge diagnostic ordering so health and
+  recovery exports are stable across equivalent imports.
 - Canonicalized live reviewed-item ordering in feedback exports so graph
   round-trips cannot change bounded training data behind one dataset fingerprint.
 - Made feedback imports apply distinct learning examples in stable recency order
@@ -899,3 +1327,6 @@ All notable changes to LLM Field Notes are documented here.
   URI metadata alongside document text and bounded reviewed feedback.
 - Full smoke, fuzz, storage, projection, evaluator, service-worker, and
   container verification across Node 18, 20, and 22.
+## Unreleased
+
+- Refuse source removal and replacement when imported duplicate source IDs are marked ambiguous, preventing destructive edits against the wrong document.

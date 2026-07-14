@@ -10,6 +10,7 @@ const handlers = new Map();
 const entries = new Map();
 const deletedKeys = [];
 let cacheWritable = true;
+let cacheReadable = true;
 const shellCache = {
   async addAll(assets) {
     for (const asset of assets) {
@@ -28,6 +29,7 @@ const shellCache = {
 };
 const cachesApi = {
   async open() {
+    if (!cacheReadable) throw new Error("cache unavailable");
     return shellCache;
   },
   async match() {
@@ -44,14 +46,18 @@ const cachesApi = {
 let online = true;
 let hanging = false;
 let networkStatus = 200;
+let stalledBody = false;
 let networkCalls = 0;
 let lastFetchOptions = null;
 let claimCalls = 0;
 let skipWaitingCalls = 0;
 const context = {
   URL,
+  Request,
   Set,
   Response,
+  ReadableStream,
+  TextEncoder,
   AbortController,
   setTimeout,
   clearTimeout,
@@ -66,6 +72,13 @@ const context = {
       });
     }
     if (!online) throw new Error("offline");
+    if (stalledBody) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`fresh:${request.url}`));
+        }
+      }), { status: networkStatus });
+    }
     return new Response(`fresh:${request.url}`, { status: networkStatus });
   },
   self: {
@@ -115,6 +128,10 @@ assert(fresh, "shell requests should be intercepted");
 assert.equal(await fresh.text(), `fresh:${new URL("./app.js", location).toString()}`);
 assert(networkCalls > 0, "online shell requests should prefer the network");
 assert.equal(lastFetchOptions?.cache, "no-cache", "online shell requests should revalidate HTTP-cached assets");
+const versionedFresh = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js?cache-bust=online", location).toString() });
+assert.equal(await versionedFresh.text(), `fresh:${new URL("./app.js?cache-bust=online", location).toString()}`);
+assert([...entries.keys()].every((key) => !key.includes("?")), "shell cache keys should ignore query strings to prevent duplicate cache growth");
+assert.equal(await (await shellCache.match(new URL("./app.js", location).toString())).text(), `fresh:${new URL("./app.js", location).toString()}`, "query-bearing shell responses should not overwrite canonical cache content");
 
 cacheWritable = false;
 const freshWithCacheFailure = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./styles.css", location).toString() });
@@ -124,6 +141,15 @@ cacheWritable = true;
 networkStatus = 503;
 const transientHttpFailure = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await transientHttpFailure.text(), `fresh:${new URL("./app.js", location).toString()}`, "cached shell assets should survive transient non-OK network responses");
+cacheReadable = false;
+const cacheReadFailure = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
+assert.equal(cacheReadFailure.status, 503, "cache read failures must preserve a non-OK network response instead of rejecting the fetch event");
+assert.equal(await cacheReadFailure.text(), `fresh:${new URL("./app.js", location).toString()}`, "cache read failures must not discard the network response body");
+cacheReadable = true;
+networkStatus = 200;
+networkStatus = 503;
+const transientNavigationFailure = await dispatchFetch({ method: "GET", mode: "navigate", url: new URL("./unknown-transient-route", location).toString() });
+assert.equal(await transientNavigationFailure.text(), `fresh:${new URL("./index.html", location).toString()}`, "navigations should fall back to the bounded cached app shell after transient non-OK responses");
 networkStatus = 200;
 
 const callsBeforeApi = networkCalls;
@@ -131,15 +157,24 @@ const apiResponse = await dispatchFetch({ method: "GET", mode: "cors", url: new 
 assert.equal(apiResponse, undefined, "API and health requests should bypass the service worker");
 assert.equal(networkCalls, callsBeforeApi, "bypassed requests should not be fetched by the worker");
 
+const unknownNavigationUrl = new URL("./unknown-successful-route", location);
+const unknownNavigation = await dispatchFetch({ method: "GET", mode: "navigate", url: unknownNavigationUrl.toString() });
+assert.equal(await unknownNavigation.text(), `fresh:${unknownNavigationUrl.toString()}`, "unknown navigations should still prefer a fresh network response");
+assert(!entries.has(unknownNavigationUrl.toString()), "unknown navigations must not create unbounded service-worker cache entries");
+
 online = false;
 const offlineShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await offlineShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "offline shell requests should use the updated cache");
 const offlineVersionedShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js?cache-bust=1", location).toString() });
 assert.equal(await offlineVersionedShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "offline shell requests with cache-busting queries should reuse the pathname cache");
 const offlineNavigation = await dispatchFetch({ method: "GET", mode: "navigate", url: new URL("./missing-route", location).toString() });
-assert((await offlineNavigation.text()).startsWith("cached:"), "offline navigation should fall back to the cached index");
+assert.equal(await offlineNavigation.text(), `fresh:${new URL("./index.html", location).toString()}`, "offline navigation should fall back to the bounded cached index");
 hanging = true;
 const stalledShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert((await stalledShell.text()).startsWith("fresh:"), "stalled shell requests should fall back after the network timeout");
+hanging = false;
+stalledBody = true;
+const stalledBodyShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./styles.css", location).toString() });
+assert.equal(await stalledBodyShell.text(), `fresh:${new URL("./styles.css", location).toString()}`, "stalled shell response bodies should fall back after the body timeout");
 
 console.log("service worker smoke ok");

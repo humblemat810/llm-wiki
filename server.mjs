@@ -5,8 +5,8 @@ import { open, realpath, stat } from "node:fs/promises";
 import { closeSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_ID_CHARS, MAX_SOURCE_URI_CHARS, extractGraph, normalizeExtractionForDocument, normalizeSourceUri } from "./graph-core.js";
-import { MAX_FEEDBACK_CHARS, MAX_RESPONSE_BYTES } from "./extractor-adapter.js";
+import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_FEEDBACK_LABEL_CHARS, MAX_ID_CHARS, MAX_SOURCE_URI_CHARS, extractGraph, normalizeExtractionForDocument, normalizeSourceUri } from "./graph-core.js";
+import { MAX_FEEDBACK_CHARS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES } from "./extractor-adapter.js";
 import { FIXED_PUBLIC_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES } from "./scripts/public-assets.mjs";
 import { normalizePublicOrigin } from "./scripts/public-origin.mjs";
 import { buildLearningNotePage, MAX_NOTE_SUMMARY_CHARS } from "./scripts/note-page.mjs";
@@ -17,14 +17,17 @@ const RELEASE_DATE = require("./version.json").date;
 const FEED_UPDATED_AT = /^\d{4}-\d{2}-\d{2}$/.test(RELEASE_DATE)
   ? `${RELEASE_DATE}T00:00:00.000Z`
   : "1970-01-01T00:00:00.000Z";
-const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_BODY_BYTES = MAX_REQUEST_BYTES;
 const MAX_RATE_LIMIT_KEYS = 10000;
+export const DEFAULT_MAX_CONCURRENT_EXTRACTORS = 8;
+const MAX_CONCURRENT_EXTRACTORS = 1024;
 const REQUEST_TIMEOUT_MS = 120000;
 const HEADERS_TIMEOUT_MS = 15000;
 const KEEP_ALIVE_TIMEOUT_MS = 5000;
 const MAX_HEADER_BYTES = 16 * 1024;
 const MAX_CRAWLER_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_FEEDBACK_LABEL_CHARS = 120;
+const MAX_RUNTIME_TEXT_CHARS = Math.floor(MAX_STATIC_ASSET_BYTES / 4);
+const DEFAULT_IDLE_WAIT_TIMEOUT_MS = 5000;
 const READINESS_CACHE_TTL_MS = 5000;
 const EXTRACTION_LATENCY_BUCKETS_MS = [100, 500, 1000, 5000, 30000, 120000];
 const root = fileURLToPath(new URL("./", import.meta.url));
@@ -39,6 +42,7 @@ const types = {
   ".webmanifest": "application/manifest+json"
 };
 const fixedPublicAssets = FIXED_PUBLIC_ASSETS;
+const decodeUtf8 = (bytes) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 
 function discoverLearningNoteAssets(staticRoot) {
   try {
@@ -58,13 +62,27 @@ function fallbackLearningNoteTitle(asset) {
   return asset.slice("notes/".length, -".md".length).replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-function readBoundedUtf8(filePath, maxChars) {
-  const byteLimit = Math.max(1, Math.floor(maxChars) * 4);
+export function readBoundedUtf8(filePath, maxChars) {
+  const numericLimit = Number(maxChars);
+  if (!Number.isFinite(numericLimit) || numericLimit < 1 || numericLimit > MAX_RUNTIME_TEXT_CHARS) {
+    throw new RangeError(`A finite character limit from 1 to ${MAX_RUNTIME_TEXT_CHARS} is required.`);
+  }
+  const characterLimit = Math.floor(numericLimit);
+  const byteLimit = characterLimit * 4 + 4;
   const file = openSync(filePath, "r");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let content = "";
+  let offset = 0;
   try {
-    const buffer = Buffer.alloc(byteLimit);
-    const bytesRead = readSync(file, buffer, 0, byteLimit, 0);
-    return buffer.subarray(0, bytesRead).toString("utf8").slice(0, maxChars);
+    while (offset < byteLimit) {
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, byteLimit - offset));
+      const bytesRead = readSync(file, buffer, 0, buffer.length, offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+      content += decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+      if (content.length >= characterLimit) return content.slice(0, characterLimit);
+    }
+    return `${content}${decoder.decode()}`.slice(0, characterLimit);
   } finally {
     closeSync(file);
   }
@@ -72,7 +90,9 @@ function readBoundedUtf8(filePath, maxChars) {
 
 export async function readBoundedFile(filePath, maxBytes) {
   const numericLimit = Number(maxBytes);
-  if (!Number.isFinite(numericLimit) || numericLimit < 1) throw new RangeError("A finite positive file-size limit is required.");
+  if (!Number.isFinite(numericLimit) || numericLimit < 1 || numericLimit > MAX_STATIC_ASSET_BYTES) {
+    throw new RangeError(`A finite file-size limit from 1 to ${MAX_STATIC_ASSET_BYTES} is required.`);
+  }
   const byteLimit = Math.floor(numericLimit);
   const handle = await open(filePath, "r");
   const chunks = [];
@@ -330,8 +350,28 @@ function safeDiagnosticCode(value, fallback = "EXTRACTOR_FAILURE") {
   return /^[A-Z][A-Z0-9_:-]*$/.test(code) ? code : fallback;
 }
 
+const hasOnlyKeys = (value, allowedKeys) => (
+  value
+  && typeof value === "object"
+  && !Array.isArray(value)
+  && Object.keys(value).every((key) => allowedKeys.has(key))
+);
+const EXTRACTOR_REQUEST_KEYS = new Set(["operation", "schema", "feedbackFormat", "document", "feedback"]);
+const EXTRACTOR_DOCUMENT_KEYS = new Set(["title", "uri", "text"]);
+const EXTRACTOR_FEEDBACK_KEYS = new Set([
+  "kind",
+  "id",
+  "label",
+  "aliases",
+  "source",
+  "sourceLabel",
+  "target",
+  "targetLabel",
+  "status"
+]);
+
 function isFeedbackHint(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!hasOnlyKeys(value, EXTRACTOR_FEEDBACK_KEYS)) return false;
   if (!["concept", "relation"].includes(value.kind) || !["accepted", "rejected"].includes(value.status)) return false;
   if (typeof value.id !== "string" || !value.id.trim() || value.id.length > MAX_ID_CHARS) return false;
   for (const key of ["label", "sourceLabel", "targetLabel"]) {
@@ -340,7 +380,12 @@ function isFeedbackHint(value) {
   for (const key of ["source", "target"]) {
     if (value[key] !== undefined && (typeof value[key] !== "string" || value[key].length > MAX_ID_CHARS)) return false;
   }
-  if (value.aliases !== undefined && (!Array.isArray(value.aliases) || value.aliases.length > 20 || value.aliases.some((alias) => typeof alias !== "string" || alias.length > MAX_FEEDBACK_LABEL_CHARS))) return false;
+  if (value.aliases !== undefined && (
+    !Array.isArray(value.aliases)
+    || value.aliases.length > 20
+    || new Set(value.aliases).size !== value.aliases.length
+    || value.aliases.some((alias) => typeof alias !== "string" || alias.length > MAX_FEEDBACK_LABEL_CHARS)
+  )) return false;
   return true;
 }
 
@@ -395,7 +440,7 @@ function discardRequestBody(request, response) {
   request.resume();
 }
 
-function readBody(request, response) {
+export function readBody(request, response) {
   return new Promise((resolveBody, reject) => {
     const chunks = [];
     let size = 0;
@@ -405,6 +450,7 @@ function readBody(request, response) {
       request.removeListener("data", onData);
       request.removeListener("end", onEnd);
       request.removeListener("aborted", onAborted);
+      request.removeListener("close", onClose);
       request.removeListener("error", onError);
     };
     const settle = (callback, value) => {
@@ -424,10 +470,22 @@ function readBody(request, response) {
       chunks.push(chunk);
     };
     const onEnd = () => {
-      if (tooLarge) settle(reject, Object.assign(new Error("Request body exceeds the 2 MB limit."), { statusCode: 413 }));
-      else settle(resolveBody, Buffer.concat(chunks).toString("utf8"));
+      if (tooLarge) {
+        settle(reject, Object.assign(new Error("Request body exceeds the 2 MB limit."), { statusCode: 413 }));
+        return;
+      }
+      try {
+        settle(resolveBody, new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+      } catch {
+        settle(reject, Object.assign(new Error("Request body is not valid UTF-8."), { statusCode: 400 }));
+      }
     };
     const onAborted = () => settle(reject, Object.assign(new Error("Request was aborted."), { code: "REQUEST_ABORTED" }));
+    const onClose = () => {
+      if (!request.readableEnded && !request.complete) {
+        settle(reject, Object.assign(new Error("Request was aborted."), { code: "REQUEST_ABORTED" }));
+      }
+    };
     const onError = (error) => settle(reject, error);
     if (request.aborted) {
       settle(reject, Object.assign(new Error("Request was aborted."), { code: "REQUEST_ABORTED" }));
@@ -442,6 +500,7 @@ function readBody(request, response) {
     request.on("data", onData);
     request.once("end", onEnd);
     request.once("aborted", onAborted);
+    request.once("close", onClose);
     request.once("error", onError);
   });
 }
@@ -449,12 +508,15 @@ function readBody(request, response) {
 export function createAppServer({
   staticRoot = root,
   maxRequestsPerMinute = 60,
+  maxConcurrentExtractors = DEFAULT_MAX_CONCURRENT_EXTRACTORS,
   logger = null,
   extractor = ({ title, text, feedback }) => extractGraph(title, text, { feedback }),
   extractorTimeoutMs = 120000,
   extractorAuthToken = process.env.EXTRACTOR_AUTH_TOKEN || "",
   metricsAuthToken = process.env.METRICS_AUTH_TOKEN || "",
-  publicOrigin = process.env.PUBLIC_ORIGIN || ""
+  publicOrigin = process.env.PUBLIC_ORIGIN || "",
+  requireExtractorAuth = false,
+  requireMetricsAuth = false
 } = {}) {
   const safeRoot = resolve(staticRoot);
   const learningNoteAssets = discoverLearningNoteAssets(safeRoot);
@@ -466,19 +528,55 @@ export function createAppServer({
   const requestLimit = Number.isFinite(numericRateLimit) && numericRateLimit >= 0
     ? Math.floor(numericRateLimit)
     : 60;
+  const numericConcurrencyLimit = Number(maxConcurrentExtractors);
+  const concurrencyLimit = Number.isSafeInteger(numericConcurrencyLimit)
+    && numericConcurrencyLimit >= 1
+    && numericConcurrencyLimit <= MAX_CONCURRENT_EXTRACTORS
+    ? numericConcurrencyLimit
+    : DEFAULT_MAX_CONCURRENT_EXTRACTORS;
   if (typeof extractor !== "function") throw new TypeError("The extractor must be a function.");
   const numericExtractorTimeout = Number(extractorTimeoutMs);
   const extractorTimeout = Number.isFinite(numericExtractorTimeout) && numericExtractorTimeout >= 1
     ? Math.min(120000, Math.floor(numericExtractorTimeout))
     : 120000;
   const authToken = typeof extractorAuthToken === "string" ? extractorAuthToken : "";
+  const extractorAuthRequired = requireExtractorAuth === true || Boolean(authToken);
   const metricsToken = typeof metricsAuthToken === "string" ? metricsAuthToken : "";
+  const metricsAuthRequired = requireMetricsAuth === true || Boolean(metricsToken);
   const origin = normalizePublicOrigin(publicOrigin);
   const transportSecurityHeaders = origin.startsWith("https://")
     ? { "strict-transport-security": "max-age=31536000; includeSubDomains" }
     : {};
   const rateLimits = new Map();
   const activeExtractors = new Set();
+  const idleWaiters = new Set();
+  const markExtractorSettled = (controller) => {
+    activeExtractors.delete(controller);
+    if (!activeExtractors.size) {
+      for (const waiter of idleWaiters) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(true);
+      }
+      idleWaiters.clear();
+    }
+  };
+  const waitForIdle = ({ timeoutMs = DEFAULT_IDLE_WAIT_TIMEOUT_MS } = {}) => {
+    if (!activeExtractors.size) return Promise.resolve(true);
+    const numericTimeout = Number(timeoutMs);
+    const boundedTimeout = Number.isFinite(numericTimeout) && numericTimeout >= 0
+      ? Math.min(120000, Math.floor(numericTimeout))
+      : DEFAULT_IDLE_WAIT_TIMEOUT_MS;
+    return new Promise((resolve) => {
+      const waiter = {
+        timer: setTimeout(() => {
+          idleWaiters.delete(waiter);
+          resolve(false);
+        }, boundedTimeout),
+        resolve
+      };
+      idleWaiters.add(waiter);
+    });
+  };
   const processStartedAt = Date.now();
   const metrics = {
     requests: 0,
@@ -487,6 +585,7 @@ export function createAppServer({
     extractionFailures: 0,
     authenticationFailures: 0,
     rateLimited: 0,
+    concurrencyLimited: 0,
     extractionLatencyBuckets: Array(EXTRACTION_LATENCY_BUCKETS_MS.length).fill(0),
     extractionLatencySumMs: 0,
     extractionLatencyCount: 0,
@@ -526,7 +625,7 @@ export function createAppServer({
       }
       for (const asset of learningMapAssets) {
         const notePath = await realpath(resolve(realRoot, asset));
-        const content = (await readBoundedFile(notePath, MAX_STATIC_ASSET_BYTES)).toString("utf8");
+        const content = decodeUtf8(await readBoundedFile(notePath, MAX_STATIC_ASSET_BYTES));
         const noteId = asset.slice("notes/".length, -".md".length);
         const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim()?.slice(0, 200) || fallbackLearningNoteTitle(asset);
         const page = buildLearningNotePage({
@@ -695,7 +794,7 @@ export function createAppServer({
             sendEmpty(response, 413);
             return;
           }
-          const content = (await readBoundedFile(resolvedNote, MAX_STATIC_ASSET_BYTES)).toString("utf8");
+          const content = decodeUtf8(await readBoundedFile(resolvedNote, MAX_STATIC_ASSET_BYTES));
           const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim()?.slice(0, 200) || fallbackLearningNoteTitle(noteAsset);
           const body = buildLearningNotePage({
             id: noteId,
@@ -728,7 +827,11 @@ export function createAppServer({
         return;
       }
       if (["GET", "HEAD"].includes(request.method) && requestPath === "/metrics") {
-        if (!hasValidBearerToken(request, metricsToken)) {
+        if (metricsAuthRequired && !metricsToken) {
+          sendJson(response, 503, { error: "Metrics authentication is not configured." }, { "retry-after": "60" }, request.method === "HEAD");
+          return;
+        }
+        if (metricsAuthRequired && !hasValidBearerToken(request, metricsToken)) {
           sendJson(response, 401, { error: "Authentication is required for metrics." }, { "www-authenticate": "Bearer" }, request.method === "HEAD");
           return;
         }
@@ -756,6 +859,9 @@ export function createAppServer({
           "# HELP llm_field_notes_rate_limited_total Extraction requests rejected by the in-process limiter.",
           "# TYPE llm_field_notes_rate_limited_total counter",
           `llm_field_notes_rate_limited_total ${metrics.rateLimited}`,
+          "# HELP llm_field_notes_concurrency_limited_total Extraction requests rejected because provider capacity is full.",
+          "# TYPE llm_field_notes_concurrency_limited_total counter",
+          `llm_field_notes_concurrency_limited_total ${metrics.concurrencyLimited}`,
           "# HELP llm_field_notes_extraction_duration_ms Extraction request latency distribution in milliseconds.",
           "# TYPE llm_field_notes_extraction_duration_ms histogram",
           ...EXTRACTION_LATENCY_BUCKETS_MS.map((bucket, index) => `llm_field_notes_extraction_duration_ms_bucket{le="${bucket}"} ${metrics.extractionLatencyBuckets[index]}`),
@@ -765,6 +871,9 @@ export function createAppServer({
           "# HELP llm_field_notes_extractions_in_flight Current provider extraction operations.",
           "# TYPE llm_field_notes_extractions_in_flight gauge",
           `llm_field_notes_extractions_in_flight ${activeExtractors.size}`,
+          "# HELP llm_field_notes_extractor_concurrency_limit Configured maximum provider extraction operations.",
+          "# TYPE llm_field_notes_extractor_concurrency_limit gauge",
+          `llm_field_notes_extractor_concurrency_limit ${concurrencyLimit}`,
           "# HELP llm_field_notes_build_info Build metadata for the running application.",
           "# TYPE llm_field_notes_build_info gauge",
           `llm_field_notes_build_info{version="${APP_VERSION}"} 1`,
@@ -818,6 +927,15 @@ export function createAppServer({
           sendJson(response, status, payload, { "x-request-id": requestId, ...extraHeaders });
           safeLog({ requestId, status, durationMs, route: "extract-graph", ...logFields });
         };
+        const rejectForCapacity = () => {
+          metrics.concurrencyLimited += 1;
+          respondJson(
+            503,
+            { error: "Extractor capacity is temporarily full. Try again shortly." },
+            { "retry-after": "1" },
+            { error: "EXTRACTOR_CAPACITY" }
+          );
+        };
         if (!hasAllowedRequestOrigin(request, origin)) {
           discardRequestBody(request, response);
           respondJson(403, { error: "The extraction endpoint only accepts same-origin browser requests." }, {}, { error: "ORIGIN_REJECTED" });
@@ -844,7 +962,12 @@ export function createAppServer({
           respondJson(429, { error: "Extraction rate limit exceeded." }, { "retry-after": String(retryAfter) });
           return;
         }
-        if (!hasValidBearerToken(request, authToken)) {
+        if (extractorAuthRequired && !authToken) {
+          discardRequestBody(request, response);
+          respondJson(503, { error: "Extraction authentication is not configured." }, { "retry-after": "60" }, { error: "AUTH_NOT_CONFIGURED" });
+          return;
+        }
+        if (extractorAuthRequired && !hasValidBearerToken(request, authToken)) {
           discardRequestBody(request, response);
           metrics.authenticationFailures += 1;
           respondJson(401, { error: "Authentication is required for extraction." }, { "www-authenticate": "Bearer" }, { error: "AUTH_REQUIRED" });
@@ -856,28 +979,33 @@ export function createAppServer({
           respondJson(415, { error: "The extraction endpoint requires application/json." });
           return;
         }
+        if (activeExtractors.size >= concurrencyLimit) {
+          discardRequestBody(request, response);
+          rejectForCapacity();
+          return;
+        }
         let body;
         try {
           body = JSON.parse(await readBody(request, response));
         } catch (error) {
-          if (request.aborted || response.destroyed || error?.code === "REQUEST_ABORTED") return;
+          if ((request.aborted || response.destroyed || error?.code === "REQUEST_ABORTED") && error?.statusCode !== 413) return;
           respondJson(error?.statusCode || 400, { error: error instanceof Error ? error.message : "Invalid JSON." });
           return;
         }
         const document = body?.document;
         const rawFeedback = Array.isArray(body?.feedback) ? body.feedback : null;
-        const compactFeedback = rawFeedback?.map(compactFeedbackHint) || null;
-        const feedbackSerialized = rawFeedback ? JSON.stringify(rawFeedback) : null;
+        const feedbackWithinCount = Array.isArray(rawFeedback) && rawFeedback.length <= MAX_FEEDBACK_EXAMPLES;
+        const compactFeedback = feedbackWithinCount ? rawFeedback.map(compactFeedbackHint) : null;
+        const feedbackSerialized = feedbackWithinCount ? JSON.stringify(rawFeedback) : null;
         const rawDocumentUri = document?.uri;
         const normalizedDocumentUri = typeof rawDocumentUri === "string" && rawDocumentUri.trim() ? normalizeSourceUri(rawDocumentUri) : null;
         const invalidDocumentUri = rawDocumentUri !== undefined && rawDocumentUri !== null
           && (typeof rawDocumentUri !== "string" || (rawDocumentUri.trim() && !normalizedDocumentUri));
-        const validFeedback = Array.isArray(rawFeedback)
-          && rawFeedback.length <= MAX_FEEDBACK_EXAMPLES
+        const validFeedback = feedbackWithinCount
           && compactFeedback.every(Boolean)
           && typeof feedbackSerialized === "string"
           && feedbackSerialized.length <= MAX_FEEDBACK_CHARS;
-        if (body?.operation !== "extract-graph" || body?.schema !== GRAPH_SCHEMA || body?.feedbackFormat !== FEEDBACK_FORMAT || !validFeedback || !document || typeof document.title !== "string" || document.title.length > 200 || (document.uri !== undefined && (typeof document.uri !== "string" || document.uri.length > MAX_SOURCE_URI_CHARS)) || invalidDocumentUri || typeof document.text !== "string") {
+        if (!hasOnlyKeys(body, EXTRACTOR_REQUEST_KEYS) || !hasOnlyKeys(document, EXTRACTOR_DOCUMENT_KEYS) || body?.operation !== "extract-graph" || body?.schema !== GRAPH_SCHEMA || body?.feedbackFormat !== FEEDBACK_FORMAT || !validFeedback || !document || typeof document.title !== "string" || document.title.length > 200 || (document.uri !== undefined && (typeof document.uri !== "string" || document.uri.length > MAX_SOURCE_URI_CHARS)) || invalidDocumentUri || typeof document.text !== "string") {
           const status = Array.isArray(rawFeedback) && typeof feedbackSerialized === "string" && feedbackSerialized.length > MAX_FEEDBACK_CHARS ? 413 : 400;
           respondJson(status, { error: status === 413 ? "Reviewed feedback exceeds the 500,000 character limit." : "Expected the llm-field-notes extract-graph request contract." });
           return;
@@ -886,10 +1014,15 @@ export function createAppServer({
           respondJson(400, { error: "Document text must be between 40 and 300,000 characters." });
           return;
         }
+        if (activeExtractors.size >= concurrencyLimit) {
+          rejectForCapacity();
+          return;
+        }
         let timeoutHandle;
         let requestAbortHandler;
         let responseCloseHandler;
         let controller;
+        let extractionSettled = false;
         try {
           controller = new AbortController();
           activeExtractors.add(controller);
@@ -900,14 +1033,27 @@ export function createAppServer({
           request.once("aborted", requestAbortHandler);
           response.once("close", responseCloseHandler);
           if (request.aborted || response.destroyed) controller.abort();
-          const extractionPromise = Promise.resolve().then(() => extractor({
-            document: { title: document.title, text: document.text, ...(normalizedDocumentUri ? { uri: normalizedDocumentUri } : {}) },
-            title: document.title,
-            text: document.text,
-            feedback: compactFeedback,
-            requestId,
-            signal: controller.signal
-          }));
+          const extractionPromise = Promise.resolve()
+            .then(() => extractor({
+              document: { title: document.title, text: document.text, ...(normalizedDocumentUri ? { uri: normalizedDocumentUri } : {}) },
+              title: document.title,
+              text: document.text,
+              feedback: compactFeedback,
+              requestId,
+              signal: controller.signal
+            }))
+            .then(
+              (value) => {
+                extractionSettled = true;
+                markExtractorSettled(controller);
+                return value;
+              },
+              (error) => {
+                extractionSettled = true;
+                markExtractorSettled(controller);
+                throw error;
+              }
+            );
           const rawExtraction = await Promise.race([
             extractionPromise,
             new Promise((_, reject) => {
@@ -958,7 +1104,7 @@ export function createAppServer({
           if (timeoutHandle) clearTimeout(timeoutHandle);
           if (requestAbortHandler) request.removeListener("aborted", requestAbortHandler);
           if (responseCloseHandler) response.removeListener("close", responseCloseHandler);
-          if (controller) activeExtractors.delete(controller);
+          if (controller && extractionSettled) markExtractorSettled(controller);
         }
         return;
       }
@@ -1049,6 +1195,7 @@ export function createAppServer({
   server.isDraining = false;
   server.getMetrics = () => ({
     ...metrics,
+    extractorConcurrencyLimit: concurrencyLimit,
     responsesByStatus: Object.fromEntries(metrics.responsesByStatus),
     extractionLatencyBuckets: [...metrics.extractionLatencyBuckets],
     extractionsInFlight: activeExtractors.size,
@@ -1057,6 +1204,7 @@ export function createAppServer({
   server.abortActiveExtractors = () => {
     for (const controller of activeExtractors) controller.abort();
   };
+  server.waitForIdle = waitForIdle;
   server.beginDrain = () => {
     if (server.isDraining) return false;
     server.isDraining = true;
@@ -1079,12 +1227,20 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const extractorTimeoutMs = Number.isFinite(configuredExtractorTimeout) && configuredExtractorTimeout >= 1
     ? Math.min(120000, Math.floor(configuredExtractorTimeout))
     : 120000;
+  const configuredConcurrency = Number(process.env.EXTRACTOR_CONCURRENCY);
+  const maxConcurrentExtractors = Number.isSafeInteger(configuredConcurrency) && configuredConcurrency >= 1
+    ? Math.min(MAX_CONCURRENT_EXTRACTORS, configuredConcurrency)
+    : DEFAULT_MAX_CONCURRENT_EXTRACTORS;
+  const loopbackHost = new Set(["127.0.0.1", "::1", "localhost"]).has(host.toLowerCase());
   const server = createAppServer({
     maxRequestsPerMinute,
+    maxConcurrentExtractors,
     extractorTimeoutMs,
     extractorAuthToken: process.env.EXTRACTOR_AUTH_TOKEN || "",
     metricsAuthToken: process.env.METRICS_AUTH_TOKEN || "",
     publicOrigin: process.env.PUBLIC_ORIGIN || "",
+    requireExtractorAuth: !loopbackHost,
+    requireMetricsAuth: !loopbackHost,
     logger: (entry) => console.log(JSON.stringify(entry))
   });
   server.once("error", (error) => {
@@ -1104,9 +1260,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     server.beginDrain?.();
     const forceExit = setTimeout(() => process.exit(1), 5000);
     forceExit.unref();
-    server.close(() => {
+    const closePromise = new Promise((resolve) => server.close(resolve));
+    Promise.all([closePromise, server.waitForIdle?.() || Promise.resolve(true)]).then(([, idle]) => {
       clearTimeout(forceExit);
-      process.exit(0);
+      process.exit(idle ? 0 : 1);
     });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));

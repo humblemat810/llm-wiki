@@ -1,5 +1,92 @@
 import assert from "node:assert/strict";
-import { PENDING_WRITES_KEY, createMemoryStorage, getBrowserStorage } from "../storage-adapter.js";
+import { IDB_OPERATION_TIMEOUT_MS, MAX_BROADCAST_VALUE_CHARS, MAX_STORAGE_KEY_CHARS, PENDING_WRITES_KEY, createMemoryStorage, getBrowserStorage } from "../storage-adapter.js";
+import { MAX_GRAPH_DOCUMENTS } from "../graph-core.js";
+import { MAX_HISTORY_CAPACITY, MAX_PERSISTED_JSON_BYTES, MAX_PERSISTED_JSON_CHARS, MAX_RECOVERY_JSON_CHARS, createGraphStore } from "../graph-store.js";
+
+const boundedConfigStore = createGraphStore(createMemoryStorage(), {
+  historyLimit: Number.MAX_SAFE_INTEGER,
+  maxPersistedJsonChars: Number.MAX_SAFE_INTEGER
+});
+assert.equal(MAX_HISTORY_CAPACITY, 20, "graph-store history capacity should share the graph revision ceiling");
+assert.equal(MAX_PERSISTED_JSON_CHARS, 50 * 1024 * 1024, "graph-store persisted JSON ceiling should remain explicit");
+assert.equal(MAX_PERSISTED_JSON_BYTES, 50 * 1024 * 1024, "graph-store persisted byte ceiling should remain explicit");
+assert.equal(MAX_RECOVERY_JSON_CHARS, Math.floor(MAX_PERSISTED_JSON_BYTES / 4), "graph recovery should use a conservative UTF-8-safe character ceiling");
+assert.equal(boundedConfigStore.write({ schema: "llm-field-notes/graph@1", version: 0, documents: [], nodes: [], edges: [], revisions: [] }), true, "bounded graph-store configuration should remain usable");
+const boundedRecoveryStorage = createMemoryStorage();
+const boundedRecoveryStore = createGraphStore(boundedRecoveryStorage, { recoveryKey: "bounded-recovery", maxRecoveryJsonChars: 32 });
+boundedRecoveryStorage.setItem("llm-field-notes-knowledge-graph", "x".repeat(33));
+boundedRecoveryStore.read();
+assert.equal(boundedRecoveryStore.readRecovery(), null, "oversized recovery captures should be skipped instead of duplicating unsafe payloads");
+assert.equal(boundedRecoveryStore.hasRecoverySuppression(), true, "oversized recovery captures should expose a suppression status");
+assert.equal(boundedRecoveryStore.clearRecovery(), true, "recovery suppression should be clearable through the recovery action");
+assert.equal(boundedRecoveryStore.hasRecoverySuppression(), false, "clearing recovery should clear its suppression status");
+const unicodeBoundedStorage = createMemoryStorage();
+const unicodeBoundedStore = createGraphStore(unicodeBoundedStorage, {
+  maxPersistedJsonChars: 10000,
+  maxPersistedJsonBytes: 500
+});
+assert.equal(unicodeBoundedStore.write({
+  schema: "llm-field-notes/graph@1",
+  version: 0,
+  documents: [{ id: "unicode", title: "Unicode", text: "🙂".repeat(100), fingerprint: "unicode", addedAt: "2026-01-01T00:00:00.000Z" }],
+  nodes: [],
+  edges: [],
+  revisions: []
+}), false, "graph persistence should enforce UTF-8 byte limits even when character limits are not exceeded");
+const partialGraphStorage = createMemoryStorage();
+const partialGraphStore = createGraphStore(partialGraphStorage);
+const partialGraph = {
+  schema: "llm-field-notes/graph@1",
+  documents: Array.from({ length: MAX_GRAPH_DOCUMENTS + 1 }, (_, index) => ({
+    id: `partial-${index}`,
+    title: `Partial ${index}`,
+    text: "partial source"
+  }))
+};
+assert.equal(partialGraphStore.write(partialGraph), true, "an imported partial graph should be persistable before repair");
+const partialMutation = partialGraphStore.read();
+partialMutation.version += 1;
+partialMutation.nodes = [{ id: "new-partial-node", label: "New partial node" }];
+assert.equal(partialGraphStore.write(partialMutation, { expectedVersion: partialGraphStore.read().version }), false, "partial graphs should reject mutations that preserve truncation");
+assert.equal(partialGraphStore.getLastWriteMode(), "integrity", "partial graph mutation rejection should expose an integrity write mode");
+assert.equal(partialGraphStore.read().nodes.length, 0, "rejected partial graph mutations should preserve the imported graph");
+assert.equal(partialGraphStore.write({
+  schema: "llm-field-notes/graph@1",
+  documents: [{ id: "repaired", title: "Repaired", text: "complete source" }]
+}, { expectedVersion: partialGraphStore.read().version }), true, "a clean graph restore should be allowed to repair a partial graph");
+
+const orderedStorageValues = new Map([
+  ["ordered-graph", JSON.stringify({ schema: "llm-field-notes/graph@1", version: 0, documents: [], nodes: [], edges: [], revisions: [] })],
+  ["ordered-history", "[]"]
+]);
+const orderedStorageCalls = [];
+const orderedStorage = {
+  getItem: (key) => orderedStorageValues.has(key) ? orderedStorageValues.get(key) : null,
+  setItem: (key, value) => {
+    orderedStorageCalls.push(`set:${key}`);
+    orderedStorageValues.set(key, String(value));
+  },
+  removeItem: (key) => {
+    orderedStorageCalls.push(`remove:${key}`);
+    orderedStorageValues.delete(key);
+  }
+};
+const orderedStore = createGraphStore(orderedStorage, {
+  graphKey: "ordered-graph",
+  historyKey: "ordered-history"
+});
+assert.equal(orderedStore.write({
+  schema: "llm-field-notes/graph@1",
+  version: 0,
+  documents: [],
+  nodes: [{ id: "ordered-node", label: "Ordered node" }],
+  edges: [],
+  revisions: []
+}), true, "graph writes should remain valid in the crash-ordering fixture");
+assert.deepEqual(orderedStorageCalls.slice(-2), ["set:ordered-graph", "set:ordered-history"], "graph writes should commit the primary graph before undo history");
+orderedStorageCalls.length = 0;
+assert.equal(orderedStore.clear(), true, "clear should remain valid in the crash-ordering fixture");
+assert.deepEqual(orderedStorageCalls.slice(-2), ["set:ordered-history", "remove:ordered-graph"], "clear should record undo history before removing the primary graph");
 
 function createFakeIndexedDB(controlWrites = false) {
   const values = new Map();
@@ -56,6 +143,7 @@ function createFakeIndexedDB(controlWrites = false) {
       });
       return request;
     },
+    seed: (key, value) => values.set(key, value),
     releaseNextWrite: () => pendingCompletions.shift()?.(),
     pendingWriteCount: () => pendingCompletions.length
   };
@@ -85,6 +173,81 @@ await persistent.ready;
 persistent.storage.setItem("answer", 42);
 assert.equal(persistent.storage.getItem("answer"), "42");
 assert.equal(persistent.storage.getItem("__llm_field_notes_storage_probe__"), null);
+const oversizedStorageValue = "x".repeat(MAX_BROADCAST_VALUE_CHARS + 1);
+const oversizedHydration = getBrowserStorage({
+  localStorage: createLocalStorage({ "llm-field-notes-knowledge-graph": oversizedStorageValue })
+});
+await oversizedHydration.ready;
+assert.equal(oversizedHydration.storage.getItem("llm-field-notes-knowledge-graph"), null, "oversized localStorage values should be ignored during hydration");
+const oversizedDatabase = createFakeIndexedDB();
+oversizedDatabase.seed("llm-field-notes-knowledge-graph", oversizedStorageValue);
+const oversizedDatabaseHydration = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: oversizedDatabase });
+await oversizedDatabaseHydration.ready;
+assert.equal(oversizedDatabaseHydration.storage.getItem("llm-field-notes-knowledge-graph"), null, "oversized IndexedDB values should be ignored during hydration");
+let fallbackStorageEventHandler = null;
+let fallbackStorageChange = null;
+const fallbackLocalStorage = createLocalStorage();
+let fallbackBroadcastHandler = null;
+const fallbackBroadcastMessages = [];
+class FakeBroadcastChannel {
+  constructor() {
+    fallbackBroadcastMessages.push(this);
+  }
+  addEventListener(type, handler) {
+    if (type === "message") fallbackBroadcastHandler = handler;
+  }
+  postMessage(message) {
+    this.lastMessage = message;
+  }
+}
+const fallbackPersistent = getBrowserStorage({
+  localStorage: fallbackLocalStorage,
+  addEventListener: (type, handler) => {
+    if (type === "storage") fallbackStorageEventHandler = handler;
+  },
+  BroadcastChannel: FakeBroadcastChannel
+});
+const unsubscribeFallback = fallbackPersistent.subscribe((event) => {
+  fallbackStorageChange = event;
+});
+fallbackStorageEventHandler({
+  key: "llm-field-notes-knowledge-graph",
+  newValue: "external-graph",
+  storageArea: fallbackLocalStorage
+});
+assert.equal(fallbackPersistent.storage.getItem("llm-field-notes-knowledge-graph"), null, "fallback storage should not invent external values before the browser updates its localStorage view");
+assert.equal(fallbackStorageChange?.key, "llm-field-notes-knowledge-graph", "localStorage fallback should surface external graph changes");
+assert.equal(fallbackStorageChange?.newValue, "external-graph");
+assert.equal(fallbackStorageChange?.external, true);
+fallbackBroadcastHandler({ data: { key: "llm-field-notes-knowledge-graph", value: "broadcast-graph" } });
+assert.equal(fallbackStorageChange?.newValue, "broadcast-graph", "localStorage fallback should surface BroadcastChannel graph changes");
+fallbackPersistent.storage.setItem("llm-field-notes-knowledge-graph", "local-graph");
+assert.equal(fallbackBroadcastMessages[0].lastMessage.value, "local-graph", "localStorage fallback should publish local writes to other tabs");
+unsubscribeFallback();
+fallbackStorageChange = null;
+fallbackStorageEventHandler({
+  key: "llm-field-notes-progress",
+  newValue: "[1]",
+  storageArea: fallbackLocalStorage
+});
+assert.equal(fallbackStorageChange, null, "unsubscribed fallback listeners should stop receiving external changes");
+const fallbackClearLocalStorage = createLocalStorage({
+  "llm-field-notes-progress": "[1]",
+  "unrelated-site-state": "preserve-me"
+});
+const fallbackClearPersistent = getBrowserStorage({ localStorage: fallbackClearLocalStorage });
+fallbackClearPersistent.storage.clear();
+assert.equal(fallbackClearLocalStorage.getItem("llm-field-notes-progress"), null, "fallback clear should remove namespaced app state");
+assert.equal(fallbackClearLocalStorage.getItem("unrelated-site-state"), "preserve-me", "fallback clear must preserve unrelated origin storage");
+const durableClearDb = createFakeIndexedDB();
+const durableClearPersistent = getBrowserStorage({
+  localStorage: createLocalStorage({ [PENDING_WRITES_KEY]: JSON.stringify({ "llm-field-notes-knowledge-graph": "stale-token" }) }),
+  indexedDB: durableClearDb
+});
+await durableClearPersistent.ready;
+durableClearPersistent.storage.clear();
+await durableClearPersistent.flush();
+assert.equal(durableClearPersistent.storage.getItem("llm-field-notes-knowledge-graph"), null, "durable clear should remove pending namespace keys even when their values are not hydrated");
 
 const unavailable = getBrowserStorage({
   get localStorage() {
@@ -144,12 +307,19 @@ const externalBeforeHydrationOwner = {
   }
 };
 const externalBeforeHydration = getBrowserStorage(externalBeforeHydrationOwner);
+const overlongExternalKey = `${"llm-field-notes-"}${"x".repeat(MAX_STORAGE_KEY_CHARS)}`;
+storageEventHandler({
+  key: overlongExternalKey,
+  newValue: "forged",
+  storageArea: externalBeforeHydrationOwner.localStorage
+});
 storageEventHandler({
   key: "llm-field-notes-progress",
   newValue: "[4,5,6]",
   storageArea: externalBeforeHydrationOwner.localStorage
 });
 await externalBeforeHydration.ready;
+assert.equal(externalBeforeHydration.storage.getItem(overlongExternalKey), null, "overlong native storage events should be ignored before hydration");
 assert.equal(externalBeforeHydration.storage.getItem("llm-field-notes-progress"), "[4,5,6]", "external updates before hydration should win over stale durable state");
 storageEventHandler({
   key: "llm-field-notes-progress",
@@ -217,6 +387,48 @@ assert.equal(controlledLocalStorage.getItem(PENDING_WRITES_KEY), null, "the newe
 const rapidReload = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: controlledIndexedDB });
 await rapidReload.ready;
 assert.equal(rapidReload.storage.getItem("llm-field-notes-knowledge-graph"), "second-write", "rapid writes should persist the newest graph value");
+let durableBroadcastHandler = null;
+class DurableBroadcastChannel {
+  addEventListener(type, handler) {
+    if (type === "message") durableBroadcastHandler = handler;
+  }
+  postMessage() {}
+}
+const durableChannelStorage = createLocalStorage();
+const durableChannel = getBrowserStorage({
+  localStorage: durableChannelStorage,
+  indexedDB: createFakeIndexedDB(),
+  BroadcastChannel: DurableBroadcastChannel
+});
+const durableChannelEvents = [];
+durableChannel.subscribe((event) => durableChannelEvents.push(event));
+await durableChannel.ready;
+durableBroadcastHandler({ data: { key: PENDING_WRITES_KEY, value: "{\"forged\":true}" } });
+assert.equal(durableChannel.storage.getItem(PENDING_WRITES_KEY), null, "durable BroadcastChannel updates must ignore the internal pending-write marker");
+assert.equal(durableChannelEvents.length, 0, "ignored pending-write broadcasts must not notify storage subscribers");
+durableBroadcastHandler({ data: { key: "llm-field-notes-knowledge-graph", value: { forged: true } } });
+assert.equal(durableChannel.storage.getItem("llm-field-notes-knowledge-graph"), null, "durable BroadcastChannel updates must reject non-string values");
+assert.equal(durableChannelEvents.length, 0, "rejected BroadcastChannel values must not notify storage subscribers");
+durableBroadcastHandler({ data: { key: `${"llm-field-notes-"}${"x".repeat(MAX_STORAGE_KEY_CHARS)}`, value: "forged" } });
+assert.equal(durableChannelEvents.length, 0, "overlong BroadcastChannel keys must not notify storage subscribers");
+assert.equal(MAX_STORAGE_KEY_CHARS, 256, "cross-tab storage keys should have an explicit bounded name ceiling");
+assert.equal(MAX_BROADCAST_VALUE_CHARS, 50 * 1024 * 1024, "cross-tab value bounds should match the persisted graph character ceiling");
+assert.equal(IDB_OPERATION_TIMEOUT_MS, 5000, "IndexedDB writes should have an explicit bounded operation timeout");
+const sharedPendingStorage = createLocalStorage();
+const crossTabIndexedDB = createFakeIndexedDB(true);
+const crossTabWriterA = getBrowserStorage({ localStorage: sharedPendingStorage, indexedDB: crossTabIndexedDB });
+const crossTabWriterB = getBrowserStorage({ localStorage: sharedPendingStorage, indexedDB: crossTabIndexedDB });
+await Promise.all([crossTabWriterA.ready, crossTabWriterB.ready]);
+crossTabWriterA.storage.setItem("llm-field-notes-knowledge-graph", "tab-a");
+const crossTabTokenA = JSON.parse(sharedPendingStorage.getItem(PENDING_WRITES_KEY) || "{}")["llm-field-notes-knowledge-graph"];
+crossTabWriterB.storage.setItem("llm-field-notes-knowledge-graph", "tab-b");
+const crossTabTokenB = JSON.parse(sharedPendingStorage.getItem(PENDING_WRITES_KEY) || "{}")["llm-field-notes-knowledge-graph"];
+assert(crossTabTokenA && crossTabTokenB && crossTabTokenA !== crossTabTokenB, "cross-tab pending-write generations must remain unique even for same-key rapid writes");
+for (let attempt = 0; attempt < 100; attempt += 1) {
+  crossTabIndexedDB.releaseNextWrite();
+  await Promise.resolve();
+}
+await Promise.all([crossTabWriterA.flush(), crossTabWriterB.flush()]);
 const failingOwner = {
   localStorage: createLocalStorage(),
   indexedDB: {
@@ -256,6 +468,21 @@ const hangingRead = getBrowserStorage({
 await hangingRead.ready;
 assert.equal(hangingRead.durable, false, "a stalled IndexedDB read should fall back instead of blocking startup");
 assert.equal(hangingRead.storageFailure, true, "a stalled IndexedDB read should be observable");
+const originalSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(callback, Math.min(delay, 10), ...args);
+try {
+  const hangingWrite = getBrowserStorage({
+    localStorage: createLocalStorage(),
+    indexedDB: createFakeIndexedDB(true)
+  });
+  await hangingWrite.ready;
+  hangingWrite.storage.setItem("llm-field-notes-knowledge-graph", "hanging-write");
+  await hangingWrite.flush();
+  assert.equal(hangingWrite.durable, false, "a stalled IndexedDB write should demote to fallback storage");
+  assert.equal(hangingWrite.storageFailure, true, "a stalled IndexedDB write should be observable");
+} finally {
+  globalThis.setTimeout = originalSetTimeout;
+}
 let lateOpenRequest = null;
 let lateCloseCalls = 0;
 const lateDatabase = {

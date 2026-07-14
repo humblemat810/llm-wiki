@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { relative } from "node:path";
 import { LEARNING_NOTE_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, OFFLINE_SHELL_ASSETS, PUBLIC_ASSETS } from "./public-assets.mjs";
 
 const packageManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -7,14 +8,30 @@ const release = JSON.parse(await readFile(new URL("../version.json", import.meta
 const changelog = await readFile(new URL("../CHANGELOG.md", import.meta.url), "utf8");
 const serviceWorker = await readFile(new URL("../sw.js", import.meta.url), "utf8");
 const index = await readFile(new URL("../index.html", import.meta.url), "utf8");
+const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
 const version = packageManifest.version;
 const workflowDirectory = new URL("../.github/workflows/", import.meta.url);
+const rootRealPath = await realpath(new URL("../", import.meta.url));
+const isContained = (candidate) => {
+  const relativePath = relative(rootRealPath, candidate);
+  return relativePath && !relativePath.startsWith("..") && !relativePath.includes("/../");
+};
+const checkPublicAsset = async (asset) => {
+  const resolved = await realpath(new URL(`../${asset}`, import.meta.url));
+  if (!isContained(resolved)) throw new Error(`public asset escapes repository root: ${asset}`);
+  const metadata = await stat(resolved);
+  if (!metadata.isFile() || metadata.size === 0 || metadata.size > MAX_STATIC_ASSET_BYTES) {
+    throw new Error("missing, empty, or oversized file");
+  }
+  return metadata.size;
+};
 const workflowFiles = (await readdir(workflowDirectory, { withFileTypes: true }))
   .filter((entry) => entry.isFile() && /\.(?:yaml|yml)$/i.test(entry.name))
   .map((entry) => `.github/workflows/${entry.name}`)
   .sort();
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`package.json version is not a stable semver triplet: ${version}`);
+if (packageManifest.license !== "CC-BY-4.0") throw new Error(`package.json license must declare CC-BY-4.0: ${packageManifest.license}`);
 if (release.version !== version) throw new Error(`version.json (${release.version}) does not match package.json (${version})`);
 if (!["stable", "unreleased"].includes(release.channel)) throw new Error(`version.json channel is unsupported: ${release.channel}`);
 const releaseDate = /^\d{4}-\d{2}-\d{2}$/.test(release.date)
@@ -25,6 +42,13 @@ if (!releaseDate || Number.isNaN(releaseDate.getTime()) || releaseDate.toISOStri
 }
 if (!changelog.includes(`## [${version}]`)) throw new Error(`CHANGELOG.md is missing a heading for ${version}`);
 if (!serviceWorker.includes(`const CACHE = "llm-field-notes-v${version}"`)) throw new Error(`sw.js cache key is not aligned with package version ${version}`);
+if (!/^FROM node:22-alpine@sha256:[0-9a-f]{64}$/m.test(dockerfile)) {
+  throw new Error("Dockerfile must use the digest-pinned Node 22 Alpine production baseline");
+}
+const dockerVersion = dockerfile.match(/^ARG APP_VERSION=(\d+\.\d+\.\d+)$/m)?.[1];
+if (dockerVersion !== version || !dockerfile.includes('org.opencontainers.image.version="$APP_VERSION"')) {
+  throw new Error(`Docker image metadata must identify release ${version}`);
+}
 if (index.includes(`id="release-version">v${version}`)) throw new Error("index.html must not hardcode a release version");
 const structuredDataMatch = index.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
 if (!structuredDataMatch) throw new Error("index.html is missing its structured discovery metadata");
@@ -43,8 +67,7 @@ if (JSON.stringify(shellAssets) !== JSON.stringify(OFFLINE_SHELL_ASSETS.map((ass
 for (const asset of shellAssets) {
   const relative = asset === "./" ? "index.html" : asset.replace(/^\.\/+/, "");
   try {
-    const metadata = await stat(new URL(`../${relative}`, import.meta.url));
-    if (!metadata.isFile() || metadata.size === 0 || metadata.size > MAX_STATIC_ASSET_BYTES) throw new Error("missing, empty, or oversized file");
+    await checkPublicAsset(relative);
   } catch {
     throw new Error(`sw.js APP_SHELL asset is missing or empty: ${asset}`);
   }
@@ -52,11 +75,9 @@ for (const asset of shellAssets) {
 let publicAssetBytes = 0;
 for (const asset of PUBLIC_ASSETS) {
   try {
-    const metadata = await stat(new URL(`../${asset}`, import.meta.url));
-    if (!metadata.isFile() || metadata.size === 0) throw new Error("missing or empty file");
-    publicAssetBytes += metadata.size;
+    publicAssetBytes += await checkPublicAsset(asset);
   } catch {
-    throw new Error(`public asset is missing or empty: ${asset}`);
+    throw new Error(`public asset is missing, empty, or oversized: ${asset}`);
   }
 }
 if (publicAssetBytes > MAX_PUBLIC_ASSET_BYTES) {

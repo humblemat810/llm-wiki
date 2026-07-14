@@ -164,7 +164,8 @@
                 <small>Leave blank for the local heuristic. Use a same-origin path such as <code>/api/extract-graph</code>; the validated endpoint is remembered locally, reviewed feedback may be sent with documents, and credentials belong on your server.</small>
               </details>
               <div class="ingest-actions">
-                <button class="button button-primary" id="ingest-document" type="button" aria-busy="false">Build graph <span>↗</span></button>
+                <button class="button button-primary" id="ingest-document" type="button" aria-busy="false" aria-keyshortcuts="Control+Enter Meta+Enter">Build graph <span>↗</span></button>
+                <small class="shortcut-hint">Ctrl/Cmd + Enter</small>
                 <button class="text-button inverse" id="load-sample" type="button">Load sample</button>
                 <button class="text-button inverse" id="cancel-extraction" type="button" disabled>Cancel extraction</button>
               </div>
@@ -212,8 +213,8 @@
                 <div class="inspector-empty"><span>INSPECTOR</span><p>Select a concept or relation to inspect its evidence.</p></div>
               </aside>
               <div class="graph-legend"><span><i class="legend-dot concept"></i> concept</span><span><i class="legend-dot source"></i> source</span><span><i class="legend-line"></i> inferred relation</span></div>
-              <div class="health-strip" id="graph-health" aria-live="polite"></div>
-              <div class="review-queue" id="review-queue"></div>
+              <div class="health-strip" id="graph-health" role="status" aria-live="polite" aria-label="Graph health"></div>
+              <div class="review-queue" id="review-queue" role="region" aria-live="polite" aria-label="Review queue"></div>
               <div class="revision-log" id="revision-log"></div>
               <div class="revision-diff-preview" id="revision-diff-preview"></div>
             </section>
@@ -232,6 +233,8 @@
                 <div class="projection-actions">
                   <button class="button button-light" id="download-markdown" type="button">Download .md <span>↓</span></button>
                   <button class="button button-light" id="copy-markdown" type="button">Copy Markdown <span>↗</span></button>
+                  <button class="button button-quiet" id="copy-redacted-markdown" type="button" title="Removes source text, evidence quotes, and URIs">Copy redacted Markdown <span>↗</span></button>
+                  <button class="button button-quiet" id="share-redacted-markdown" type="button" title="Shares a Markdown file with source text, evidence quotes, and URIs removed">Share redacted graph <span>↗</span></button>
                   <button class="button button-quiet" id="download-redacted-markdown" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted Markdown <span>↓</span></button>
                   <button class="button button-light" id="download-vault" type="button">Download Obsidian vault <span>↓</span></button>
                   <button class="button button-quiet" id="download-redacted-vault" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted vault <span>↓</span></button>

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://llm-field-notes.local/schema/backup@1",
+  "$id": "backup.schema.json",
   "title": "LLM Field Notes full backup",
   "description": "Graph state plus bounded undo history for local restoration.",
   "type": "object",

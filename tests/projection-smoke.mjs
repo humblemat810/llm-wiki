@@ -138,6 +138,23 @@ uri: ""
 assert.equal(applyObsidianFeedback(existingUriGraph, [clearedUri]).graph.documents[0].uri, null, "an explicitly empty source URI should clear the URI");
 const sourceUriGraph = normalizeGraph({ ...defaultGraph(), documents: [{ id: "doc-source", title: "Reviewed source", text: "text" }] });
 assert.equal(applyObsidianFeedback(sourceUriGraph, [source]).graph.documents[0].uri, "https://example.org/reviewed-source", "Obsidian source feedback should preserve source URIs");
+const staleSourceMetadata = applyObsidianFeedback(normalizeGraph({
+  ...defaultGraph(),
+  documents: [{
+    id: "doc-source",
+    title: "Old source title",
+    text: "source text",
+    quality: "unknown",
+    lastReviewedAt: "2020-01-01T00:00:00.000Z"
+  }]
+}), [{
+  type: "source",
+  id: "doc-source",
+  title: "Reviewed source",
+  quality: "primary",
+  lastReviewedAt: "2020-01-01T00:00:00.000Z"
+}]);
+assert(Date.parse(staleSourceMetadata.graph.documents[0].lastReviewedAt) > Date.now() - 5000, "substantive Obsidian source metadata edits should refresh review time instead of preserving stale exported metadata");
 const directUnsafeUri = applyObsidianFeedback(existingUriGraph, [{ type: "source", id: "doc-source", uri: "javascript:alert(1)", hasUri: true }]);
 assert.equal(directUnsafeUri.changed, false, "direct source feedback should reject unsafe URIs instead of clearing provenance");
 assert.equal(directUnsafeUri.graph.documents[0].uri, "https://example.org/existing", "rejected direct URI feedback should preserve existing provenance");
@@ -168,6 +185,10 @@ assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nstatus: a
 assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nstatus: unknown\n---\n\n# Invalid status`), null, "invalid statuses should be rejected at the projection boundary");
 assert.equal(parseObsidianFeedback(`---\ntype: source\nid: doc-source\nquality: invalid\n---\n\n# Invalid quality`), null, "invalid source qualities should be rejected at the projection boundary");
 assert.equal(parseObsidianFeedback(`---\ntype: source\nid: doc-source\nlast_reviewed: not-a-date\n---\n\n# Invalid review date`), null, "invalid review dates should be rejected at the projection boundary");
+assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nstatus: accepted\nunsupported_field: ignored\n---\n\n# Unknown field`), null, "unknown Obsidian frontmatter fields should fail closed instead of being silently ignored");
+assert.equal(parseObsidianFeedback(`---\ntype: relation\nid: attention--context--uses\naliases: ["wrong type"]\n---\n\n# Wrong type field`), null, "type-incompatible Obsidian frontmatter should fail closed");
+assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nconfidence: not-a-number\n---\n\n# Invalid confidence`), null, "invalid read-only Obsidian confidence metadata should fail closed");
+assert.equal(parseObsidianFeedback(`---\ntype: source\nid: doc-source\nredacted: yes\n---\n\n# Invalid redaction marker`), null, "invalid source redaction metadata should fail closed");
 assert.equal(parseObsidianFeedback(conceptMarkdown.replace("last_reviewed: 2025-02-02T00:00:00.000Z", "last_reviewed: not-a-date")), null, "invalid concept review dates should be rejected at the projection boundary");
 assert.equal(parseObsidianFeedback(relationMarkdown.replace("---\n\n# Attention uses Context", "last_reviewed: not-a-date\n---\n\n# Attention uses Context")), null, "invalid relation review dates should be rejected at the projection boundary");
 assert.equal(parseObsidianFeedback(`---\ntype: source\nid: doc-source\nuri: javascript:alert(1)\n---\n\n# Unsafe URI`), null, "unsafe source URIs should be rejected at the projection boundary");
@@ -204,6 +225,31 @@ const invalidDirectReviewDate = applyObsidianFeedback(normalizeGraph({
   status: "accepted"
 }]);
 assert.equal(invalidDirectReviewDate.changed, false, "direct Obsidian feedback should reject invalid review timestamps");
+const invalidDirectFeedback = applyObsidianFeedback(normalizeGraph({
+  ...defaultGraph(),
+  nodes: [{ id: "attention", label: "Attention", status: "inferred" }]
+}), [
+  { type: "concept", id: "attention", status: "accepted" },
+  { type: "concept", id: "attention", aliases: "not-an-array" }
+]);
+assert.equal(invalidDirectFeedback.changed, true, "valid direct feedback should still apply when another item is malformed");
+assert.equal(invalidDirectFeedback.skipped, 1, "direct Obsidian feedback should disclose malformed items instead of silently dropping them");
+assert.equal(invalidDirectFeedback.graph.nodes[0].status, "accepted", "malformed direct feedback should not prevent safe feedback from applying");
+const staleCorrectionGraph = normalizeGraph({
+  ...defaultGraph(),
+  nodes: [{ id: "attention", label: "Old attention label", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z" }]
+});
+const staleCorrection = applyObsidianFeedback(staleCorrectionGraph, [{
+  type: "concept",
+  id: "attention",
+  label: "Corrected attention label",
+  status: "accepted",
+  lastReviewedAt: "2020-01-01T00:00:00.000Z"
+}]);
+const correctedNode = staleCorrection.graph.nodes[0];
+assert.equal(correctedNode.label, "Corrected attention label", "Obsidian label corrections should update the graph");
+assert(Date.parse(correctedNode.lastReviewedAt) > Date.now() - 5000, "a substantive Obsidian correction should refresh review time instead of preserving an old exported timestamp");
+assert(Date.parse(staleCorrection.graph.learning.examples[0].lastReviewedAt) > Date.now() - 5000, "refreshed Obsidian corrections should keep reusable learning memory fresh");
 const vault = parseObsidianVault(storedZip([
   { name: "vault-manifest.json", text: JSON.stringify({ format: VAULT_FORMAT, graphSchema: GRAPH_SCHEMA, graphVersion: 1, graphFingerprint: "fnv64-0123456789abcdef-42", redacted: false, generatedAt: "2025-01-01T00:00:00.000Z" }) },
   { name: "Concepts/attention.md", text: conceptMarkdown },
@@ -359,7 +405,7 @@ assert.equal(result.changed, true);
 assert.equal(result.updates, 5);
 assert.equal(result.graph.nodes[0].label, "Attention mechanism");
 assert.equal(result.graph.nodes[0].status, "accepted");
-assert.equal(result.graph.nodes[0].lastReviewedAt, "2025-02-02T00:00:00.000Z");
+assert(Date.parse(result.graph.nodes[0].lastReviewedAt) > Date.now() - 5000, "substantive Obsidian edits should refresh the review timestamp");
 const reversedRelationFeedback = parseObsidianFeedback(relationMarkdown
   .replace("status: rejected", "status: accepted")
   .replace("source: attention", "source: context")
@@ -402,6 +448,33 @@ const memoryRepair = applyObsidianFeedback(normalizeGraph({
 assert.equal(memoryRepair.changed, true, "unchanged Obsidian notes should repair missing reusable learning memory");
 assert(memoryRepair.graph.learning.examples.some((example) => example.kind === "concept" && example.status === "accepted"), "Obsidian memory repair should retain the accepted concept");
 assert.equal(applyObsidianFeedback(memoryRepair.graph, [concept]).changed, false, "repaired Obsidian feedback should remain idempotent");
+const aliasOrderGraph = normalizeGraph({
+  ...graph,
+  version: 4,
+  nodes: graph.nodes.map((node) => node.id === "attention"
+    ? { ...node, aliases: ["lookup", "attention"], status: "accepted", lastReviewedAt: "2025-02-02T00:00:00.000Z" }
+    : node),
+  learning: {
+    examples: [{
+      kind: "concept",
+      id: "attention",
+      label: "Attention",
+      aliases: ["attention", "lookup"],
+      status: "accepted",
+      lastReviewedAt: "2025-02-02T00:00:00.000Z"
+    }]
+  }
+});
+const reorderedAliases = applyObsidianFeedback(aliasOrderGraph, [{
+  type: "concept",
+  id: "attention",
+  label: "Attention",
+  aliases: ["attention", "lookup"],
+  status: "accepted",
+  hasLastReviewedAt: true,
+  lastReviewedAt: "2025-02-02T00:00:00.000Z"
+}]);
+assert.equal(reorderedAliases.changed, false, "reordering set-like Obsidian aliases should remain idempotent");
 const sourceResult = applyObsidianFeedback(normalizeGraph({
   ...graph,
   documents: [{ id: "doc-source", title: "Original", text: "text", quality: "unknown" }]
@@ -428,6 +501,19 @@ const collisionResult = applyObsidianFeedback(graph, [{ type: "concept", id: "at
 assert.equal(collisionResult.changed, false, "conflicting concept labels should not be applied");
 assert.equal(collisionResult.skipped, 1, "conflicting concept labels should be reported as skipped");
 assert.equal(collisionResult.graph.nodes.find((node) => node.id === "attention").label, "Attention", "conflicting corrections should preserve the original label");
+const atomicCollisionResult = applyObsidianFeedback(normalizeGraph({
+  ...graph,
+  nodes: graph.nodes.map((node) => node.id === "attention" ? { ...node, status: "inferred", aliases: [] } : node)
+}), [{
+  type: "concept",
+  id: "attention",
+  label: "Context",
+  aliases: ["manual correction"],
+  status: "accepted"
+}]);
+assert.equal(atomicCollisionResult.changed, false, "conflicting concept edits should be rejected atomically");
+assert.equal(atomicCollisionResult.graph.nodes.find((node) => node.id === "attention").status, "inferred", "atomic collision rejection should preserve status");
+assert.deepEqual(atomicCollisionResult.graph.nodes.find((node) => node.id === "attention").aliases, [], "atomic collision rejection should preserve aliases");
 const aliasCollisionResult = applyObsidianFeedback(normalizeGraph({
   ...graph,
   nodes: graph.nodes.map((node) => node.id === "context" ? { ...node, aliases: ["lookup"] } : node)
@@ -437,6 +523,25 @@ assert.equal(aliasCollisionResult.skipped, 1, "alias collisions should be report
 const repeatedRelationLabel = applyObsidianFeedback(graph, [{ type: "relation", id: "attention--context--uses", label: "supports", aliases: [], status: null }]);
 assert.equal(repeatedRelationLabel.changed, true, "relation labels should remain reusable across different relations");
 assert.equal(repeatedRelationLabel.graph.edges[0].label, "supports");
+const relationLabelCollisionGraph = normalizeGraph({
+  ...graph,
+  edges: [
+    ...graph.edges,
+    { id: "attention--context--supports", source: "attention", target: "context", label: "supports", confidence: .7, evidence: [], sources: ["doc-1"], status: "inferred" }
+  ]
+});
+const relationLabelCollision = applyObsidianFeedback(relationLabelCollisionGraph, [{
+  type: "relation",
+  id: "attention--context--uses",
+  source: "attention",
+  target: "context",
+  label: "supports",
+  aliases: [],
+  status: null
+}]);
+assert.equal(relationLabelCollision.changed, false, "relation corrections should not silently collapse an existing semantic relation");
+assert.equal(relationLabelCollision.skipped, 1, "relation label collisions should be reported as skipped");
+assert.equal(relationLabelCollision.graph.edges.some((edge) => edge.id === "attention--context--uses" && edge.label === "uses"), true, "relation label collisions should preserve the original relation");
 const directOversizedFeedback = applyObsidianFeedback(graph, [{
   type: "concept",
   id: "attention",

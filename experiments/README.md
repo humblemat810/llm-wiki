@@ -10,7 +10,7 @@ node experiments/tiny-training.mjs
 node experiments/tiny-transformer.mjs
 node experiments/evaluate-feedback.mjs feedback.json extraction.json --max-untrusted-feedback 0
 node experiments/compare-evaluations.mjs baseline-evaluation.json candidate-evaluation.json --max-untrusted-feedback 0
-node experiments/inspect-graph.mjs graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-truncated-items 0 --max-dropped-items 0
+node experiments/inspect-graph.mjs graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-conflicting-items 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-review-queue-truncated 0 --max-evidence-grounding-truncated 0 --max-feedback-context-truncated 0 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-truncated-items 0 --max-dropped-items 0
 node experiments/diff-graphs.mjs before.json after.json
 node experiments/project-jsonld.mjs graph.json --redacted
 node experiments/verify-jsonld.mjs graph.json graph.jsonld
@@ -37,6 +37,8 @@ examples; it is not a complete precision estimate when feedback is sparse. The
 report separates fresh, stale, and undated reviewed examples. Historical
 evaluation remains available, while `--max-untrusted-feedback` can fail a
 production promotion when stale or undated examples exceed an explicit bound.
+Feedback exports marked with `truncatedExamples` are rejected before scoring;
+evaluation requires a complete reviewed dataset.
 The command rejects input files larger than 10 MB before parsing them.
 
 `compare-evaluations.mjs` is a promotion gate for that loop. Evaluation reports
@@ -44,7 +46,8 @@ carry a deterministic reviewed-dataset fingerprint; the command refuses to
 compare reports with different fingerprints, an empty reviewed benchmark, or
 contradictory reviewed decisions. It compares the overall, concept,
 and relation accepted-recall, reviewed-precision, and rejected-suppression
-metrics and exits non-zero when any candidate metric regresses. Use
+metrics, validates the report arithmetic and bounds before comparison, and
+exits non-zero when any candidate metric regresses. Use
 `--max-regression 0.02` when a small, explicit tradeoff is acceptable. Use
 `--max-untrusted-feedback 0` to fail promotion on stale or undated reviewed
 examples; when enabled, legacy reports without freshness diagnostics are
@@ -66,8 +69,9 @@ inputs larger than 10 MB are rejected before normalization.
 
 `inspect-graph.mjs` uses that same shared input boundary before emitting health
 diagnostics or evaluating quality thresholds. Use
-`--max-truncated-items 0 --max-dropped-items 0` to reject partial or malformed
-graph imports in CI.
+`--max-conflicting-items 0 --max-review-queue-truncated 0
+--max-truncated-items 0 --max-dropped-items 0` to
+reject contradictory, partial, or malformed graph imports in CI.
 
 `project-jsonld.mjs` emits the same full or redacted JSON-LD projection as the
 browser. It verifies graph and backup fingerprints and rejects inputs larger

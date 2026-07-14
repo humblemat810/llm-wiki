@@ -83,6 +83,17 @@ h1 em, h2 em { color: var(--orange); font-style: normal; }
 .ticker-track { display: inline-flex; align-items: center; gap: 25px; min-width: 200%; height: 49px; animation: ticker 32s linear infinite; font: 10px var(--mono); letter-spacing: .12em; }
 .ticker-track i { color: var(--orange); font-style: normal; font-size: 15px; }
 @keyframes ticker { to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .ticker-track { animation: none; transform: none; }
+  .button:hover { transform: none; }
+}
 .workbench-section { color: var(--paper); background: #22211e; padding-block: 107px 120px; }
 .workbench-section .section-label { color: #85817a; }
 .workbench-heading { align-items: end; }
@@ -98,8 +109,9 @@ h1 em, h2 em { color: var(--orange); font-style: normal; }
 .file-queue { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-height: 18px; margin-top: 7px; color: #9cc19a; font: 9px var(--mono); }.file-queue small { color: #77736c; }.file-queue small + small::before { content: "·"; margin-right: 10px; color: #4e4b45; }
 .ingest-panel input:focus, .ingest-panel textarea:focus { border-color: var(--orange); }
 .ingest-panel input::placeholder, .ingest-panel textarea::placeholder { color: #65615a; }
-.ingest-actions { display: flex; align-items: center; gap: 17px; margin-top: 19px; }
+.ingest-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 17px; margin-top: 19px; }
 .ingest-actions .button { padding: 11px 13px; }
+.shortcut-hint { color: #6f6b64; font: 9px var(--mono); white-space: nowrap; }
 .text-button.inverse { color: #aaa69d; border-bottom-color: #aaa69d; }
 .privacy-note { margin: 21px 0 0; color: #68645d; font: 10px/1.45 var(--mono); }
 .ingest-status { min-height: 29px; margin-top: 17px; color: #9cc19a; font: 10px/1.45 var(--mono); }

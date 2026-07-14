@@ -43,6 +43,13 @@ try {
     (error) => String(error?.stderr).includes("must declare llm-field-notes/graph@1"),
     "the graph diff CLI should reject incompatible graph schemas"
   );
+  const invalidUtf8Path = join(diffRoot, "invalid-utf8.json");
+  await writeFile(invalidUtf8Path, Buffer.from([0x7b, 0xff, 0x7d]));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/diff-graphs.mjs", invalidUtf8Path, afterPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("not valid UTF-8"),
+    "graph CLI inputs should reject invalid UTF-8 instead of silently replacing bytes"
+  );
   const backupPath = join(diffRoot, "backup.json");
   await writeFile(backupPath, JSON.stringify({
     format: "llm-field-notes/backup@1",
@@ -75,10 +82,31 @@ try {
   assert.equal(JSON.parse(legacyDiffOutput).format, "llm-field-notes/diff@1", "graph diff should accept supported legacy graph exports");
   const baselineEvaluationPath = join(diffRoot, "baseline-evaluation.json");
   const candidateEvaluationPath = join(diffRoot, "candidate-evaluation.json");
-  const evaluation = (acceptedRecall, suppressionRate) => ({
+  const evaluation = (acceptedRecall, suppressionRate) => {
+    const acceptedExpected = 100;
+    const acceptedFound = Math.round(acceptedExpected * acceptedRecall);
+    const rejectedExpected = 100;
+    const rejectedPresent = Math.round(rejectedExpected * (1 - suppressionRate));
+    const accepted = {
+      expected: acceptedExpected,
+      found: acceptedFound,
+      missed: acceptedExpected - acceptedFound,
+      recall: acceptedRecall,
+      reviewedPrecision: acceptedRecall,
+      evidenceBacked: Math.round(acceptedExpected * acceptedRecall),
+      evidenceCoverage: acceptedRecall
+    };
+    const rejected = {
+      expected: rejectedExpected,
+      suppressed: rejectedExpected - rejectedPresent,
+      present: rejectedPresent,
+      suppressionRate
+    };
+    return {
     schema: "llm-field-notes/evaluation@1",
     graphSchema: "llm-field-notes/graph@1",
     evaluatedAt: "2026-07-13T00:00:00.000Z",
+    extraction: { concepts: 100, relations: 100 },
     feedback: {
       examples: 4,
       datasetFingerprint: "fnv1a-deadbeef",
@@ -87,20 +115,28 @@ try {
       undatedExamples: 0,
       untrustedExamples: 0,
       conflicts: 0,
-      concepts: {
-        accepted: { recall: acceptedRecall, reviewedPrecision: acceptedRecall, evidenceCoverage: acceptedRecall },
-        rejected: { suppressionRate }
-      },
-      relations: {
-        accepted: { recall: acceptedRecall, reviewedPrecision: acceptedRecall, evidenceCoverage: acceptedRecall },
-        rejected: { suppressionRate }
-      }
+      concepts: { accepted, rejected },
+      relations: { accepted, rejected }
     },
     overall: {
-      accepted: { recall: acceptedRecall, reviewedPrecision: acceptedRecall, evidenceCoverage: acceptedRecall },
-      rejected: { suppressionRate }
+      accepted: {
+        expected: acceptedExpected * 2,
+        found: acceptedFound * 2,
+        missed: (acceptedExpected - acceptedFound) * 2,
+        recall: acceptedRecall,
+        reviewedPrecision: acceptedRecall,
+        evidenceBacked: acceptedFound * 2,
+        evidenceCoverage: acceptedRecall
+      },
+      rejected: {
+        expected: rejectedExpected * 2,
+        suppressed: (rejectedExpected - rejectedPresent) * 2,
+        present: rejectedPresent * 2,
+        suppressionRate
+      }
     }
-  });
+    };
+  };
   await writeFile(baselineEvaluationPath, JSON.stringify(evaluation(.75, .8)));
   await writeFile(candidateEvaluationPath, JSON.stringify(evaluation(.9, .95)));
   const comparisonOutput = execFileSync(process.execPath, ["experiments/compare-evaluations.mjs", baselineEvaluationPath, candidateEvaluationPath], { encoding: "utf8" });
@@ -193,7 +229,7 @@ try {
   await writeFile(healthPath, JSON.stringify({
     schema: "llm-field-notes/graph@1",
     documents: [{ id: "health-source", title: "Health source", text: "health source text", fingerprint: "health-source" }],
-    nodes: [{ id: "health-node", label: "Health node", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z", sources: ["missing-source"], evidence: [] }],
+    nodes: [{ id: "health-node", label: "Health node", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z", sources: ["missing-source"], evidence: [{ text: "provider paraphrase", sources: ["missing-source"] }] }],
     learning: { examples: [{ kind: "concept", id: "old-learning", label: "Old learning", status: "accepted", lastReviewedAt: "2020-01-01T00:00:00.000Z" }] },
     integrity: { truncated: { documents: 2 }, dropped: { nodes: 1 } }
   }));
@@ -207,6 +243,14 @@ try {
   assert.equal(health.health.feedbackContextExcluded, 2, "health diagnostics should report guidance withheld pending review");
   assert.equal(health.health.truncatedItems, 2, "health diagnostics should report omitted import items");
   assert.equal(health.health.droppedItems, 1, "health diagnostics should report dropped malformed import items");
+  assert.equal(health.health.conflictingItems, 0, "health diagnostics should expose contradictory duplicate review counts");
+  assert.equal(health.health.evidenceGroundingAvailable, true, "health diagnostics should disclose evidence grounding availability");
+  assert.equal(health.health.unanchoredEvidenceRecords, 1, "health diagnostics should report unanchored evidence");
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-unanchored-evidence", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("unanchored evidence records"),
+    "health gates should be able to fail on unanchored evidence"
+  );
   assert(Array.isArray(health.reviewQueue), "health diagnostics should export the bounded review queue");
   assert(health.reviewQueue.every((candidate) => candidate.id && candidate.reason && !("sourceText" in candidate) && !("uri" in candidate)), "health review queue should exclude source material");
   const legacyHealthPath = join(diffRoot, "legacy-health-graph.json");
@@ -256,6 +300,17 @@ try {
     format: "llm-field-notes/feedback@1",
     examples: [{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }]
   }));
+  const partialFeedbackPath = join(diffRoot, "partial-feedback.json");
+  await writeFile(partialFeedbackPath, JSON.stringify({
+    format: "llm-field-notes/feedback@1",
+    truncatedExamples: 1,
+    examples: [{ kind: "concept", id: "attention", label: "Attention", status: "accepted" }]
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/evaluate-feedback.mjs", partialFeedbackPath, afterPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("partial export") && String(error?.stderr).includes("complete reviewed dataset"),
+    "evaluation should reject bounded partial feedback exports instead of scoring an incomplete benchmark"
+  );
   const tamperedExtractionPath = join(diffRoot, "tampered-extraction.json");
   await writeFile(tamperedExtractionPath, JSON.stringify({
     ...JSON.parse(await readFile(afterPath, "utf8")),
@@ -296,6 +351,71 @@ try {
     (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("review candidates"),
     "health thresholds should fail when actionable review work exceeds the requested gate"
   );
+  const cappedReviewQueuePath = join(diffRoot, "capped-review-queue-graph.json");
+  await writeFile(cappedReviewQueuePath, JSON.stringify({
+    schema: "llm-field-notes/graph@1",
+    documents: Array.from({ length: 1000 }, (_, index) => ({ id: `queue-source-${index}`, title: `Queue source ${index}`, text: "A bounded source for review queue coverage." })),
+    nodes: Array.from({ length: 5000 }, (_, index) => ({ id: `queue-node-${index}`, label: `Queue node ${index}` })),
+    edges: Array.from({ length: 10000 }, (_, index) => ({ source: "queue-node-0", target: "queue-node-1", label: `queue-relation-${index}` }))
+  }));
+  const largeHealthCommandOptions = { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] };
+  const cappedReviewQueueOutput = JSON.parse(execFileSync(process.execPath, ["experiments/inspect-graph.mjs", cappedReviewQueuePath], largeHealthCommandOptions));
+  assert.equal(cappedReviewQueueOutput.health.reviewQueueTruncated, true, "health reports should disclose when the review queue omits candidates");
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", cappedReviewQueuePath, "--max-review-queue-truncated", "0"], largeHealthCommandOptions),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("review queue is truncated"),
+    "health thresholds should fail when the bounded review queue is incomplete"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", cappedReviewQueuePath, "--max-review-queue-truncated", "2"], largeHealthCommandOptions),
+    (error) => String(error?.stderr).includes("Invalid value for --max-review-queue-truncated"),
+    "health thresholds should reject review-queue truncation values outside the binary bound"
+  );
+  const sampledGroundingPath = join(diffRoot, "sampled-grounding-graph.json");
+  await writeFile(sampledGroundingPath, JSON.stringify({
+    schema: "llm-field-notes/graph@1",
+    documents: [{ id: "grounding-source", title: "Grounding source", text: "grounded evidence appears in this source." }],
+    nodes: Array.from({ length: 2100 }, (_, index) => ({
+      id: `grounding-node-${index}`,
+      label: `Grounding node ${index}`,
+      sources: ["grounding-source"],
+      evidence: [{ text: "grounded evidence", sources: ["grounding-source"] }]
+    }))
+  }));
+  const sampledGroundingOutput = JSON.parse(execFileSync(process.execPath, ["experiments/inspect-graph.mjs", sampledGroundingPath], largeHealthCommandOptions));
+  assert.equal(sampledGroundingOutput.health.evidenceGroundingTruncated, true, "health reports should disclose sampled evidence grounding");
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", sampledGroundingPath, "--max-evidence-grounding-truncated", "0"], largeHealthCommandOptions),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("evidence grounding is truncated"),
+    "health thresholds should fail when evidence grounding was sampled"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", sampledGroundingPath, "--max-evidence-grounding-truncated", "2"], largeHealthCommandOptions),
+    (error) => String(error?.stderr).includes("Invalid value for --max-evidence-grounding-truncated"),
+    "health thresholds should reject evidence-grounding truncation values outside the binary bound"
+  );
+  const truncatedGuidancePath = join(diffRoot, "truncated-guidance-graph.json");
+  await writeFile(truncatedGuidancePath, JSON.stringify({
+    schema: "llm-field-notes/graph@1",
+    nodes: Array.from({ length: 501 }, (_, index) => ({
+      id: `guidance-node-${index}`,
+      label: `Guidance node ${index}`,
+      status: "accepted",
+      lastReviewedAt: new Date().toISOString()
+    }))
+  }));
+  const truncatedGuidanceOutput = JSON.parse(execFileSync(process.execPath, ["experiments/inspect-graph.mjs", truncatedGuidancePath], largeHealthCommandOptions));
+  assert.equal(truncatedGuidanceOutput.health.feedbackContextTruncated, true, "health reports should disclose capped extractor guidance");
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", truncatedGuidancePath, "--max-feedback-context-truncated", "0"], largeHealthCommandOptions),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("extractor guidance context is truncated"),
+    "health thresholds should fail when extractor guidance is capped"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", truncatedGuidancePath, "--max-feedback-context-truncated", "2"], largeHealthCommandOptions),
+    (error) => String(error?.stderr).includes("Invalid value for --max-feedback-context-truncated"),
+    "health thresholds should reject guidance truncation values outside the binary bound"
+  );
   assert.throws(
     () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-stale-review-candidates", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("stale review candidates"),
@@ -325,6 +445,24 @@ try {
     () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", healthPath, "--max-dropped-items", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("dropped malformed import items"),
     "health thresholds should fail when malformed graph entries were dropped"
+  );
+  const contradictoryHealthPath = join(diffRoot, "contradictory-health-graph.json");
+  await writeFile(contradictoryHealthPath, JSON.stringify({
+    schema: "llm-field-notes/graph@1",
+    nodes: [
+      { id: "conflicting-node", label: "Conflicting node", status: "accepted" },
+      { id: "conflicting-node", label: "Conflicting node", status: "rejected" }
+    ]
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", contradictoryHealthPath, "--max-conflicting-items", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stdout).includes('"passed": false') && String(error?.stdout).includes("contradictory duplicate review records"),
+    "health thresholds should fail when duplicate review statuses conflict"
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/inspect-graph.mjs", contradictoryHealthPath, "--max-conflicting-items", "201"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Invalid value for --max-conflicting-items"),
+    "health thresholds should reject values outside the contradictory-record bound"
   );
   assert.throws(
     () => execFileSync(process.execPath, [

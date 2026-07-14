@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
-import { createRemoteExtractor, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_MS, ExtractorAdapterError, MAX_FEEDBACK_CHARS, MAX_RESPONSE_BYTES } from "../extractor-adapter.js";
-import { extractGraph, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, normalizeExtractionForDocument } from "../graph-core.js";
+import { createRemoteExtractor, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_MS, ExtractorAdapterError, MAX_FEEDBACK_CHARS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES } from "../extractor-adapter.js";
+import { extractGraph, MAX_EVIDENCE_CHARS, MAX_EVIDENCE_RECORDS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_SOURCE_REFERENCES, normalizeExtractionForDocument } from "../graph-core.js";
 
 const boundedJsonHeaders = { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "64" : null };
+const jsonResponse = (payload, headers = boundedJsonHeaders) => {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  return {
+    ok: true,
+    status: 200,
+    headers,
+    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  };
+};
 const calls = [];
 const extractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/v1/graph",
@@ -10,11 +19,7 @@ const extractor = createRemoteExtractor({
   headers: { "content-type": "text/plain", accept: "text/plain", "x-trace-id": "adapter-test" },
   fetchImpl: async (url, options) => {
     calls.push({ url, options });
-    return {
-      ok: true,
-      status: 200,
-      headers: boundedJsonHeaders,
-      json: async () => ({
+    return jsonResponse({
         source: {
           title: "Provider-controlled title",
           text: "provider-controlled source text",
@@ -23,13 +28,12 @@ const extractor = createRemoteExtractor({
         },
         nodes: [{ id: "provider-attention-v9", label: "Attention", status: "accepted", feedback: 99, lastReviewedAt: "2020-01-01T00:00:00.000Z", sources: ["provider-private-source"], evidence: [{ text: "provider evidence", sources: ["provider-private-source"] }] }, { id: "provider-context-v9", label: "Context" }],
         edges: [{ id: "provider-edge-v9", source: "provider-attention-v9", target: "provider-context-v9", label: "uses", status: "rejected", feedback: -99, lastReviewedAt: "2020-01-01T00:00:00.000Z", sources: ["provider-private-source"], evidence: [{ text: "provider relation evidence", sources: ["provider-private-source"] }] }]
-      })
-    };
+      });
   }
 });
 const result = await extractor(
   { title: "Adapter test", uri: "https://example.org/adapter-test", text: "Attention uses context to make a useful knowledge representation." },
-  { feedback: Array.from({ length: 600 }, (_, index) => ({ id: `feedback-${index}` })) }
+  { feedback: Array.from({ length: 500 }, (_, index) => ({ kind: "concept", id: `feedback-${index}`, label: `Feedback ${index}`, status: "accepted", evidence: [{ text: "private" }] })) }
 );
 assert.equal(result.source.title, "Adapter test");
 assert.equal(result.source.text, "Attention uses context to make a useful knowledge representation.", "remote extraction must preserve the submitted document text");
@@ -49,15 +53,10 @@ assert.equal(result.edges[0].status, "inferred", "remote providers must not crea
 assert.equal(result.edges[0].feedback, 0, "remote providers must not create relation feedback counts");
 const ambiguousProviderExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/ambiguous",
-  fetchImpl: async () => ({
-    ok: true,
-    status: 200,
-    headers: boundedJsonHeaders,
-    json: async () => ({
+  fetchImpl: async () => jsonResponse({
       nodes: [{ id: "duplicate", label: "Attention" }, { id: "duplicate", label: "Context" }],
       edges: [{ source: "duplicate", target: "duplicate", label: "uses" }]
     })
-  })
 });
 const ambiguousProviderResult = await ambiguousProviderExtractor({ title: "Ambiguous provider", text: "Attention uses context to make a useful knowledge representation." });
 assert.equal(ambiguousProviderResult.edges.length, 0, "ambiguous provider endpoint IDs should fail closed rather than attach relations arbitrarily");
@@ -100,6 +99,42 @@ assert.throws(() => normalizeExtractionForDocument({
   title: "Bounded provider edge output",
   text: "A bounded provider edge output still contains enough text to be normalized safely."
 }), /relation limit/, "provider normalization should fail closed instead of silently truncating relations");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "nested-evidence",
+    label: "Nested evidence",
+    evidence: Array.from({ length: MAX_EVIDENCE_RECORDS + 1 }, () => ({ text: "bounded evidence" }))
+  }]
+}, {
+  title: "Bounded provider evidence",
+  text: "A bounded provider evidence response still contains enough text to be normalized safely."
+}), /evidence-record limit/, "provider normalization should fail closed instead of silently truncating evidence records");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "nested-sources",
+    label: "Nested sources",
+    sources: Array.from({ length: MAX_SOURCE_REFERENCES + 1 }, (_, index) => `source-${index}`)
+  }]
+}, {
+  title: "Bounded provider sources",
+  text: "A bounded provider provenance response still contains enough text to be normalized safely."
+}), /provenance-reference limit/, "provider normalization should fail closed instead of silently truncating item provenance");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "nested-evidence-sources",
+    label: "Nested evidence sources",
+    evidence: [{ text: "bounded evidence", sources: Array.from({ length: MAX_SOURCE_REFERENCES + 1 }, (_, index) => `source-${index}`) }]
+  }]
+}, {
+  title: "Bounded provider evidence sources",
+  text: "A bounded provider evidence provenance response still contains enough text to be normalized safely."
+}), /provenance-reference limit/, "provider normalization should fail closed instead of silently truncating evidence provenance");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{ id: "long-evidence", label: "Long evidence", evidence: [{ text: "e".repeat(MAX_EVIDENCE_CHARS + 1) }] }]
+}, {
+  title: "Bounded provider evidence text",
+  text: "A bounded provider evidence text response still contains enough text to be normalized safely."
+}), /evidence-text limit/, "provider normalization should fail closed instead of silently clipping evidence text");
 const longTitle = "T".repeat(240);
 const callsBeforeLongTitle = calls.length;
 await assert.rejects(
@@ -116,25 +151,41 @@ assert.equal(calls[0].options.headers["x-trace-id"], "adapter-test", "custom tra
 assert.equal(JSON.parse(calls[0].options.body).operation, "extract-graph");
 assert.equal(JSON.parse(calls[0].options.body).feedbackFormat, "llm-field-notes/feedback@1");
 assert.equal(JSON.parse(calls[0].options.body).feedback.length, 500, "remote feedback context should be bounded");
+assert(JSON.parse(calls[0].options.body).feedback.every((item) => !Object.hasOwn(item, "evidence") && item.status === "accepted"), "remote feedback context should be compacted to the strict request contract");
 const hugeFeedbackExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/huge-feedback",
   fetchImpl: async (url, options) => {
     calls.push({ url, options });
-    return {
-      ok: true,
-      status: 200,
-      headers: boundedJsonHeaders,
-      json: async () => ({ nodes: [], edges: [] })
-    };
+    return jsonResponse({ nodes: [], edges: [] });
   }
 });
-await hugeFeedbackExtractor(
-  { title: "Bounded feedback", text: "This document is long enough to exercise feedback payload bounds." },
-  { feedback: [{ evidence: [{ text: "x".repeat(600000) }] }, { id: "small" }] }
+const oversizedFeedback = Array.from({ length: 500 }, (_, index) => ({
+  kind: "concept",
+  id: `oversized-feedback-${index}`,
+  label: `Oversized feedback ${index}`,
+  aliases: Array.from({ length: 20 }, (__, aliasIndex) => `alias-${index}-${aliasIndex}-${"x".repeat(100)}`),
+  status: "accepted"
+}));
+const callsBeforeOversizedFeedback = calls.length;
+await assert.rejects(
+  () => hugeFeedbackExtractor(
+    { title: "Bounded feedback", text: "This document is long enough to exercise feedback payload bounds." },
+    { feedback: oversizedFeedback }
+  ),
+  (error) => error instanceof ExtractorAdapterError && error.code === "FEEDBACK_TOO_LARGE",
+  "oversized serialized feedback should fail closed instead of silently sending a partial context"
 );
-const hugeBody = JSON.parse(calls.at(-1).options.body);
-assert(hugeBody.feedback.length <= 1, "oversized feedback payloads should be bounded by serialized size");
+assert.equal(calls.length, callsBeforeOversizedFeedback, "oversized feedback should be rejected before a provider request");
+await assert.rejects(
+  () => hugeFeedbackExtractor(
+    { title: "Too many feedback items", text: "This document is long enough to exercise feedback item bounds." },
+    { feedback: Array.from({ length: 501 }, (_, index) => ({ kind: "concept", id: `too-many-${index}`, label: `Too many ${index}`, status: "accepted" })) }
+  ),
+  (error) => error instanceof ExtractorAdapterError && error.code === "FEEDBACK_TOO_LARGE",
+  "feedback collections above the contract bound should fail closed"
+);
 assert.equal(MAX_FEEDBACK_CHARS, 500000, "feedback request bounds should have one explicit shared contract");
+assert.equal(MAX_REQUEST_BYTES, 2 * 1024 * 1024);
 assert.equal(DEFAULT_MAX_RETRIES, 1);
 assert.equal(DEFAULT_RETRY_DELAY_MS, 250);
 let transientAttempts = 0;
@@ -144,7 +195,7 @@ const transientExtractor = createRemoteExtractor({
   fetchImpl: async () => {
     transientAttempts += 1;
     if (transientAttempts === 1) return { ok: false, status: 503, headers: { get: () => null }, body: { cancel: async () => {} } };
-    return { ok: true, status: 200, headers: boundedJsonHeaders, json: async () => ({ nodes: [], edges: [] }) };
+    return jsonResponse({ nodes: [], edges: [] });
   }
 });
 await transientExtractor({ title: "Transient", text: "This document is long enough to exercise transient retry handling." });
@@ -163,7 +214,7 @@ const dateRetryExtractor = createRemoteExtractor({
         body: { cancel: async () => {} }
       };
     }
-    return { ok: true, status: 200, headers: boundedJsonHeaders, json: async () => ({ nodes: [], edges: [] }) };
+    return jsonResponse({ nodes: [], edges: [] });
   }
 });
 await dateRetryExtractor({ title: "Date retry", text: "This document is long enough to exercise HTTP-date retry handling." });
@@ -182,11 +233,31 @@ const cleanupFailureExtractor = createRemoteExtractor({
         body: { cancel: () => { throw new Error("cleanup failed"); } }
       };
     }
-    return { ok: true, status: 200, headers: boundedJsonHeaders, json: async () => ({ nodes: [], edges: [] }) };
+    return jsonResponse({ nodes: [], edges: [] });
   }
 });
 await cleanupFailureExtractor({ title: "Cleanup failure", text: "This document is long enough to exercise response cleanup handling." });
 assert.equal(cleanupFailureAttempts, 2, "response cleanup failures should not suppress transient retries");
+let hangingCleanupAttempts = 0;
+const hangingCleanupExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/hanging-cleanup",
+  timeoutMs: 1000,
+  retryDelayMs: 0,
+  fetchImpl: async () => {
+    hangingCleanupAttempts += 1;
+    if (hangingCleanupAttempts === 1) {
+      return {
+        ok: false,
+        status: 503,
+        headers: { get: () => null },
+        body: { cancel: () => new Promise(() => {}) }
+      };
+    }
+    return jsonResponse({ nodes: [], edges: [] });
+  }
+});
+await hangingCleanupExtractor({ title: "Hanging cleanup", text: "This document is long enough to exercise a retry body cleanup that never settles." });
+assert.equal(hangingCleanupAttempts, 2, "retryable response cleanup must not block the next bounded attempt");
 const retryAbortController = new AbortController();
 const retryAbortExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/retry-abort",
@@ -205,12 +276,7 @@ await assert.rejects(
 const stubbornController = new AbortController();
 const stubbornExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/stubborn",
-  fetchImpl: async () => ({
-    ok: true,
-    status: 200,
-    headers: boundedJsonHeaders,
-    json: async () => ({ nodes: [], edges: [] })
-  })
+  fetchImpl: async () => jsonResponse({ nodes: [], edges: [] })
 });
 const stubbornRequest = stubbornExtractor(
   { title: "Stubborn fetch", text: "This document is long enough to exercise ignored abort handling." },
@@ -221,6 +287,107 @@ await assert.rejects(
   () => stubbornRequest,
   (error) => error instanceof ExtractorAdapterError && error.code === "CANCELED"
 );
+const ignoredTimeoutExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/ignored-timeout",
+  timeoutMs: 100,
+  fetchImpl: async () => new Promise(() => {})
+});
+await assert.rejects(
+  () => ignoredTimeoutExtractor({ title: "Ignored timeout", text: "This document is long enough to exercise a fetch that ignores abort signals." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "TIMEOUT",
+  "the adapter timeout must settle even when fetch ignores its AbortSignal"
+);
+const ignoredBodyTimeoutExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/ignored-body-timeout",
+  timeoutMs: 100,
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "2" : null },
+    arrayBuffer: () => new Promise(() => {})
+  })
+});
+await assert.rejects(
+  () => ignoredBodyTimeoutExtractor({ title: "Ignored body timeout", text: "This document is long enough to exercise a response body that ignores cancellation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "TIMEOUT",
+  "the adapter timeout must settle even when a non-streaming response body ignores cancellation"
+);
+const streamAbortController = new AbortController();
+let streamReadCalls = 0;
+let streamCancelCalls = 0;
+let resolveStubbornRead;
+const streamAbortExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/stream-abort",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: boundedJsonHeaders,
+    body: {
+      getReader: () => ({
+        read: () => {
+          streamReadCalls += 1;
+          return new Promise((resolve) => {
+            resolveStubbornRead = resolve;
+          });
+        },
+        cancel: () => {
+          streamCancelCalls += 1;
+          throw new Error("reader cancellation failed");
+        },
+        releaseLock: () => {}
+      })
+    }
+  })
+});
+const streamAbortRequest = streamAbortExtractor(
+  { title: "Stream abort", text: "This document is long enough to exercise stubborn stream cancellation." },
+  { signal: streamAbortController.signal }
+);
+await new Promise((resolve) => setTimeout(resolve, 0));
+streamAbortController.abort();
+resolveStubbornRead?.({ done: false, value: new Uint8Array([0x7b]) });
+await assert.rejects(
+  () => streamAbortRequest,
+  (error) => error instanceof ExtractorAdapterError && error.code === "CANCELED"
+);
+assert.equal(streamReadCalls, 1, "aborted response streams should stop reading after the in-flight read settles");
+assert.equal(streamCancelCalls, 1, "aborted response streams should request reader cancellation even when cancel throws");
+const ignoredStreamController = new AbortController();
+let ignoredStreamCancelCalls = 0;
+let ignoredStreamReleaseCalls = 0;
+const ignoredStreamExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/ignored-stream",
+  timeoutMs: 100,
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: boundedJsonHeaders,
+    body: {
+      getReader: () => ({
+        read: () => new Promise(() => {}),
+        cancel: () => {
+          ignoredStreamCancelCalls += 1;
+          throw new Error("ignored cancellation");
+        },
+        releaseLock: () => {
+          ignoredStreamReleaseCalls += 1;
+        }
+      })
+    }
+  })
+});
+const ignoredStreamRequest = ignoredStreamExtractor(
+  { title: "Ignored stream", text: "This document is long enough to exercise a stream reader that ignores cancellation." },
+  { signal: ignoredStreamController.signal }
+);
+setTimeout(() => ignoredStreamController.abort(), 10);
+await assert.rejects(
+  () => ignoredStreamRequest,
+  (error) => error instanceof ExtractorAdapterError && error.code === "CANCELED",
+  "stream reads should settle when cancellation is ignored by the reader"
+);
+assert.equal(ignoredStreamCancelCalls, 1, "ignored stream reads should still request body cancellation");
+assert.equal(ignoredStreamReleaseCalls, 0, "a pending non-conforming read should not trigger an unsafe lock release");
 let permanentAttempts = 0;
 const permanentExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/permanent",
@@ -262,7 +429,7 @@ await assert.rejects(
 );
 const malformedResponseExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/malformed",
-  fetchImpl: async () => ({ ok: true, status: 200, headers: boundedJsonHeaders, json: async () => [] })
+  fetchImpl: async () => jsonResponse([])
 });
 await assert.rejects(
   () => malformedResponseExtractor({ title: "Malformed", text: "This document is long enough to exercise response validation." }),
@@ -270,7 +437,7 @@ await assert.rejects(
 );
 const incompatibleSchemaExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/schema",
-  fetchImpl: async () => ({ ok: true, status: 200, headers: boundedJsonHeaders, json: async () => ({ schema: "llm-field-notes/graph@999" }) })
+  fetchImpl: async () => jsonResponse({ schema: "llm-field-notes/graph@999" })
 });
 await assert.rejects(
   () => incompatibleSchemaExtractor({ title: "Schema", text: "This document is long enough to exercise schema validation." }),
@@ -278,7 +445,7 @@ await assert.rejects(
 );
 const incompatibleFeedbackExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/feedback-format",
-  fetchImpl: async () => ({ ok: true, status: 200, headers: boundedJsonHeaders, json: async () => ({ feedbackFormat: "llm-field-notes/feedback@999", extraction: { nodes: [], edges: [] } }) })
+  fetchImpl: async () => jsonResponse({ feedbackFormat: "llm-field-notes/feedback@999", extraction: { nodes: [], edges: [] } })
 });
 await assert.rejects(
   () => incompatibleFeedbackExtractor({ title: "Feedback format", text: "This document is long enough to exercise feedback format validation." }),
@@ -286,7 +453,7 @@ await assert.rejects(
 );
 const nestedIncompatibleSchemaExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/nested-schema",
-  fetchImpl: async () => ({ ok: true, status: 200, headers: boundedJsonHeaders, json: async () => ({ extraction: { schema: "llm-field-notes/graph@999", nodes: [], edges: [] } }) })
+  fetchImpl: async () => jsonResponse({ extraction: { schema: "llm-field-notes/graph@999", nodes: [], edges: [] } })
 });
 await assert.rejects(
   () => nestedIncompatibleSchemaExtractor({ title: "Nested schema", text: "This document is long enough to exercise nested schema validation." }),
@@ -381,12 +548,15 @@ await assert.rejects(
 assert.equal(malformedLengthJsonCalled, false, "malformed response sizes should be rejected before JSON parsing");
 const unicodeOversizedResponseExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/unicode-oversized",
-  fetchImpl: async () => ({
-    ok: true,
-    status: 200,
-    headers: { get: (name) => name === "content-type" ? "application/json" : null },
-    json: async () => ({ nodes: [], edges: [], notes: "😀".repeat(3_000_000) })
-  })
+  fetchImpl: async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ nodes: [], edges: [], notes: "😀".repeat(3_000_000) }));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? String(bytes.byteLength) : null },
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    };
+  }
 });
 await assert.rejects(
   () => unicodeOversizedResponseExtractor({ title: "Unicode oversized", text: "This document is long enough to exercise byte-accurate response size handling." }),
@@ -409,6 +579,26 @@ const streamedOversizedResponseExtractor = createRemoteExtractor({
 await assert.rejects(
   () => streamedOversizedResponseExtractor({ title: "Streamed oversized", text: "This document is long enough to exercise streamed response size handling." }),
   (error) => error instanceof ExtractorAdapterError && error.code === "RESPONSE_TOO_LARGE"
+);
+const hangingOversizedCleanupExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/hanging-oversized-cleanup",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (name) => name === "content-type" ? "application/json" : null },
+    body: {
+      getReader: () => ({
+        read: async () => ({ done: false, value: new Uint8Array(MAX_RESPONSE_BYTES + 1) }),
+        cancel: () => new Promise(() => {}),
+        releaseLock: () => {}
+      })
+    }
+  })
+});
+await assert.rejects(
+  () => hangingOversizedCleanupExtractor({ title: "Hanging oversized cleanup", text: "This document is long enough to exercise oversized response cleanup." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "RESPONSE_TOO_LARGE",
+  "oversized remote streams should fail without waiting for a hanging reader cancellation"
 );
 const missingContentTypeExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/missing-content-type",
@@ -473,5 +663,71 @@ await assert.rejects(
   () => inFlightRequest,
   (error) => error instanceof ExtractorAdapterError && error.code === "CANCELED"
 );
+let streamedCancelCalled = false;
+let streamedBodyRead = false;
+const cancelableStreamExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/stream-cancel",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: boundedJsonHeaders,
+    body: new ReadableStream({
+      pull(controller) {
+        streamedBodyRead = true;
+        controller.enqueue(new TextEncoder().encode("{"));
+      },
+      cancel() {
+        streamedCancelCalled = true;
+      }
+    })
+  })
+});
+const streamedCancelController = new AbortController();
+const streamedCancelRequest = cancelableStreamExtractor(
+  { title: "Stream cancel", text: "This document is long enough to exercise streaming cancellation handling." },
+  { signal: streamedCancelController.signal }
+);
+for (let attempt = 0; attempt < 20 && !streamedBodyRead; attempt += 1) await Promise.resolve();
+assert.equal(streamedBodyRead, true, "streaming response parsing should begin before cancellation is exercised");
+streamedCancelController.abort();
+await assert.rejects(
+  () => streamedCancelRequest,
+  (error) => error instanceof ExtractorAdapterError && error.code === "CANCELED"
+);
+const invalidUtf8Extractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/invalid-utf8",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "1" : null },
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0xff]));
+        controller.close();
+      }
+    })
+  })
+});
+await assert.rejects(
+  () => invalidUtf8Extractor({ title: "Invalid UTF-8", text: "This document is long enough to exercise invalid UTF-8 handling." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote extractor responses should reject invalid UTF-8 instead of silently replacing bytes"
+);
+const invalidFallbackUtf8Extractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/invalid-fallback-utf8",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "1" : null },
+    arrayBuffer: async () => Uint8Array.from([0xff]).buffer
+  })
+});
+await assert.rejects(
+  () => invalidFallbackUtf8Extractor({ title: "Invalid fallback UTF-8", text: "This document is long enough to exercise fallback invalid UTF-8 handling." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote extractor arrayBuffer fallbacks should reject invalid UTF-8"
+);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(streamedCancelCalled, true, "canceling a remote request should cancel an already-resolved streaming response reader");
 
 console.log("extractor adapter smoke ok");

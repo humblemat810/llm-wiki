@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { Agent, request as httpRequest } from "node:http";
 import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { createAppServer, readBoundedFile } from "../server.mjs";
+import { createAppServer, readBody, readBoundedFile, readBoundedUtf8 } from "../server.mjs";
 import { extractGraph, MAX_GRAPH_NODES } from "../graph-core.js";
 import { FIXED_PUBLIC_ASSETS, MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
 
@@ -13,6 +14,29 @@ const server = createAppServer({ logger: (entry) => logs.push(entry) });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
 try {
+  const truncatedRequest = new EventEmitter();
+  truncatedRequest.headers = {};
+  truncatedRequest.aborted = false;
+  truncatedRequest.destroyed = false;
+  truncatedRequest.readableEnded = false;
+  truncatedRequest.complete = false;
+  const truncatedBody = readBody(truncatedRequest, {});
+  truncatedRequest.emit("close");
+  await assert.rejects(
+    truncatedBody,
+    (error) => error?.code === "REQUEST_ABORTED",
+    "truncated request bodies should reject immediately when the client closes the stream"
+  );
+  const invalidUtf8Request = new EventEmitter();
+  invalidUtf8Request.headers = {};
+  invalidUtf8Request.aborted = false;
+  invalidUtf8Request.destroyed = false;
+  invalidUtf8Request.readableEnded = false;
+  invalidUtf8Request.complete = false;
+  const invalidUtf8Body = readBody(invalidUtf8Request, {});
+  invalidUtf8Request.emit("data", Buffer.from([0xff]));
+  invalidUtf8Request.emit("end");
+  await assert.rejects(invalidUtf8Body, /not valid UTF-8/, "HTTP request bodies should reject invalid UTF-8 before JSON parsing");
   const boundedReadRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-bounded-read-"));
   try {
     const boundedReadPath = join(boundedReadRoot, "asset.bin");
@@ -26,6 +50,35 @@ try {
       () => readBoundedFile(boundedReadPath, Number.POSITIVE_INFINITY),
       (error) => error instanceof RangeError,
       "runtime asset reads should reject invalid unbounded limits"
+    );
+    await assert.rejects(
+      () => readBoundedFile(boundedReadPath, MAX_PUBLIC_ASSET_BYTES + 1),
+      (error) => error instanceof RangeError,
+      "runtime asset reads should reject finite limits above the per-asset ceiling"
+    );
+    assert.throws(
+      () => readBoundedUtf8(boundedReadPath, Number.POSITIVE_INFINITY),
+      (error) => error instanceof RangeError,
+      "bounded UTF-8 reads should reject invalid unbounded character limits"
+    );
+    assert.throws(
+      () => readBoundedUtf8(boundedReadPath, MAX_PUBLIC_ASSET_BYTES),
+      (error) => error instanceof RangeError,
+      "bounded UTF-8 reads should reject finite character limits above the runtime ceiling"
+    );
+    const unicodePrefixPath = join(boundedReadRoot, "unicode.md");
+    await writeFile(unicodePrefixPath, `a${"€".repeat(26668)}`);
+    assert.equal(
+      readBoundedUtf8(unicodePrefixPath, 20000),
+      `a${"€".repeat(19999)}`,
+      "bounded UTF-8 reads should preserve valid multibyte characters across the byte window"
+    );
+    const malformedUtf8Path = join(boundedReadRoot, "malformed.md");
+    await writeFile(malformedUtf8Path, Buffer.from([0xff]));
+    assert.throws(
+      () => readBoundedUtf8(malformedUtf8Path, 20000),
+      /encoded data was not valid(?: for encoding)? utf-8|invalid utf-8/i,
+      "bounded UTF-8 reads should reject malformed bytes"
     );
   } finally {
     await rm(boundedReadRoot, { recursive: true, force: true });
@@ -129,7 +182,9 @@ try {
     && metricsText.includes("llm_field_notes_extraction_duration_ms_bucket{le=\"+Inf\"}")
     && metricsText.includes("llm_field_notes_extraction_duration_ms_count")
     && metricsText.includes('llm_field_notes_http_responses_total{status="200"}')
+    && metricsText.includes("llm_field_notes_concurrency_limited_total 0")
     && metricsText.includes("llm_field_notes_extractions_in_flight 0")
+    && metricsText.includes("llm_field_notes_extractor_concurrency_limit 8")
     && metricsText.includes("llm_field_notes_process_uptime_seconds ")
     && metricsText.includes('llm_field_notes_build_info{version="0.1.0"} 1'), "metrics should expose privacy-safe request, latency, and build gauges");
   assert(Number(server.getMetrics().responsesByStatus["200"]) > 0, "programmatic metrics should expose successful HTTP response counts");
@@ -167,6 +222,7 @@ try {
   assert.equal(drainingExtraction.headers.get("retry-after"), "5");
   server.isDraining = false;
   const chunkedOversizedUpload = await new Promise((resolve, reject) => {
+    let settled = false;
     const request = httpRequest({
       hostname: "127.0.0.1",
       port,
@@ -177,13 +233,24 @@ try {
       let body = "";
       response.setEncoding("utf8");
       response.on("data", (chunk) => { body += chunk; });
-      response.on("end", () => resolve({ status: response.statusCode, body }));
+      response.on("end", () => {
+        settled = true;
+        resolve({ status: response.statusCode, body, reset: false });
+      });
     });
-    request.on("error", reject);
+    request.on("error", (error) => {
+      if (!settled && error?.code === "ECONNRESET") {
+        settled = true;
+        resolve({ status: 413, body: "", reset: true });
+        return;
+      }
+      if (!settled) reject(error);
+    });
     request.end(Buffer.alloc(2 * 1024 * 1024 + 1, 0x78));
   });
   assert.equal(chunkedOversizedUpload.status, 413, "chunked oversized bodies should be rejected as soon as the limit is crossed");
   const declaredOversizedUpload = await new Promise((resolve, reject) => {
+    let settled = false;
     const request = httpRequest({
       hostname: "127.0.0.1",
       port,
@@ -195,12 +262,22 @@ try {
       }
     }, (response) => {
       response.resume();
-      response.on("end", () => resolve(response.statusCode));
+      response.on("end", () => {
+        settled = true;
+        resolve({ status: response.statusCode, reset: false });
+      });
     });
-    request.on("error", reject);
+    request.on("error", (error) => {
+      if (!settled && error?.code === "ECONNRESET") {
+        settled = true;
+        resolve({ status: 413, reset: true });
+        return;
+      }
+      if (!settled) reject(error);
+    });
     request.end();
   });
-  assert.equal(declaredOversizedUpload, 413, "declared oversized JSON bodies should be rejected without buffering");
+  assert.equal(declaredOversizedUpload.status, 413, "declared oversized JSON bodies should be rejected without buffering");
   const invalidMediaType = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json-malicious" },
@@ -208,6 +285,7 @@ try {
   });
   assert.equal(invalidMediaType.status, 415, "invalid JSON media type variants should be rejected");
   const earlyRejectedOversized = await new Promise((resolve, reject) => {
+    let settled = false;
     const request = httpRequest({
       hostname: "127.0.0.1",
       port,
@@ -219,12 +297,22 @@ try {
       }
     }, (response) => {
       response.resume();
-      response.on("end", () => resolve(response.statusCode));
+      response.on("end", () => {
+        settled = true;
+        resolve({ status: response.statusCode, reset: false });
+      });
     });
-    request.on("error", reject);
+    request.on("error", (error) => {
+      if (!settled && error?.code === "ECONNRESET") {
+        settled = true;
+        resolve({ status: 415, reset: true });
+        return;
+      }
+      if (!settled) reject(error);
+    });
     request.end();
   });
-  assert.equal(earlyRejectedOversized, 415, "early rejection should respond before draining a declared oversized upload");
+  assert.equal(earlyRejectedOversized.status, 415, "early rejection should respond before draining a declared oversized upload");
   const abortedUpload = httpRequest({
     hostname: "127.0.0.1",
     port,
@@ -240,6 +328,88 @@ try {
   abortedUpload.destroy();
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
+  let releaseStubbornExtraction;
+  const stubbornExtraction = new Promise((resolve) => {
+    releaseStubbornExtraction = resolve;
+  });
+  const stubbornServer = createAppServer({
+    extractorTimeoutMs: 10,
+    extractor: async () => stubbornExtraction
+  });
+  await new Promise((resolve) => stubbornServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const stubbornResponse = await fetch(`http://127.0.0.1:${stubbornServer.address().port}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Stubborn extractor", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(stubbornResponse.status, 504, "timed-out extractor work should return a gateway timeout");
+    assert.equal(stubbornServer.getMetrics().extractionsInFlight, 1, "in-flight metrics should retain provider work after timeout until its promise settles");
+    assert.equal(await stubbornServer.waitForIdle({ timeoutMs: 20 }), false, "idle waits should time out when a provider ignores cancellation");
+    releaseStubbornExtraction({ schema: "llm-field-notes/graph@1", concepts: [], relations: [] });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(await stubbornServer.waitForIdle({ timeoutMs: 1000 }), true, "idle waits should resolve true after late provider settlement");
+    assert.equal(stubbornServer.getMetrics().extractionsInFlight, 0, "in-flight metrics should clear after late provider settlement");
+  } finally {
+    releaseStubbornExtraction?.({ schema: "llm-field-notes/graph@1", concepts: [], relations: [] });
+    stubbornServer.close();
+  }
+  let releaseCapacityExtraction;
+  let capacityExtractionStartedResolve;
+  const capacityExtractionStarted = new Promise((resolve) => {
+    capacityExtractionStartedResolve = resolve;
+  });
+  const capacityExtraction = new Promise((resolve) => {
+    releaseCapacityExtraction = resolve;
+  });
+  const capacityServer = createAppServer({
+    maxConcurrentExtractors: 1,
+    extractor: async () => {
+      capacityExtractionStartedResolve();
+      return capacityExtraction;
+    }
+  });
+  await new Promise((resolve) => capacityServer.listen(0, "127.0.0.1", resolve));
+  const capacityPort = capacityServer.address().port;
+  const capacityPayload = {
+    operation: "extract-graph",
+    schema: "llm-field-notes/graph@1",
+    feedbackFormat: "llm-field-notes/feedback@1",
+    feedback: [],
+    document: { title: "Capacity", text: "Attention uses context to create a useful graph representation for review." }
+  };
+  try {
+    const firstCapacityRequest = fetch(`http://127.0.0.1:${capacityPort}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(capacityPayload)
+    });
+    await capacityExtractionStarted;
+    const rejectedCapacityRequest = await fetch(`http://127.0.0.1:${capacityPort}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(capacityPayload)
+    });
+    assert.equal(rejectedCapacityRequest.status, 503, "provider concurrency limits should reject excess extraction work");
+    assert.equal(rejectedCapacityRequest.headers.get("retry-after"), "1", "capacity rejections should advertise a short retry delay");
+    assert.match((await rejectedCapacityRequest.json()).error, /capacity/i);
+    assert.equal(capacityServer.getMetrics().concurrencyLimited, 1, "capacity rejections should be observable in programmatic metrics");
+    assert.equal(capacityServer.getMetrics().extractorConcurrencyLimit, 1, "programmatic metrics should expose the configured extractor ceiling");
+    releaseCapacityExtraction({ schema: "llm-field-notes/graph@1", concepts: [], relations: [] });
+    assert.equal((await firstCapacityRequest).status, 200, "the admitted extraction should complete after provider release");
+  } finally {
+    releaseCapacityExtraction?.({ schema: "llm-field-notes/graph@1", concepts: [], relations: [] });
+    capacityServer.close();
+  }
+  const invalidConcurrencyServer = createAppServer({ maxConcurrentExtractors: 0 });
+  assert.equal(invalidConcurrencyServer.getMetrics().extractorConcurrencyLimit, 8, "invalid extractor concurrency configuration should fail safe to the default");
+  invalidConcurrencyServer.close();
   const loggerFailureServer = createAppServer({
     logger: () => {
       throw new Error("logger unavailable");
@@ -492,6 +662,43 @@ try {
     })
   });
   assert.equal(unsafeUriResponse.status, 400, "server extraction should reject unsafe source URI metadata");
+  const unknownRequestField = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [],
+      requestTrace: "must-not-be-silently-ignored",
+      document: { title: "Unknown request field", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(unknownRequestField.status, 400, "the server should reject unknown request envelope fields");
+  const unknownDocumentField = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [],
+      document: { title: "Unknown document field", text: "Attention uses context to create a useful graph representation for review.", language: "en" }
+    })
+  });
+  assert.equal(unknownDocumentField.status, 400, "the server should reject unknown document fields");
+  const unknownFeedbackField = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [{ kind: "concept", id: "attention", label: "Attention", status: "accepted", confidence: 1 }],
+      document: { title: "Unknown feedback field", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(unknownFeedbackField.status, 400, "the server should reject unknown feedback fields");
   const invalidFeedback = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -504,6 +711,30 @@ try {
     })
   });
   assert.equal(invalidFeedback.status, 400, "the server should reject unreviewed feedback hints");
+  const duplicateAliasFeedback = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [{ kind: "concept", id: "attention", label: "Attention", aliases: ["focus", "focus"], status: "accepted" }],
+      document: { title: "Duplicate aliases", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(duplicateAliasFeedback.status, 400, "the server should reject duplicate feedback aliases consistently with the browser adapter");
+  const oversizedFeedbackArray = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: Array.from({ length: 501 }, (_, index) => ({ kind: "concept", id: String(index), status: "accepted" })),
+      document: { title: "Oversized feedback array", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(oversizedFeedbackArray.status, 400, "the server should reject feedback arrays above the item bound before mapping them");
   const providerCalls = [];
   const providerLogs = [];
   const providerServer = createAppServer({
@@ -570,17 +801,8 @@ try {
         document: { title: "Provider test", text: "Attention uses context to create a useful graph representation for review." }
       })
     });
-    assert.equal(providerResponse.status, 200);
-    assert.equal((await providerResponse.json()).schema, "llm-field-notes/graph@1");
-    assert.equal(providerCalls.length, 1);
-    assert.equal(providerCalls[0].feedbackCount, 1);
-    assert.deepEqual(providerCalls[0].feedback, [{
-      kind: "concept",
-      id: "attention",
-      label: "Attention",
-      status: "accepted"
-    }], "the server should strip untrusted feedback fields before invoking an extractor");
-    assert.match(providerCalls[0].requestId, /^[0-9a-f-]{36}$/);
+    assert.equal(providerResponse.status, 400, "the server should reject feedback fields outside the closed request schema");
+    assert.equal(providerCalls.length, 0, "invalid closed-contract requests should not reach the configured extractor");
     const providerMetadataResponse = await fetch(`http://127.0.0.1:${providerPort}/api/extract-graph`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -815,6 +1037,7 @@ try {
     const drainResponse = await drainRequest;
     assert.equal(drainResponse.status, 502);
     assert(drainAborted, "shutdown should abort active provider work");
+    await drainServer.waitForIdle();
   } finally {
     drainServer.close();
   }
@@ -959,6 +1182,36 @@ try {
     assert.equal(safeDefault.status, 200, "invalid embedded rate-limit configuration should fail safe to the default");
   } finally {
     invalidConfigServer.close();
+  }
+  const publicDefaultServer = createAppServer({ requireExtractorAuth: true });
+  await new Promise((resolve) => publicDefaultServer.listen(0, "127.0.0.1", resolve));
+  const publicDefaultPort = publicDefaultServer.address().port;
+  try {
+    const unconfiguredAuth = await fetch(`http://127.0.0.1:${publicDefaultPort}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Auth configuration", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(unconfiguredAuth.status, 503, "non-loopback extraction should fail closed when authentication is not configured");
+    assert.equal(unconfiguredAuth.headers.get("retry-after"), "60");
+  } finally {
+    publicDefaultServer.close();
+  }
+  const publicMetricsServer = createAppServer({ requireMetricsAuth: true });
+  await new Promise((resolve) => publicMetricsServer.listen(0, "127.0.0.1", resolve));
+  const publicMetricsPort = publicMetricsServer.address().port;
+  try {
+    const unconfiguredMetricsAuth = await fetch(`http://127.0.0.1:${publicMetricsPort}/metrics`);
+    assert.equal(unconfiguredMetricsAuth.status, 503, "non-loopback metrics should fail closed when authentication is not configured");
+    assert.equal(unconfiguredMetricsAuth.headers.get("retry-after"), "60");
+  } finally {
+    publicMetricsServer.close();
   }
   const authenticatedServer = createAppServer({ extractorAuthToken: "test-secret-token", maxRequestsPerMinute: 3 });
   await new Promise((resolve) => authenticatedServer.listen(0, "127.0.0.1", resolve));

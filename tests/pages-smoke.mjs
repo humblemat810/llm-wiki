@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
 
 const root = resolve(new URL("../dist/", import.meta.url).pathname);
+const sourceNotes = await readFile(new URL("../notes/tokens.md", import.meta.url), "utf8");
 async function collectFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
@@ -17,6 +18,12 @@ async function collectFiles(directory) {
   }
   return files;
 }
+assert.throws(
+  () => execFileSync(process.execPath, ["scripts/build-pages.mjs", "notes"], { stdio: "pipe" }),
+  /overlaps a source asset/,
+  "Pages builds must reject output paths that would delete source assets"
+);
+assert.equal(await readFile(new URL("../notes/tokens.md", import.meta.url), "utf8"), sourceNotes, "a rejected Pages output path must leave source notes intact");
 execFileSync(process.execPath, ["scripts/build-pages.mjs"], { stdio: "ignore", env: { ...process.env, PUBLIC_ORIGIN: "https://wiki.example.test/field-notes/" } });
 const outputFiles = await collectFiles(root);
 const totalOutputBytes = (await Promise.all(outputFiles.map(async (file) => (await stat(file)).size))).reduce((total, size) => total + size, 0);

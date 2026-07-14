@@ -12,15 +12,26 @@ export const MAX_GRAPH_NODES = 5000;
 export const MAX_GRAPH_EDGES = 10000;
 export const MAX_GRAPH_REVISIONS = 20;
 export const MAX_EVIDENCE_CHARS = 12000;
+export const MAX_EVIDENCE_INPUT_ITEMS = 32;
+export const MAX_EVIDENCE_RECORDS = 8;
+export const MAX_EVIDENCE_GROUNDING_RECORDS = 2000;
+export const MAX_EVIDENCE_GROUNDING_COMPARISONS = 250000;
+export const MAX_EVIDENCE_GROUNDING_SOURCE_SCAN_CHARS = 50000000;
 export const MAX_SOURCE_REFERENCES = 200;
+export const MAX_SOURCE_REFERENCE_DIAGNOSTICS =
+  (MAX_GRAPH_NODES + MAX_GRAPH_EDGES) * MAX_SOURCE_REFERENCES * (MAX_EVIDENCE_RECORDS + 1);
 export const MAX_ACTIVE_FEEDBACK_CONCEPTS = 100;
 export const MAX_FEEDBACK_EXAMPLES = 500;
 export const MAX_FEEDBACK_FINGERPRINT_EXAMPLES = 15000;
+export const MAX_FEEDBACK_EXPORT_OMITTED = MAX_FEEDBACK_EXAMPLES + MAX_GRAPH_NODES + MAX_GRAPH_EDGES;
 export const MAX_REVIEW_QUEUE_ITEMS = 15000;
 export const REVIEW_STALE_DAYS = 180;
 export const MAX_AMBIGUOUS_SOURCE_IDS = 100;
 export const MAX_AMBIGUOUS_EDGE_IDS = 100;
+export const MAX_CONFLICTING_ITEM_IDS = 100;
 export const MAX_ID_CHARS = 200;
+export const MAX_CONCEPT_LABEL_CHARS = 120;
+export const MAX_FEEDBACK_LABEL_CHARS = MAX_CONCEPT_LABEL_CHARS;
 export const MAX_NODE_MENTIONS = 1000000;
 export const MAX_FEEDBACK_COUNT = 1000000;
 export const MAX_GRAPH_VERSION = Number.MAX_SAFE_INTEGER;
@@ -34,19 +45,34 @@ export const MAX_RELATION_LABEL_CHARS = 80;
 export const MAX_TIMESTAMP_CHARS = 128;
 export const MAX_SOURCE_URI_CHARS = 2048;
 export const SOURCE_QUALITIES = new Set(["unknown", "primary", "secondary", "tertiary"]);
-const DEFAULT_GRAPH_TIMESTAMP = "1970-01-01T00:00:00.000Z";
+export const DEFAULT_GRAPH_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 const isStaleLearningExample = (example, now = Date.now()) => {
   if (!example.lastReviewedAt) return true;
   const timestamp = Date.parse(example.lastReviewedAt);
   return Number.isNaN(timestamp) || now - timestamp >= REVIEW_STALE_DAYS * 86400000;
 };
-const isStaleGuidanceItem = (item) => isStaleLearningExample(item);
-const includeGuidanceItem = (item, includeStale) => includeStale || !isStaleGuidanceItem(item);
+const isStaleGuidanceItem = (item, now = Date.now()) => isStaleLearningExample(item, now);
+const includeGuidanceItem = (item, includeStale, now = Date.now()) => includeStale || !isStaleGuidanceItem(item, now);
 
 export function advanceGraphVersion(graph) {
   if (!graph || !Number.isSafeInteger(graph.version) || graph.version >= MAX_GRAPH_VERSION) return false;
   graph.version += 1;
   return true;
+}
+
+export function compareGraphFreshness(candidateValue, referenceValue) {
+  const candidate = normalizeGraph(candidateValue);
+  const reference = normalizeGraph(referenceValue);
+  if (candidate.version !== reference.version) return candidate.version < reference.version ? -1 : 1;
+  const candidateTime = candidate.updatedAt ? Date.parse(candidate.updatedAt) : Number.NaN;
+  const referenceTime = reference.updatedAt ? Date.parse(reference.updatedAt) : Number.NaN;
+  if (Number.isFinite(candidateTime) && Number.isFinite(referenceTime) && candidateTime !== referenceTime) {
+    return candidateTime < referenceTime ? -1 : 1;
+  }
+  if (Number.isFinite(candidateTime) !== Number.isFinite(referenceTime)) {
+    return Number.isFinite(candidateTime) ? 1 : -1;
+  }
+  return 0;
 }
 
 const canAdvanceGraphVersion = (graph) => Number.isSafeInteger(graph?.version) && graph.version < MAX_GRAPH_VERSION;
@@ -101,6 +127,69 @@ const lexicalCompare = (left, right) => {
   const leftText = String(left);
   const rightText = String(right);
   return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+};
+const boundedDocumentTimestamp = (value) => typeof value === "string" && value.length <= MAX_TIMESTAMP_CHARS ? value : "";
+const documentRetentionKey = (document) => [
+  asText(document?.id).slice(0, MAX_ID_CHARS),
+  asText(document?.fingerprint).slice(0, MAX_ID_CHARS),
+  asText(document?.title).slice(0, 200),
+  fingerprintText(asText(document?.text).slice(0, MAX_DOCUMENT_CHARS))
+].join("\u0000");
+const makeDocumentRetentionCandidate = (document, index) => ({
+  document,
+  index,
+  time: Date.parse(boundedDocumentTimestamp(document?.addedAt)),
+  key: documentRetentionKey(document)
+});
+const compareDocumentRetention = (left, right) => {
+  const leftTime = left.time;
+  const rightTime = right.time;
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? 1 : -1;
+  if (Number.isFinite(leftTime) && leftTime !== rightTime) return leftTime - rightTime;
+  return lexicalCompare(left.key, right.key) || left.index - right.index;
+};
+const retainNewestDocuments = (documents) => {
+  if (!Array.isArray(documents)) return [];
+  const heap = [];
+  const swap = (left, right) => {
+    const temporary = heap[left];
+    heap[left] = heap[right];
+    heap[right] = temporary;
+  };
+  const siftUp = (index) => {
+    let current = index;
+    while (current > 0) {
+      const parent = Math.floor((current - 1) / 2);
+      if (compareDocumentRetention(heap[parent], heap[current]) <= 0) break;
+      swap(parent, current);
+      current = parent;
+    }
+  };
+  const siftDown = (index) => {
+    let current = index;
+    while (true) {
+      const left = current * 2 + 1;
+      const right = left + 1;
+      let smallest = current;
+      if (left < heap.length && compareDocumentRetention(heap[left], heap[smallest]) < 0) smallest = left;
+      if (right < heap.length && compareDocumentRetention(heap[right], heap[smallest]) < 0) smallest = right;
+      if (smallest === current) return;
+      swap(current, smallest);
+      current = smallest;
+    }
+  };
+  documents.forEach((document, index) => {
+    const candidate = makeDocumentRetentionCandidate(document, index);
+    if (heap.length < MAX_GRAPH_DOCUMENTS) {
+      heap.push(candidate);
+      siftUp(heap.length - 1);
+      return;
+    }
+    if (compareDocumentRetention(heap[0], candidate) >= 0) return;
+    heap[0] = candidate;
+    siftDown(0);
+  });
+  return heap.sort((left, right) => left.index - right.index).map(({ document }) => document);
 };
 const identityDigest = (value) => {
   let hash = 2166136261;
@@ -160,7 +249,7 @@ const asDateTime = (value, fallback = null) => {
 };
 const newestTimestamp = (current, incoming) => incoming && (!current || Date.parse(incoming) > Date.parse(current)) ? incoming : current;
 const oldestTimestamp = (current, incoming) => incoming && (!current || Date.parse(incoming) < Date.parse(current)) ? incoming : current;
-const normalizeAliases = (value) => [...new Set(asBoundedArray(value, 20).filter((item) => typeof item === "string").map((item) => asLine(item).slice(0, 120)).filter(Boolean))]
+const normalizeAliases = (value) => [...new Set(asBoundedArray(value, 20).filter((item) => typeof item === "string").map((item) => asLine(item).slice(0, MAX_CONCEPT_LABEL_CHARS)).filter(Boolean))]
   .sort(lexicalCompare)
   .slice(0, 20);
 const SAFE_SOURCE_URI_SCHEMES = new Set(["http", "https", "file", "urn", "doi"]);
@@ -192,17 +281,17 @@ function canonicalFeedbackExamples(value) {
       ? {
         kind: "concept",
         id: asText(example.id).slice(0, MAX_ID_CHARS),
-        label: asText(example.label).slice(0, 120),
-        aliases: asBoundedArray(example.aliases, 20).filter((alias) => typeof alias === "string").map((alias) => alias.trim().slice(0, 120)).sort(),
+        label: asText(example.label).slice(0, MAX_CONCEPT_LABEL_CHARS),
+        aliases: asBoundedArray(example.aliases, 20).filter((alias) => typeof alias === "string").map((alias) => alias.trim().slice(0, MAX_CONCEPT_LABEL_CHARS)).sort(),
         status: example.status
       }
       : {
         kind: "relation",
         id: asText(example.id).slice(0, MAX_ID_CHARS),
         source: asText(example.source).slice(0, MAX_ID_CHARS),
-        sourceLabel: asText(example.sourceLabel).slice(0, 120),
+        sourceLabel: asText(example.sourceLabel).slice(0, MAX_CONCEPT_LABEL_CHARS),
         target: asText(example.target).slice(0, MAX_ID_CHARS),
-        targetLabel: asText(example.targetLabel).slice(0, 120),
+        targetLabel: asText(example.targetLabel).slice(0, MAX_CONCEPT_LABEL_CHARS),
         label: asText(example.label).slice(0, MAX_RELATION_LABEL_CHARS),
         status: example.status
       })
@@ -247,7 +336,7 @@ export function matchesFeedbackFingerprint(value, fingerprint) {
 function normalizeLearningExample(value) {
   if (!value || typeof value !== "object" || !["concept", "relation"].includes(value.kind) || !["accepted", "rejected"].includes(value.status)) return null;
   if (value.kind === "concept") {
-    const label = asLine(value.label, asText(value.id)).slice(0, 120);
+    const label = asLine(value.label, asText(value.id)).slice(0, MAX_CONCEPT_LABEL_CHARS);
     const id = normalizeId(asText(value.id)) || slugify(label);
     if (!id || !label) return null;
     return {
@@ -267,9 +356,9 @@ function normalizeLearningExample(value) {
     kind: "relation",
     id: normalizeId(value.id) || makeEdgeId(source, target, label),
     source,
-    sourceLabel: asLine(value.sourceLabel, source).slice(0, 120),
+    sourceLabel: asLine(value.sourceLabel, source).slice(0, MAX_CONCEPT_LABEL_CHARS),
     target,
-    targetLabel: asLine(value.targetLabel, target).slice(0, 120),
+    targetLabel: asLine(value.targetLabel, target).slice(0, MAX_CONCEPT_LABEL_CHARS),
     label,
     status: value.status,
     lastReviewedAt: asDateTime(value.lastReviewedAt)
@@ -282,21 +371,21 @@ function learningExampleKey(example) {
     : `relation|${example.id}`;
 }
 
-function feedbackContextStatsForGraph(graph, { includeStale = true } = {}) {
-  const reusableExamples = graph.learning.examples.filter((example) => includeGuidanceItem(example, includeStale));
+function feedbackContextStatsForGraph(graph, { includeStale = true, now = Date.now() } = {}) {
+  const reusableExamples = graph.learning.examples.filter((example) => includeGuidanceItem(example, includeStale, now));
   const allKeys = new Set(graph.learning.examples.map(learningExampleKey));
   const keys = new Set(reusableExamples.map(learningExampleKey));
   graph.nodes
     .filter((node) => node.status === "accepted" || node.status === "rejected")
     .forEach((node) => {
       allKeys.add(`concept|${node.id}`);
-      if (includeGuidanceItem(node, includeStale)) keys.add(`concept|${node.id}`);
+      if (includeGuidanceItem(node, includeStale, now)) keys.add(`concept|${node.id}`);
     });
   graph.edges
     .filter((edge) => edge.status === "accepted" || edge.status === "rejected")
     .forEach((edge) => {
       allKeys.add(`relation|${edge.id}`);
-      if (includeGuidanceItem(edge, includeStale)) keys.add(`relation|${edge.id}`);
+      if (includeGuidanceItem(edge, includeStale, now)) keys.add(`relation|${edge.id}`);
     });
   return {
     available: keys.size,
@@ -387,8 +476,12 @@ function normalizeLearning(value) {
   return { examples: [...examples.values()] };
 }
 
+function canonicalDocumentText(text) {
+  return asText(text).replace(/\r\n?/g, "\n").split("\n").map((line) => line.trimEnd()).join("\n").trim();
+}
+
 function fingerprintText(text) {
-  const canonical = text.replace(/\r\n?/g, "\n").split("\n").map((line) => line.trimEnd()).join("\n").trim();
+  const canonical = canonicalDocumentText(text);
   let primary = 2166136261;
   let secondary = 2654435761;
   for (let index = 0; index < canonical.length; index += 1) {
@@ -399,6 +492,12 @@ function fingerprintText(text) {
     secondary = Math.imul(secondary, 2246822519);
   }
   return `fnv64-${(primary >>> 0).toString(16).padStart(8, "0")}${(secondary >>> 0).toString(16).padStart(8, "0")}-${canonical.length}`;
+}
+
+function sameDocumentContent(left, right) {
+  const leftText = canonicalDocumentText(left?.text);
+  const rightText = canonicalDocumentText(right?.text);
+  return leftText === rightText && (Boolean(leftText) || left?.fingerprint === right?.fingerprint);
 }
 
 const fingerprintDigest = (serialized) => {
@@ -414,9 +513,13 @@ const fingerprintDigest = (serialized) => {
   return `fnv64-${(primary >>> 0).toString(16).padStart(8, "0")}${(secondary >>> 0).toString(16).padStart(8, "0")}-${serialized.length}`;
 };
 
+const boundedHistoryForFingerprint = (history) => Array.isArray(history)
+  ? history.slice(-MAX_GRAPH_REVISIONS)
+  : [];
+
 const legacyFingerprintBackup = (graph, history = []) => fingerprintDigest(JSON.stringify({
   graph: normalizeGraph(graph),
-  history: asBoundedArray(history, MAX_GRAPH_REVISIONS).map((item) => normalizeGraph(item))
+  history: boundedHistoryForFingerprint(history).map((item) => normalizeGraph(item))
 }));
 
 const canonicalizeEvidenceForFingerprint = (value) => asArray(value)
@@ -464,7 +567,7 @@ export function fingerprintBackup(graph, history = []) {
   const serialized = JSON.stringify({
     graph: canonicalizeGraphForFingerprint(graph),
     // Undo history is ordered: the last entry is the next state to restore.
-    history: asBoundedArray(history, MAX_GRAPH_REVISIONS).map(canonicalizeGraphForFingerprint)
+    history: boundedHistoryForFingerprint(history).map(canonicalizeGraphForFingerprint)
   });
   return fingerprintDigest(serialized);
 }
@@ -479,7 +582,7 @@ export function matchesGraphFingerprint(graph, graphFingerprint, history = []) {
 
 function normalizeEvidence(value, fallbackSources = []) {
   const boundedFallbackSources = normalizeSourceIds(fallbackSources);
-  return asBoundedArray(value, 8).map((item) => {
+  const normalized = asBoundedArray(value, MAX_EVIDENCE_INPUT_ITEMS).map((item) => {
     if (typeof item === "string") {
       const text = item.slice(0, MAX_EVIDENCE_CHARS);
       return text.trim() ? { text, sources: boundedFallbackSources } : null;
@@ -491,6 +594,14 @@ function normalizeEvidence(value, fallbackSources = []) {
       sources: normalizeSourceIds(item.sources)
     };
   }).filter(Boolean);
+  const byText = new Map();
+  normalized.forEach((item) => {
+    const key = item.text.trim();
+    const existing = byText.get(key);
+    if (existing) existing.sources = mergeSourceIds(existing.sources, item.sources);
+    else byText.set(key, { text: item.text, sources: [...item.sources] });
+  });
+  return [...byText.values()].slice(0, MAX_EVIDENCE_RECORDS);
 }
 
 const normalizeSourceIds = (value, fallback = []) => [...new Set([...asBoundedArray(fallback, MAX_SOURCE_REFERENCES), ...asBoundedArray(value, MAX_SOURCE_REFERENCES)]
@@ -509,8 +620,16 @@ function mergeEvidence(current, incoming) {
     if (existing) existing.sources = mergeSourceIds(existing.sources, item.sources);
     else merged.set(key, { text: item.text, sources: [...item.sources] });
   });
-  return [...merged.values()].slice(0, 8);
+  return [...merged.values()].slice(0, MAX_EVIDENCE_RECORDS);
 }
+
+const importTruncationLimit = (graph) => {
+  const truncation = graph.integrity?.truncated || {};
+  if (truncation.documentText || truncation.evidenceText) return "document-text";
+  return Object.values(truncation).some((count) => Number.isSafeInteger(count) && count > 0)
+    ? "import-truncated"
+    : null;
+};
 
 function makeUniqueEdgeIds(edges) {
   const assigned = new Map();
@@ -566,7 +685,7 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
     idMap.set(key, id);
   };
   const normalizedNodes = asArray(input.nodes).slice(0, MAX_GRAPH_NODES).map((node) => {
-    const label = asLine(node?.label, asLine(node?.name, "Unnamed concept")).slice(0, 120);
+    const label = asLine(node?.label, asLine(node?.name, "Unnamed concept")).slice(0, MAX_CONCEPT_LABEL_CHARS);
     const rawInputId = asText(node?.id).trim();
     const rawId = normalizeId(rawInputId) || stableLabelId(label) || makeId("concept");
     const id = rawInputId ? rawId : stableLabelId(label) || rawId;
@@ -695,6 +814,28 @@ export function normalizeExtractionForDocument(value, { title, text, uri } = {})
   if (Array.isArray(input.edges) && input.edges.length > MAX_GRAPH_EDGES) {
     throw Object.assign(new Error(`Extractor response exceeds the ${MAX_GRAPH_EDGES}-relation limit.`), { code: "EXTRACTION_EDGES_TOO_LARGE" });
   }
+  const providerRecords = [
+    ...(Array.isArray(input.nodes) ? input.nodes.slice(0, MAX_GRAPH_NODES) : []),
+    ...(Array.isArray(input.edges) ? input.edges.slice(0, MAX_GRAPH_EDGES) : [])
+  ];
+  providerRecords.forEach((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return;
+    if (Array.isArray(item.evidence) && item.evidence.length > MAX_EVIDENCE_RECORDS) {
+      throw Object.assign(new Error(`Extractor response exceeds the ${MAX_EVIDENCE_RECORDS}-evidence-record limit per graph item.`), { code: "EXTRACTION_EVIDENCE_TOO_LARGE" });
+    }
+    if (Array.isArray(item.sources) && item.sources.length > MAX_SOURCE_REFERENCES) {
+      throw Object.assign(new Error(`Extractor response exceeds the ${MAX_SOURCE_REFERENCES}-provenance-reference limit per graph item.`), { code: "EXTRACTION_SOURCES_TOO_LARGE" });
+    }
+    (Array.isArray(item.evidence) ? item.evidence.slice(0, MAX_EVIDENCE_RECORDS) : []).forEach((evidence) => {
+      const evidenceText = typeof evidence === "string" ? evidence : evidence?.text;
+      if (typeof evidenceText === "string" && evidenceText.length > MAX_EVIDENCE_CHARS) {
+        throw Object.assign(new Error(`Extractor response exceeds the ${MAX_EVIDENCE_CHARS}-character evidence-text limit.`), { code: "EXTRACTION_EVIDENCE_TEXT_TOO_LARGE" });
+      }
+      if (evidence && typeof evidence === "object" && Array.isArray(evidence.sources) && evidence.sources.length > MAX_SOURCE_REFERENCES) {
+        throw Object.assign(new Error(`Extractor response exceeds the ${MAX_SOURCE_REFERENCES}-provenance-reference limit per evidence record.`), { code: "EXTRACTION_EVIDENCE_SOURCES_TOO_LARGE" });
+      }
+    });
+  });
   const providerNodeLabels = new Map();
   const ambiguousProviderNodeIds = new Set();
   asArray(input.nodes).slice(0, MAX_GRAPH_NODES).forEach((node) => {
@@ -776,6 +917,14 @@ export function normalizeGraph(value) {
     .filter((id) => typeof id === "string")
     .map((id) => normalizeId(id))
     .filter(Boolean));
+  const conflictingNodeIds = new Set(asBoundedArray(value.integrity?.conflictingNodeIds, MAX_CONFLICTING_ITEM_IDS)
+    .filter((id) => typeof id === "string")
+    .map((id) => normalizeId(id))
+    .filter(Boolean));
+  const conflictingEdgeIds = new Set(asBoundedArray(value.integrity?.conflictingEdgeIds, MAX_CONFLICTING_ITEM_IDS)
+    .filter((id) => typeof id === "string")
+    .map((id) => normalizeId(id))
+    .filter(Boolean));
   const truncated = {
     documents: Math.max(
       asTruncationCount(value.integrity?.truncated?.documents),
@@ -796,12 +945,38 @@ export function normalizeGraph(value) {
     learningExamples: Math.max(
       asTruncationCount(value.integrity?.truncated?.learningExamples),
       Array.isArray(value.learning?.examples) ? Math.max(0, value.learning.examples.length - MAX_FEEDBACK_EXAMPLES) : 0
-    )
+    ),
+    documentText: asTruncationCount(value.integrity?.truncated?.documentText),
+    evidenceText: asTruncationCount(value.integrity?.truncated?.evidenceText),
+    evidenceItems: asTruncationCount(value.integrity?.truncated?.evidenceItems),
+    sourceReferences: asTruncationCount(value.integrity?.truncated?.sourceReferences)
   };
-  const boundedDocuments = asBoundedArray(value.documents, MAX_GRAPH_DOCUMENTS);
+  const boundedDocuments = retainNewestDocuments(value.documents);
   const boundedNodes = asBoundedArray(value.nodes, MAX_GRAPH_NODES);
   const boundedRevisions = asBoundedArray(value.revisions, MAX_GRAPH_REVISIONS);
-  const boundedLearningExamples = asBoundedArray(value.learning?.examples, MAX_FEEDBACK_EXAMPLES);
+  const boundedLearningExamples = Array.isArray(value.learning?.examples)
+    ? value.learning.examples.slice(-MAX_FEEDBACK_EXAMPLES)
+    : [];
+  const countOversizedEvidence = (items) => asBoundedArray(items, MAX_GRAPH_NODES + MAX_GRAPH_EDGES)
+    .reduce((total, item) => {
+      const evidence = asBoundedArray(item?.evidence, MAX_EVIDENCE_INPUT_ITEMS);
+      return total + evidence.filter((entry) => (
+        (typeof entry === "string" && entry.length > MAX_EVIDENCE_CHARS)
+        || (entry && typeof entry === "object" && typeof entry.text === "string" && entry.text.length > MAX_EVIDENCE_CHARS)
+      )).length;
+    }, 0);
+  const countNestedTruncation = (items) => asBoundedArray(items, MAX_GRAPH_NODES + MAX_GRAPH_EDGES)
+    .reduce((counts, item) => {
+      const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : [];
+      counts.evidenceItems = Math.min(Number.MAX_SAFE_INTEGER, counts.evidenceItems + Math.max(0, rawEvidence.length - MAX_EVIDENCE_RECORDS));
+      const rawSources = Array.isArray(item?.sources) ? item.sources : [];
+      counts.sourceReferences = Math.min(Number.MAX_SAFE_INTEGER, counts.sourceReferences + Math.max(0, rawSources.length - MAX_SOURCE_REFERENCES));
+      asBoundedArray(rawEvidence, MAX_EVIDENCE_INPUT_ITEMS).forEach((evidence) => {
+        const evidenceSources = Array.isArray(evidence?.sources) ? evidence.sources : [];
+        counts.sourceReferences = Math.min(Number.MAX_SAFE_INTEGER, counts.sourceReferences + Math.max(0, evidenceSources.length - MAX_SOURCE_REFERENCES));
+      });
+      return counts;
+    }, { evidenceItems: 0, sourceReferences: 0 });
   const dropped = {
     documents: Math.max(
       asDroppedCount(value.integrity?.dropped?.documents),
@@ -835,6 +1010,17 @@ export function normalizeGraph(value) {
       lastReviewedAt: asDateTime(doc.lastReviewedAt)
     };
   });
+  truncated.documentText = Math.max(
+    truncated.documentText,
+    boundedDocuments.filter((document) => document && typeof document.text === "string" && document.text.length > MAX_DOCUMENT_CHARS).length
+  );
+  truncated.evidenceText = Math.max(
+    truncated.evidenceText,
+    countOversizedEvidence([...boundedNodes, ...asBoundedArray(value.edges, MAX_GRAPH_EDGES)])
+  );
+  const nestedTruncation = countNestedTruncation([...boundedNodes, ...asBoundedArray(value.edges, MAX_GRAPH_EDGES)]);
+  truncated.evidenceItems = Math.max(truncated.evidenceItems, nestedTruncation.evidenceItems);
+  truncated.sourceReferences = Math.max(truncated.sourceReferences, nestedTruncation.sourceReferences);
   const orderedDocuments = [];
   const seenDocumentIds = new Set();
   normalizedDocuments.forEach((document) => {
@@ -853,8 +1039,12 @@ export function normalizeGraph(value) {
     let documentId = document.id;
     let existing = documentsById.get(documentId);
     const sameContent = existing && (
-      existing.fingerprint === document.fingerprint
-      || (existing.text && document.text && existing.text === document.text)
+      sameDocumentContent(existing, document)
+      || (
+        existing.id === document.id
+        && (!canonicalDocumentText(existing.text) || !canonicalDocumentText(document.text))
+        && existing.fingerprint === document.fingerprint
+      )
     );
     if (existing && !sameContent) {
       ambiguousSourceIds.add(document.id);
@@ -885,16 +1075,38 @@ export function normalizeGraph(value) {
       existing.lastReviewedAt = document.lastReviewedAt;
     }
   });
-  graph.documents = [...documentsById.values()];
+  const textBudgetCandidates = [...documentsById.values()]
+    .map((document, index) => makeDocumentRetentionCandidate(document, index))
+    .sort((left, right) => compareDocumentRetention(right, left));
+  let remainingDocumentText = MAX_GRAPH_DOCUMENT_CHARS;
+  let aggregateDocumentTextTruncation = 0;
+  const boundedTextDocuments = [];
+  for (const candidate of textBudgetCandidates) {
+    if (candidate.document.text.length > remainingDocumentText) {
+      aggregateDocumentTextTruncation += 1;
+      continue;
+    }
+    boundedTextDocuments.push(candidate);
+    remainingDocumentText -= candidate.document.text.length;
+  }
+  truncated.documentText = Math.max(truncated.documentText, aggregateDocumentTextTruncation);
+  graph.documents = boundedTextDocuments
+    .sort((left, right) => left.index - right.index)
+    .map(({ document }) => document);
+  const normalizedTruncated = { ...truncated };
+  if (!normalizedTruncated.documentText) delete normalizedTruncated.documentText;
+  if (!normalizedTruncated.evidenceText) delete normalizedTruncated.evidenceText;
+  if (!normalizedTruncated.evidenceItems) delete normalizedTruncated.evidenceItems;
+  if (!normalizedTruncated.sourceReferences) delete normalizedTruncated.sourceReferences;
   graph.integrity = {
-    ambiguousSourceIds: [...ambiguousSourceIds].slice(0, MAX_AMBIGUOUS_SOURCE_IDS),
-    ambiguousEdgeIds: [...ambiguousEdgeIds].slice(0, MAX_AMBIGUOUS_EDGE_IDS),
-    ...(Object.values(truncated).some((count) => count > 0) ? { truncated } : {}),
+    ambiguousSourceIds: [...ambiguousSourceIds].sort(lexicalCompare).slice(0, MAX_AMBIGUOUS_SOURCE_IDS),
+    ambiguousEdgeIds: [...ambiguousEdgeIds].sort(lexicalCompare).slice(0, MAX_AMBIGUOUS_EDGE_IDS),
+    ...(Object.values(normalizedTruncated).some((count) => count > 0) ? { truncated: normalizedTruncated } : {}),
     ...(Object.values(dropped).some((count) => count > 0) ? { dropped } : {})
   };
   const normalizedNodes = boundedNodes.filter((node) => node && typeof node === "object" && asText(node.id).trim()).map((node) => ({
     id: normalizeId(node.id),
-    label: asLine(node.label, "Unnamed concept").slice(0, 120),
+    label: asLine(node.label, "Unnamed concept").slice(0, MAX_CONCEPT_LABEL_CHARS),
     aliases: normalizeAliases(node.aliases),
     type: asLine(node.type, "concept").slice(0, 30),
     confidence: asConfidence(node.confidence),
@@ -914,6 +1126,7 @@ export function normalizeGraph(value) {
       nodesById.set(node.id, node);
       return;
     }
+    if (existing.status !== node.status) conflictingNodeIds.add(node.id);
     const labels = [...new Set([existing.label, node.label, ...existing.aliases, ...node.aliases])];
     const existingUpdatedAt = Date.parse(existing.updatedAt);
     const incomingUpdatedAt = Date.parse(node.updatedAt);
@@ -968,6 +1181,10 @@ export function normalizeGraph(value) {
       edgesByKey.set(key, edge);
       return;
     }
+    if (existing.status !== edge.status) {
+      conflictingEdgeIds.add(existing.id);
+      conflictingEdgeIds.add(edge.id);
+    }
     const [source, target] = [existing.source, existing.target].sort(lexicalCompare);
     const ids = [existing.id, edge.id].sort(lexicalCompare);
     const labels = [existing.label, edge.label].sort((left, right) => lexicalCompare(left.toLowerCase(), right.toLowerCase()) || lexicalCompare(left, right));
@@ -994,7 +1211,17 @@ export function normalizeGraph(value) {
     edgesByKey.set(key, canonical);
   });
   graph.edges = makeUniqueEdgeIds([...edgesByKey.values()]);
-  graph.integrity.ambiguousEdgeIds = [...ambiguousEdgeIds].slice(0, MAX_AMBIGUOUS_EDGE_IDS);
+  graph.integrity.ambiguousEdgeIds = [...ambiguousEdgeIds].sort(lexicalCompare).slice(0, MAX_AMBIGUOUS_EDGE_IDS);
+  if (conflictingNodeIds.size) {
+    graph.integrity.conflictingNodeIds = [...conflictingNodeIds].sort(lexicalCompare).slice(0, MAX_CONFLICTING_ITEM_IDS);
+  } else {
+    delete graph.integrity.conflictingNodeIds;
+  }
+  if (conflictingEdgeIds.size) {
+    graph.integrity.conflictingEdgeIds = [...conflictingEdgeIds].sort(lexicalCompare).slice(0, MAX_CONFLICTING_ITEM_IDS);
+  } else {
+    delete graph.integrity.conflictingEdgeIds;
+  }
   if (Object.values(dropped).some((count) => count > 0)) graph.integrity.dropped = dropped;
   graph.revisions = asBoundedArray(value.revisions, MAX_GRAPH_REVISIONS).filter((revision) => revision && typeof revision === "object").map((revision, index) => ({
     id: normalizeId(revision.id) || `rev-${graph.version}-${index}`,
@@ -1080,6 +1307,22 @@ export function normalizeGraph(value) {
   return graph;
 }
 
+export function canonicalizeGraphForExport(value) {
+  const graph = normalizeGraph(value);
+  return {
+    ...graph,
+    documents: [...graph.documents].sort((left, right) => lexicalCompare(
+      `${left.id}\u0000${left.fingerprint}\u0000${left.title}`,
+      `${right.id}\u0000${right.fingerprint}\u0000${right.title}`
+    )),
+    nodes: [...graph.nodes].sort((left, right) => lexicalCompare(left.id, right.id)),
+    edges: [...graph.edges].sort((left, right) => lexicalCompare(
+      `${relationSemanticKey(left.source, left.target, left.label)}\u0000${left.id}`,
+      `${relationSemanticKey(right.source, right.target, right.label)}\u0000${right.id}`
+    ))
+  };
+}
+
 const cleanPhrase = (value) => value.replace(/^#+\s*/, "").replace(/[`"'“”()[\]{}]/g, "").replace(/\s+/g, " ").trim().replace(/^(the|a|an)\s+/i, "").replace(/[.,;:!?]+$/, "");
 const wordSegmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
   ? new Intl.Segmenter("und", { granularity: "word" })
@@ -1120,7 +1363,7 @@ function feedbackHints(value) {
     const status = ["accepted", "rejected"].includes(example.status) ? example.status : null;
     if (!status) return;
     if (example.kind === "concept") {
-      const label = cleanPhrase(asLine(example.label)).slice(0, 120);
+      const label = cleanPhrase(asLine(example.label)).slice(0, MAX_CONCEPT_LABEL_CHARS);
       const id = normalizeId(asText(example.id)) || slugify(label);
       if (!id || !label) return;
       const aliases = normalizeAliases(example.aliases);
@@ -1136,8 +1379,8 @@ function feedbackHints(value) {
     }
     if (example.kind === "relation") {
       const label = cleanPhrase(asLine(example.label)).slice(0, MAX_RELATION_LABEL_CHARS);
-      const sourceLabel = cleanPhrase(asLine(example.sourceLabel, example.source)).slice(0, 120);
-      const targetLabel = cleanPhrase(asLine(example.targetLabel, example.target)).slice(0, 120);
+      const sourceLabel = cleanPhrase(asLine(example.sourceLabel, example.source)).slice(0, MAX_CONCEPT_LABEL_CHARS);
+      const targetLabel = cleanPhrase(asLine(example.targetLabel, example.target)).slice(0, MAX_CONCEPT_LABEL_CHARS);
       const source = normalizeId(asText(example.source)) || slugify(sourceLabel);
       const target = normalizeId(asText(example.target)) || slugify(targetLabel);
       if (label && source && target) relations.push({
@@ -1422,10 +1665,10 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
 export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
   graph = normalizeGraph(graph);
   extraction = normalizeExtraction(extraction);
+  const importLimit = importTruncationLimit(graph);
+  if (importLimit) return { graph, duplicate: false, limited: importLimit };
   const duplicate = graph.documents.some((document) => (
-    document.fingerprint && document.fingerprint === extraction.source.fingerprint
-  ) || (
-    document.text && extraction.source.text && fingerprintText(document.text) === fingerprintText(extraction.source.text)
+    sameDocumentContent(document, extraction.source)
   ));
   if (duplicate) return { graph, duplicate: true };
   const conflictingSource = graph.documents.find((document) => (
@@ -1565,13 +1808,17 @@ export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
 
 export function replaceSource(value, sourceId, extraction) {
   const graph = normalizeGraph(value);
+  const importLimit = importTruncationLimit(graph);
+  if (importLimit) return { graph, replaced: false, limited: importLimit };
+  if (graph.integrity.ambiguousSourceIds.includes(normalizeId(sourceId))) {
+    return { graph, replaced: false, ambiguous: true };
+  }
   const source = graph.documents.find((document) => document.id === sourceId);
   if (!source) return { graph, replaced: false };
   if (!canAdvanceGraphVersion(graph)) return { graph, replaced: false, limited: "version" };
   let normalizedExtraction = normalizeExtraction(extraction);
   const duplicate = graph.documents.some((document) => document.id !== sourceId && (
-    (document.fingerprint && document.fingerprint === normalizedExtraction.source.fingerprint)
-    || (document.text && normalizedExtraction.source.text && fingerprintText(document.text) === fingerprintText(normalizedExtraction.source.text))
+    sameDocumentContent(document, normalizedExtraction.source)
   ));
   if (duplicate) return { graph, replaced: false, duplicate: true };
   const incomingSourceId = normalizedExtraction.source.id;
@@ -1699,6 +1946,21 @@ function diffStringSet(beforeValues, afterValues) {
   };
 }
 
+const INTEGRITY_DIAGNOSTIC_KEYS = ["documents", "nodes", "edges", "revisions", "learningExamples", "documentText", "evidenceText", "evidenceItems", "sourceReferences"];
+function diffIntegrityCounts(beforeValue, afterValue) {
+  const normalizeCounts = (value) => Object.fromEntries(INTEGRITY_DIAGNOSTIC_KEYS.map((key) => [
+    key,
+    Number.isSafeInteger(value?.[key]) && value[key] >= 0 ? value[key] : 0
+  ]));
+  const before = normalizeCounts(beforeValue);
+  const after = normalizeCounts(afterValue);
+  return {
+    before,
+    after,
+    changed: JSON.stringify(before) !== JSON.stringify(after)
+  };
+}
+
 export function diffGraphs(beforeValue, afterValue) {
   const before = normalizeGraph(beforeValue);
   const after = normalizeGraph(afterValue);
@@ -1708,7 +1970,11 @@ export function diffGraphs(beforeValue, afterValue) {
   const learning = diffCollection(before.learning.examples, after.learning.examples, "learning");
   const integrity = {
     ambiguousSourceIds: diffStringSet(before.integrity.ambiguousSourceIds, after.integrity.ambiguousSourceIds),
-    ambiguousEdgeIds: diffStringSet(before.integrity.ambiguousEdgeIds, after.integrity.ambiguousEdgeIds)
+    ambiguousEdgeIds: diffStringSet(before.integrity.ambiguousEdgeIds, after.integrity.ambiguousEdgeIds),
+    conflictingNodeIds: diffStringSet(before.integrity.conflictingNodeIds || [], after.integrity.conflictingNodeIds || []),
+    conflictingEdgeIds: diffStringSet(before.integrity.conflictingEdgeIds || [], after.integrity.conflictingEdgeIds || []),
+    truncated: diffIntegrityCounts(before.integrity.truncated, after.integrity.truncated),
+    dropped: diffIntegrityCounts(before.integrity.dropped, after.integrity.dropped)
   };
   const redaction = {
     before: before.redacted === true,
@@ -1717,10 +1983,15 @@ export function diffGraphs(beforeValue, afterValue) {
   };
   const summary = {
     added: documents.added.length + nodes.added.length + edges.added.length + learning.added.length
-      + integrity.ambiguousSourceIds.added.length + integrity.ambiguousEdgeIds.added.length,
+      + integrity.ambiguousSourceIds.added.length + integrity.ambiguousEdgeIds.added.length
+      + integrity.conflictingNodeIds.added.length + integrity.conflictingEdgeIds.added.length,
     removed: documents.removed.length + nodes.removed.length + edges.removed.length + learning.removed.length
-      + integrity.ambiguousSourceIds.removed.length + integrity.ambiguousEdgeIds.removed.length,
-    changed: documents.changed.length + nodes.changed.length + edges.changed.length + learning.changed.length + (redaction.changed ? 1 : 0)
+      + integrity.ambiguousSourceIds.removed.length + integrity.ambiguousEdgeIds.removed.length
+      + integrity.conflictingNodeIds.removed.length + integrity.conflictingEdgeIds.removed.length,
+    changed: documents.changed.length + nodes.changed.length + edges.changed.length + learning.changed.length
+      + (integrity.truncated.changed ? 1 : 0)
+      + (integrity.dropped.changed ? 1 : 0)
+      + (redaction.changed ? 1 : 0)
   };
   return {
     format: DIFF_FORMAT,
@@ -1969,9 +2240,14 @@ function appendRevision(graph, reason) {
 
 export function applyFeedbackDataset(value, examples) {
   let graph = normalizeGraph(value);
+  const originalGraph = normalizeGraph(graph);
+  if (Array.isArray(examples) && examples.length > MAX_FEEDBACK_FINGERPRINT_EXAMPLES) {
+    return { graph, updates: 0, learned: 0, skipped: 0, conflicts: 0, changed: false, limited: "feedback-examples" };
+  }
   if (!canAdvanceGraphVersion(graph)) {
     return { graph, updates: 0, learned: 0, skipped: 0, conflicts: 0, changed: false, limited: "version" };
   }
+  let hitVersionLimit = false;
   let updates = 0;
   let skipped = 0;
   let learned = 0;
@@ -2091,7 +2367,11 @@ export function applyFeedbackDataset(value, examples) {
     return lexicalCompare(learningExampleTieBreak(left), learningExampleTieBreak(right));
   });
   normalizedExamples.forEach((normalizedExample) => {
-    if (!canAdvanceGraphVersion(graph)) return;
+    if (hitVersionLimit) return;
+    if (!canAdvanceGraphVersion(graph)) {
+      hitVersionLimit = true;
+      return;
+    }
     const kind = normalizedExample.kind === "relation" ? "edge" : "node";
     const memoryKey = learningExampleKey(normalizedExample);
     const previousLearning = remembered.get(memoryKey);
@@ -2145,7 +2425,10 @@ export function applyFeedbackDataset(value, examples) {
     }
     if (preferredDecision === normalizedExample && item.status !== normalizedExample.status) {
       mutateFeedbackItem(item, normalizedExample.status === "accepted" ? "up" : "down");
-      appendRevision(graph, `${normalizedExample.status === "accepted" ? "Confirmed" : "Dismissed"} ${kind === "node" ? item.label : `relation ${item.label}`}`);
+      if (!appendRevision(graph, `${normalizedExample.status === "accepted" ? "Confirmed" : "Dismissed"} ${kind === "node" ? item.label : `relation ${item.label}`}`)) {
+        hitVersionLimit = true;
+        return;
+      }
       itemChanged = true;
     }
     if (kind === "node" && preferredDecision === normalizedExample && normalizedExample.aliases.length && canAdvanceGraphVersion(graph)) {
@@ -2155,7 +2438,10 @@ export function applyFeedbackDataset(value, examples) {
         updatedItem.aliases = aliases;
         aliases.forEach((alias) => indexNodeLabel(alias, updatedItem));
         updatedItem.updatedAt = new Date().toISOString();
-        advanceGraphVersion(graph);
+        if (!advanceGraphVersion(graph)) {
+          hitVersionLimit = true;
+          return;
+        }
         graph.updatedAt = updatedItem.updatedAt;
         graph.revisions.unshift({
           id: `rev-${graph.version}`,
@@ -2175,6 +2461,9 @@ export function applyFeedbackDataset(value, examples) {
     }
     if (itemChanged) updates += 1;
   });
+  if (hitVersionLimit) {
+    return { graph: originalGraph, updates: 0, learned: 0, skipped, conflicts: conflictingKeys.size, changed: false, limited: "version" };
+  }
   const finalLearning = new Map(remembered);
   const learningKeys = new Set([...initialLearning.keys(), ...finalLearning.keys()]);
   learned = [...learningKeys].filter((key) => {
@@ -2184,16 +2473,23 @@ export function applyFeedbackDataset(value, examples) {
   }).length;
   if (learned) {
     graph.learning.examples = [...finalLearning.values()].slice(-MAX_FEEDBACK_EXAMPLES);
-    if (!updates) appendRevision(graph, `Stored ${learned} reusable learning example${learned === 1 ? "" : "s"}`);
+    if (!updates && !appendRevision(graph, `Stored ${learned} reusable learning example${learned === 1 ? "" : "s"}${conflictingKeys.size ? `; detected ${conflictingKeys.size} contradictory reviewed decision${conflictingKeys.size === 1 ? "" : "s"} and selected a deterministic value` : ""}`)) {
+      return { graph: originalGraph, updates: 0, learned: 0, skipped, conflicts: conflictingKeys.size, changed: false, limited: "version" };
+    }
+  }
+  if (conflictingKeys.size && updates && canAdvanceGraphVersion(graph)) {
+    if (!appendRevision(graph, `Detected ${conflictingKeys.size} contradictory reviewed decision${conflictingKeys.size === 1 ? "" : "s"}; selected values by review freshness or deterministic tie-breaking`)) {
+      return { graph: originalGraph, updates: 0, learned: 0, skipped, conflicts: conflictingKeys.size, changed: false, limited: "version" };
+    }
   }
   return { graph, updates, learned, skipped, conflicts: conflictingKeys.size, changed: updates > 0 || learned > 0 };
 }
 
-export function buildExtractorFeedback(value, { includeStale = true } = {}) {
+export function buildExtractorFeedback(value, { includeStale = true, now = Date.now() } = {}) {
   const graph = normalizeGraph(value);
   const nodeLabels = new Map(graph.nodes.map((node) => [node.id, node.label]));
   const concepts = graph.nodes
-      .filter((node) => (node.status === "accepted" || node.status === "rejected") && includeGuidanceItem(node, includeStale))
+      .filter((node) => (node.status === "accepted" || node.status === "rejected") && includeGuidanceItem(node, includeStale, now))
       .map((node) => ({
         kind: "concept",
         id: node.id,
@@ -2204,7 +2500,7 @@ export function buildExtractorFeedback(value, { includeStale = true } = {}) {
       }))
       .sort((left, right) => lexicalCompare(`${left.id}\u0000${slugify(left.label)}`, `${right.id}\u0000${slugify(right.label)}`));
   const relations = graph.edges
-      .filter((edge) => (edge.status === "accepted" || edge.status === "rejected") && includeGuidanceItem(edge, includeStale))
+      .filter((edge) => (edge.status === "accepted" || edge.status === "rejected") && includeGuidanceItem(edge, includeStale, now))
       .map((edge) => ({
         kind: "relation",
         id: edge.id,
@@ -2233,18 +2529,43 @@ export function buildExtractorFeedback(value, { includeStale = true } = {}) {
     seen.add(key);
     feedback.push(example);
   };
-  graph.learning.examples
-    .filter((example) => includeGuidanceItem(example, includeStale))
-    .forEach(add);
+  const learningExamples = graph.learning.examples
+    .filter((example) => includeGuidanceItem(example, includeStale, now))
+    .map((example, index) => ({
+      example,
+      index,
+      timestamp: example.lastReviewedAt ? Date.parse(example.lastReviewedAt) : Number.NaN
+    }))
+    .sort((left, right) => {
+      if (Number.isFinite(left.timestamp) && Number.isFinite(right.timestamp) && left.timestamp !== right.timestamp) {
+        return right.timestamp - left.timestamp;
+      }
+      if (Number.isFinite(left.timestamp) !== Number.isFinite(right.timestamp)) {
+        return Number.isFinite(left.timestamp) ? -1 : 1;
+      }
+      return left.index - right.index;
+    })
+    .map(({ example }) => example);
+  const learningKeys = new Set(learningExamples.map(learningExampleKey));
+  const reservedLiveKeys = new Set([
+    concepts[0],
+    relations[0]
+  ].filter(Boolean)
+    .map(learningExampleKey)
+    .filter((key) => !learningKeys.has(key)));
+  const learningBudget = Math.max(0, MAX_FEEDBACK_EXAMPLES - reservedLiveKeys.size);
+  const boundedLearningExamples = learningBudget ? learningExamples.slice(0, learningBudget) : [];
+  boundedLearningExamples.forEach(add);
   for (let index = 0; feedback.length < MAX_FEEDBACK_EXAMPLES && (index < concepts.length || index < relations.length); index += 1) {
     if (concepts[index]) add(concepts[index]);
     if (relations[index]) add(relations[index]);
   }
-  return feedback.map((example) => {
-    const output = { ...example };
-    delete output.lastReviewedAt;
-    return output;
-  });
+  const feedbackFields = ["kind", "id", "label", "aliases", "source", "sourceLabel", "target", "targetLabel", "status"];
+  return feedback.map((example) => Object.fromEntries(
+    feedbackFields
+      .filter((field) => example[field] !== undefined)
+      .map((field) => [field, example[field]])
+  ));
 }
 
 export function clearLearningMemory(value) {
@@ -2270,6 +2591,9 @@ export function clearStaleLearningMemory(value) {
 
 export function removeSource(value, sourceId, { recordRevision = true } = {}) {
   const graph = normalizeGraph(value);
+  if (graph.integrity.ambiguousSourceIds.includes(normalizeId(sourceId))) {
+    return { graph, removed: false, removedNodes: 0, removedEdges: 0, ambiguous: true };
+  }
   const source = graph.documents.find((document) => document.id === sourceId);
   if (!source) return { graph, removed: false, removedNodes: 0, removedEdges: 0 };
   if (recordRevision && !canAdvanceGraphVersion(graph)) {
@@ -2341,11 +2665,83 @@ export function removeSource(value, sourceId, { recordRevision = true } = {}) {
   };
 }
 
-export function inspectGraph(value) {
+function buildEvidenceGrounding(graph) {
+  const documentIds = new Set(graph.documents.map((document) => document.id));
+  const ambiguousSourceIds = new Set(graph.integrity.ambiguousSourceIds);
+  const sourceTextById = new Map(graph.documents.map((document) => [document.id, canonicalDocumentText(document.text)]));
+  const unanchoredByItem = new Map();
+  let evidenceGroundingComparisons = 0;
+  let evidenceGroundingSourceScanChars = 0;
+  let evidenceGroundingTruncated = false;
+  let evidenceGroundingCheckedRecords = 0;
+  let evidenceGroundingSkippedRecords = 0;
+  let anchoredEvidenceRecords = 0;
+  let unanchoredEvidenceRecords = 0;
+  const evidenceIsAnchored = (evidence) => {
+    const quote = canonicalDocumentText(evidence.text);
+    if (!quote) return false;
+    let hasValidSource = false;
+    for (const sourceId of evidence.sources) {
+      if (evidenceGroundingComparisons >= MAX_EVIDENCE_GROUNDING_COMPARISONS) {
+        evidenceGroundingTruncated = true;
+        return null;
+      }
+      const sourceText = sourceTextById.get(sourceId);
+      if (!documentIds.has(sourceId) || ambiguousSourceIds.has(sourceId) || !sourceText) continue;
+      hasValidSource = true;
+      if (evidenceGroundingSourceScanChars + sourceText.length > MAX_EVIDENCE_GROUNDING_SOURCE_SCAN_CHARS) {
+        evidenceGroundingTruncated = true;
+        return null;
+      }
+      evidenceGroundingComparisons += 1;
+      evidenceGroundingSourceScanChars += sourceText.length;
+      if (sourceText.includes(quote)) return true;
+    }
+    return hasValidSource ? false : false;
+  };
+  const evidenceRecords = [
+    ...graph.nodes.flatMap((node) => node.evidence.map((evidence) => ({ kind: "node", item: node, evidence }))),
+    ...graph.edges.flatMap((edge) => edge.evidence.map((evidence) => ({ kind: "edge", item: edge, evidence })))
+  ];
+  const evidenceRecordsToCheck = graph.redacted === true
+    ? []
+    : evidenceRecords.slice(0, MAX_EVIDENCE_GROUNDING_RECORDS);
+  for (const record of evidenceRecordsToCheck) {
+    const anchored = evidenceIsAnchored(record.evidence);
+    if (anchored === null) {
+      evidenceGroundingSkippedRecords += 1;
+      continue;
+    }
+    evidenceGroundingCheckedRecords += 1;
+    if (anchored) {
+        anchoredEvidenceRecords += 1;
+    } else {
+      unanchoredEvidenceRecords += 1;
+      unanchoredByItem.set(`${record.kind}:${record.item.id}`, (unanchoredByItem.get(`${record.kind}:${record.item.id}`) || 0) + 1);
+    }
+  }
+  if (graph.redacted !== true && evidenceRecords.length > evidenceRecordsToCheck.length) evidenceGroundingTruncated = true;
+  if (evidenceGroundingSkippedRecords > 0) evidenceGroundingTruncated = true;
+  return {
+    evidenceGroundingAvailable: graph.redacted !== true,
+    evidenceGroundingCheckedRecords,
+    evidenceGroundingComparisons,
+    evidenceGroundingSourceScanChars,
+    evidenceGroundingTruncated,
+    evidenceGroundingSkippedRecords,
+    anchoredEvidenceRecords,
+    unanchoredEvidenceRecords,
+    unanchoredByItem
+  };
+}
+
+export function inspectGraph(value, { now = Date.now(), includeReviewQueue = false } = {}) {
   const graph = normalizeGraph(value);
   const documentIds = new Set(graph.documents.map((document) => document.id));
   const ambiguousSourceIds = new Set(graph.integrity.ambiguousSourceIds);
   const ambiguousEdgeIds = new Set(graph.integrity.ambiguousEdgeIds);
+  const conflictingNodeIds = new Set(graph.integrity.conflictingNodeIds || []);
+  const conflictingEdgeIds = new Set(graph.integrity.conflictingEdgeIds || []);
   const nodeLabelOwners = new Map();
   const ambiguousNodeLabels = new Set();
   graph.nodes.forEach((node) => {
@@ -2360,10 +2756,10 @@ export function inspectGraph(value) {
   const freshReviewedSources = graph.documents.filter((document) => {
     if (!document.lastReviewedAt) return false;
     const timestamp = Date.parse(document.lastReviewedAt);
-    return !Number.isNaN(timestamp) && Date.now() - timestamp < REVIEW_STALE_DAYS * 86400000;
+    return !Number.isNaN(timestamp) && now - timestamp < REVIEW_STALE_DAYS * 86400000;
   }).length;
-  const staleLearningExamples = graph.learning.examples.filter((example) => isStaleLearningExample(example)).length;
-  const feedbackContext = feedbackContextStatsForGraph(graph, { includeStale: false });
+  const staleLearningExamples = graph.learning.examples.filter((example) => isStaleLearningExample(example, now)).length;
+  const feedbackContext = feedbackContextStatsForGraph(graph, { includeStale: false, now });
   const truncation = graph.integrity.truncated || {};
   const dropped = graph.integrity.dropped || {};
   const truncatedItems = [
@@ -2371,7 +2767,11 @@ export function inspectGraph(value) {
     truncation.nodes,
     truncation.edges,
     truncation.revisions,
-    truncation.learningExamples
+    truncation.learningExamples,
+    truncation.documentText,
+    truncation.evidenceText,
+    truncation.evidenceItems,
+    truncation.sourceReferences
   ].reduce((total, count) => Math.min(
     Number.MAX_SAFE_INTEGER,
     total + (Number.isSafeInteger(count) && count > 0 ? count : 0)
@@ -2399,6 +2799,7 @@ export function inspectGraph(value) {
   const supportedNodes = activeNodes.filter((node) => hasValidSource(node) || evidenceHasValidSource(node));
   const supportedEdges = activeEdges.filter((edge) => hasValidSource(edge) || evidenceHasValidSource(edge));
   const provenanceItems = [...activeNodes, ...activeEdges];
+  const grounding = buildEvidenceGrounding(graph);
   const orphanedSourceReferences = [
     ...graph.nodes.flatMap((node) => node.sources),
     ...graph.edges.flatMap((edge) => edge.sources),
@@ -2409,8 +2810,8 @@ export function inspectGraph(value) {
     ...graph.edges.flatMap((edge) => edge.sources),
     ...evidenceRecords.flatMap((evidence) => evidence.sources)
   ].filter((sourceId) => ambiguousSourceIds.has(sourceId)).length;
-  const reviewCandidates = buildReviewQueue(graph, MAX_REVIEW_QUEUE_ITEMS);
-  return {
+  const reviewCandidates = buildReviewQueue(graph, MAX_REVIEW_QUEUE_ITEMS, now, grounding.unanchoredByItem);
+  const health = {
     documents: graph.documents.length,
     nodes: graph.nodes.length,
     activeNodes: activeNodes.length,
@@ -2421,6 +2822,7 @@ export function inspectGraph(value) {
     reviewedNodes,
     reviewedEdges,
     reviewCandidates: reviewCandidates.length,
+    reviewQueueTruncated: reviewCandidates.truncated === true,
     staleReviewCandidates: reviewCandidates.filter((candidate) => candidate.stale).length,
     newEvidenceReviewCandidates: reviewCandidates.filter((candidate) => candidate.newEvidence).length,
     learningExamples: graph.learning.examples.length,
@@ -2435,6 +2837,10 @@ export function inspectGraph(value) {
     truncatedEdges: truncation.edges || 0,
     truncatedRevisions: truncation.revisions || 0,
     truncatedLearningExamples: truncation.learningExamples || 0,
+    truncatedDocumentText: truncation.documentText || 0,
+    truncatedEvidenceText: truncation.evidenceText || 0,
+    truncatedEvidenceItems: truncation.evidenceItems || 0,
+    truncatedSourceReferences: truncation.sourceReferences || 0,
     dropped: droppedItems > 0,
     droppedItems,
     droppedDocuments: dropped.documents || 0,
@@ -2442,12 +2848,25 @@ export function inspectGraph(value) {
     droppedEdges: dropped.edges || 0,
     droppedRevisions: dropped.revisions || 0,
     droppedLearningExamples: dropped.learningExamples || 0,
+    conflictingNodeIds: conflictingNodeIds.size,
+    conflictingEdgeIds: conflictingEdgeIds.size,
+    conflictingItems: conflictingNodeIds.size + conflictingEdgeIds.size,
     staleLearningExamples,
     acceptedItems,
     rejectedItems,
     ambiguousLabels: ambiguousNodeLabels.size,
     rejectedEdges: graph.edges.length - activeEdges.length,
     evidenceRecords: evidenceRecords.length,
+    evidenceGroundingAvailable: grounding.evidenceGroundingAvailable,
+    evidenceGroundingCheckedRecords: grounding.evidenceGroundingCheckedRecords,
+    evidenceGroundingComparisons: grounding.evidenceGroundingComparisons,
+    evidenceGroundingSourceScanChars: grounding.evidenceGroundingSourceScanChars,
+    evidenceGroundingTruncated: grounding.evidenceGroundingTruncated,
+    anchoredEvidenceRecords: grounding.anchoredEvidenceRecords,
+    unanchoredEvidenceRecords: grounding.unanchoredEvidenceRecords,
+    evidenceGroundingCoverage: grounding.evidenceGroundingAvailable
+      ? (grounding.evidenceGroundingCheckedRecords ? Math.round(grounding.anchoredEvidenceRecords / grounding.evidenceGroundingCheckedRecords * 100) : 100)
+      : null,
     supportedNodes: supportedNodes.length,
     unsupportedNodes: activeNodes.length - supportedNodes.length,
     supportedEdges: supportedEdges.length,
@@ -2463,9 +2882,11 @@ export function inspectGraph(value) {
     redacted: graph.redacted === true,
     provenanceCoverage: provenanceItems.length ? Math.round((supportedNodes.length + supportedEdges.length) / provenanceItems.length * 100) : 100
   };
+  if (includeReviewQueue) health.reviewQueue = reviewCandidates;
+  return health;
 }
 
-function buildReviewQueue(graph, limit = 20) {
+function buildReviewQueue(graph, limit = 20, now = Date.now(), unanchoredByItem = new Map()) {
   const documentIds = new Set(graph.documents.map((document) => document.id));
   const documentsById = new Map(graph.documents.map((document) => [document.id, document]));
   const ambiguousSourceIds = new Set(graph.integrity.ambiguousSourceIds);
@@ -2475,7 +2896,7 @@ function buildReviewQueue(graph, limit = 20) {
     if (!item.lastReviewedAt) return null;
     const timestamp = Date.parse(item.lastReviewedAt);
     if (Number.isNaN(timestamp)) return null;
-    return Math.max(0, Math.floor((Date.now() - timestamp) / 86400000));
+    return Math.max(0, Math.floor((now - timestamp) / 86400000));
   };
   const isStaleReview = (item) => item.status !== "inferred"
     && (reviewAgeDays(item) === null || reviewAgeDays(item) >= REVIEW_STALE_DAYS);
@@ -2492,6 +2913,7 @@ function buildReviewQueue(graph, limit = 20) {
       return !Number.isNaN(sourceAddedAt) && sourceAddedAt > reviewedAt;
     });
   };
+  const unanchoredEvidenceFor = (kind, item) => unanchoredByItem.get(`${kind}:${item.id}`) || 0;
   const staleReason = (item) => {
     const age = reviewAgeDays(item);
     return age === null ? "review timestamp missing" : `review stale by ${age} day${age === 1 ? "" : "s"}`;
@@ -2504,6 +2926,9 @@ function buildReviewQueue(graph, limit = 20) {
     if (!supported) reasons.push("unresolved provenance");
     return reasons.length ? reasons.join(" · ") : "routine review";
   };
+  const addGroundingReason = (reason, candidate) => candidate.unanchoredEvidence
+    ? `${reason} · ${candidate.unanchoredEvidence} unanchored evidence`
+    : reason;
   const candidates = [
     ...graph.nodes.filter((node) => node.status === "inferred").map((node) => ({
       kind: "node",
@@ -2511,7 +2936,8 @@ function buildReviewQueue(graph, limit = 20) {
       label: node.label,
       confidence: node.confidence,
       evidence: node.evidence.length,
-      supported: hasValidSource(node)
+      supported: hasValidSource(node),
+      unanchoredEvidence: unanchoredEvidenceFor("node", node)
     })),
     ...graph.edges.filter((edge) => edge.status === "inferred").map((edge) => ({
       kind: "edge",
@@ -2519,26 +2945,29 @@ function buildReviewQueue(graph, limit = 20) {
       label: edge.label,
       confidence: edge.confidence,
       evidence: edge.evidence.length,
-      supported: hasValidSource(edge)
+      supported: hasValidSource(edge),
+      unanchoredEvidence: unanchoredEvidenceFor("edge", edge)
     })),
-    ...graph.nodes.filter((node) => node.status !== "inferred" && (isStaleReview(node) || hasNewEvidenceSinceReview(node))).map((node) => ({
+    ...graph.nodes.filter((node) => node.status !== "inferred" && (isStaleReview(node) || hasNewEvidenceSinceReview(node) || unanchoredEvidenceFor("node", node) > 0)).map((node) => ({
       kind: "node",
       id: node.id,
       label: node.label,
       confidence: node.confidence,
       evidence: node.evidence.length,
       supported: hasValidSource(node),
+      unanchoredEvidence: unanchoredEvidenceFor("node", node),
       stale: isStaleReview(node),
       newEvidence: hasNewEvidenceSinceReview(node),
       staleReason: staleReason(node)
     })),
-    ...graph.edges.filter((edge) => edge.status !== "inferred" && (isStaleReview(edge) || hasNewEvidenceSinceReview(edge))).map((edge) => ({
+    ...graph.edges.filter((edge) => edge.status !== "inferred" && (isStaleReview(edge) || hasNewEvidenceSinceReview(edge) || unanchoredEvidenceFor("edge", edge) > 0)).map((edge) => ({
       kind: "edge",
       id: edge.id,
       label: edge.label,
       confidence: edge.confidence,
       evidence: edge.evidence.length,
       supported: hasValidSource(edge),
+      unanchoredEvidence: unanchoredEvidenceFor("edge", edge),
       stale: isStaleReview(edge),
       newEvidence: hasNewEvidenceSinceReview(edge),
       staleReason: staleReason(edge)
@@ -2554,11 +2983,13 @@ function buildReviewQueue(graph, limit = 20) {
         supported: true,
         sourceQuality: document.quality,
         sourceReviewed: Boolean(document.lastReviewedAt),
+        unanchoredEvidence: 0,
         stale: isStaleSourceReview(document),
         staleReason: staleReason(document)
       }))
   ];
-  return candidates
+  const boundedLimit = Math.max(0, Math.min(Number(limit) || 0, MAX_REVIEW_QUEUE_ITEMS));
+  const rankedCandidates = candidates
     .map((candidate) => ({
       ...candidate,
       priority: Number((candidate.kind === "source"
@@ -2566,6 +2997,7 @@ function buildReviewQueue(graph, limit = 20) {
         : (1 - candidate.confidence) * 100
           + (candidate.evidence ? 0 : 25)
           + (candidate.supported ? 0 : 35)
+          + (candidate.unanchoredEvidence ? 30 : 0)
           + (candidate.stale ? 20 : 0)
           + (candidate.newEvidence ? 30 : 0)).toFixed(2)),
       reason: candidate.kind === "source"
@@ -2574,27 +3006,32 @@ function buildReviewQueue(graph, limit = 20) {
           candidate.sourceReviewed ? "" : "source not reviewed",
           candidate.sourceReviewed && candidate.stale ? candidate.staleReason : ""
         ].filter(Boolean).join(" · ")
-        : candidate.newEvidence
+        : addGroundingReason(candidate.newEvidence
           ? `new evidence since review${candidate.stale ? ` · ${candidate.staleReason}` : ""}`
-        : candidate.stale
-          ? candidate.staleReason
-          : describePriority(candidate)
+          : candidate.stale
+            ? candidate.staleReason
+            : describePriority(candidate), candidate)
     }))
     .sort((left, right) => right.priority - left.priority
       || left.confidence - right.confidence
       || left.evidence - right.evidence
       || lexicalCompare(left.label, right.label)
       || lexicalCompare(left.kind, right.kind)
-      || lexicalCompare(left.id, right.id))
-    .slice(0, Math.max(0, Math.min(Number(limit) || 0, MAX_REVIEW_QUEUE_ITEMS)));
+      || lexicalCompare(left.id, right.id));
+  const result = rankedCandidates.slice(0, boundedLimit);
+  Object.defineProperty(result, "truncated", {
+    value: rankedCandidates.length > boundedLimit,
+    enumerable: false
+  });
+  return result;
 }
 
-export function reviewQueue(value, limit = 20) {
-  return buildReviewQueue(normalizeGraph(value), limit);
+export function reviewQueue(value, limit = 20, { now = Date.now() } = {}) {
+  const graph = normalizeGraph(value);
+  return buildReviewQueue(graph, limit, now, buildEvidenceGrounding(graph).unanchoredByItem);
 }
 
-export function reviewQueueExport(value, limit = MAX_REVIEW_QUEUE_ITEMS) {
-  return reviewQueue(value, limit).map((candidate) => ({
+const reviewQueueExportItem = (candidate) => ({
     kind: candidate.kind,
     id: candidate.id,
     label: candidate.label,
@@ -2603,11 +3040,230 @@ export function reviewQueueExport(value, limit = MAX_REVIEW_QUEUE_ITEMS) {
     evidence: candidate.evidence,
     supported: candidate.supported,
     reason: candidate.reason,
+    ...(candidate.unanchoredEvidence ? { unanchoredEvidence: candidate.unanchoredEvidence } : {}),
     ...(candidate.stale ? { stale: true } : {}),
     ...(candidate.newEvidence ? { newEvidence: true } : {}),
     ...(candidate.sourceQuality ? { sourceQuality: candidate.sourceQuality } : {}),
     ...(candidate.sourceReviewed ? { sourceReviewed: true } : {})
-  }));
+  });
+
+export function reviewQueueExport(value, limit = MAX_REVIEW_QUEUE_ITEMS, options) {
+  return reviewQueue(value, limit, options).map(reviewQueueExportItem);
+}
+
+export const HEALTH_COUNT_LIMITS = {
+  documents: MAX_GRAPH_DOCUMENTS,
+  nodes: MAX_GRAPH_NODES,
+  activeNodes: MAX_GRAPH_NODES,
+  rejectedNodes: MAX_GRAPH_NODES,
+  edges: MAX_GRAPH_EDGES,
+  activeEdges: MAX_GRAPH_EDGES,
+  reviewedItems: MAX_GRAPH_NODES + MAX_GRAPH_EDGES,
+  reviewedNodes: MAX_GRAPH_NODES,
+  reviewedEdges: MAX_GRAPH_EDGES,
+  reviewCandidates: MAX_REVIEW_QUEUE_ITEMS,
+  staleReviewCandidates: MAX_REVIEW_QUEUE_ITEMS,
+  newEvidenceReviewCandidates: MAX_REVIEW_QUEUE_ITEMS,
+  feedbackContextAvailable: MAX_FEEDBACK_FINGERPRINT_EXAMPLES + MAX_FEEDBACK_EXAMPLES,
+  feedbackContextRetained: MAX_FEEDBACK_EXAMPLES,
+  feedbackContextExcluded: MAX_FEEDBACK_FINGERPRINT_EXAMPLES + MAX_FEEDBACK_EXAMPLES,
+  learningExamples: MAX_FEEDBACK_EXAMPLES,
+  staleLearningExamples: MAX_FEEDBACK_EXAMPLES,
+  acceptedItems: MAX_GRAPH_NODES + MAX_GRAPH_EDGES,
+  rejectedItems: MAX_GRAPH_NODES + MAX_GRAPH_EDGES,
+  evidenceRecords: (MAX_GRAPH_NODES + MAX_GRAPH_EDGES) * 8,
+  ambiguousLabels: MAX_GRAPH_NODES,
+  rejectedEdges: MAX_GRAPH_EDGES,
+  reviewedSources: MAX_GRAPH_DOCUMENTS,
+  supportedNodes: MAX_GRAPH_NODES,
+  unsupportedNodes: MAX_GRAPH_NODES,
+  supportedEdges: MAX_GRAPH_EDGES,
+  unsupportedEdges: MAX_GRAPH_EDGES,
+  orphanedSourceReferences: MAX_SOURCE_REFERENCE_DIAGNOSTICS,
+  ambiguousSourceIds: MAX_AMBIGUOUS_SOURCE_IDS,
+  ambiguousEdgeIds: MAX_AMBIGUOUS_EDGE_IDS,
+  ambiguousSourceReferences: MAX_SOURCE_REFERENCE_DIAGNOSTICS,
+  conflictingNodeIds: MAX_CONFLICTING_ITEM_IDS,
+  conflictingEdgeIds: MAX_CONFLICTING_ITEM_IDS,
+  conflictingItems: MAX_CONFLICTING_ITEM_IDS * 2,
+  truncatedDocuments: 0xffffffff,
+  truncatedNodes: 0xffffffff,
+  truncatedEdges: 0xffffffff,
+  truncatedRevisions: 0xffffffff,
+  truncatedLearningExamples: 0xffffffff,
+  truncatedDocumentText: 0xffffffff,
+  truncatedEvidenceText: 0xffffffff,
+  truncatedEvidenceItems: 0xffffffff,
+  truncatedSourceReferences: 0xffffffff,
+  truncatedItems: Number.MAX_SAFE_INTEGER,
+  droppedItems: Number.MAX_SAFE_INTEGER,
+  droppedDocuments: Number.MAX_SAFE_INTEGER,
+  droppedNodes: Number.MAX_SAFE_INTEGER,
+  droppedEdges: Number.MAX_SAFE_INTEGER,
+  droppedRevisions: Number.MAX_SAFE_INTEGER,
+  droppedLearningExamples: Number.MAX_SAFE_INTEGER,
+  evidenceGroundingCheckedRecords: MAX_EVIDENCE_GROUNDING_RECORDS,
+  evidenceGroundingComparisons: MAX_EVIDENCE_GROUNDING_COMPARISONS,
+  evidenceGroundingSourceScanChars: MAX_EVIDENCE_GROUNDING_SOURCE_SCAN_CHARS,
+  anchoredEvidenceRecords: (MAX_GRAPH_NODES + MAX_GRAPH_EDGES) * MAX_EVIDENCE_RECORDS,
+  unanchoredEvidenceRecords: (MAX_GRAPH_NODES + MAX_GRAPH_EDGES) * MAX_EVIDENCE_RECORDS
+};
+
+export const HEALTH_PERCENTAGES = new Set(["evidenceGroundingCoverage", "provenanceCoverage", "sourceReviewCoverage", "freshSourceReviewCoverage"]);
+export const HEALTH_BOOLEANS = new Set([
+  "feedbackContextTruncated",
+  "truncated",
+  "dropped",
+  "reviewQueueTruncated",
+  "evidenceGroundingAvailable",
+  "evidenceGroundingTruncated",
+  "redacted"
+]);
+export const HEALTH_OBJECTS = new Set(["sourceQuality"]);
+export const HEALTH_GATE_LIMITS = {
+  maxOrphaned: Number.MAX_SAFE_INTEGER,
+  maxAmbiguous: Number.MAX_SAFE_INTEGER,
+  maxUnsupportedNodes: MAX_GRAPH_NODES,
+  maxUnsupportedEdges: MAX_GRAPH_EDGES,
+  maxReviewCandidates: MAX_REVIEW_QUEUE_ITEMS,
+  maxReviewQueueTruncated: 1,
+  maxEvidenceGroundingTruncated: 1,
+  maxFeedbackContextTruncated: 1,
+  maxStaleReviewCandidates: MAX_REVIEW_QUEUE_ITEMS,
+  maxStaleLearningExamples: MAX_FEEDBACK_EXAMPLES,
+  maxWithheldGuidance: MAX_FEEDBACK_FINGERPRINT_EXAMPLES + MAX_FEEDBACK_EXAMPLES,
+  maxUnanchoredEvidence: (MAX_GRAPH_NODES + MAX_GRAPH_EDGES) * 8,
+  maxConflictingItems: MAX_CONFLICTING_ITEM_IDS * 2,
+  maxTruncatedItems: Number.MAX_SAFE_INTEGER,
+  maxDroppedItems: Number.MAX_SAFE_INTEGER
+};
+
+function assertHealthCount(value, path, maximum) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) throw new Error(`${path} must be an integer from 0 to ${maximum}.`);
+}
+
+export function validateHealthReport(value, { label = "health report" } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
+  if (value.format !== HEALTH_FORMAT) throw new Error(`${label} must declare ${HEALTH_FORMAT}.`);
+  if (value.graphSchema !== GRAPH_SCHEMA) throw new Error(`${label} must declare ${GRAPH_SCHEMA}.`);
+  assertHealthCount(value.graphVersion, `${label}.graphVersion`, Number.MAX_SAFE_INTEGER);
+  if (typeof value.inspectedAt !== "string" || Number.isNaN(Date.parse(value.inspectedAt))) throw new Error(`${label}.inspectedAt must be a valid timestamp.`);
+  if (value.graphFingerprint !== undefined && !/^fnv64-[0-9a-f]{16}-[0-9]+$/.test(value.graphFingerprint)) throw new Error(`${label}.graphFingerprint is invalid.`);
+  if (value.appVersion !== undefined && (typeof value.appVersion !== "string" || !value.appVersion.trim() || value.appVersion.length > 64)) throw new Error(`${label}.appVersion is invalid.`);
+  if (!value.health || typeof value.health !== "object" || Array.isArray(value.health)) throw new Error(`${label}.health is missing.`);
+  for (const [field, maximum] of Object.entries(HEALTH_COUNT_LIMITS)) {
+    if (value.health[field] !== undefined) assertHealthCount(value.health[field], `${label}.health.${field}`, maximum);
+  }
+  for (const field of HEALTH_PERCENTAGES) {
+    if (value.health[field] !== undefined && value.health[field] !== null) assertHealthCount(value.health[field], `${label}.health.${field}`, 100);
+  }
+  for (const field of HEALTH_BOOLEANS) {
+    if (value.health[field] !== undefined && typeof value.health[field] !== "boolean") {
+      throw new Error(`${label}.health.${field} must be boolean.`);
+    }
+  }
+  if (value.health.sourceQuality !== undefined) {
+    const sourceQuality = value.health.sourceQuality;
+    if (!sourceQuality || typeof sourceQuality !== "object" || Array.isArray(sourceQuality)) {
+      throw new Error(`${label}.health.sourceQuality must be an object.`);
+    }
+    for (const key of Object.keys(sourceQuality)) {
+      if (!SOURCE_QUALITIES.has(key)) throw new Error(`${label}.health.sourceQuality.${key} is not a supported source quality.`);
+      assertHealthCount(sourceQuality[key], `${label}.health.sourceQuality.${key}`, MAX_GRAPH_DOCUMENTS);
+    }
+  }
+  const health = value.health;
+  const assertHealthInvariant = (condition, message) => {
+    if (!condition) throw new Error(`${label}.health.${message}`);
+  };
+  if (health.activeNodes !== undefined && health.nodes !== undefined && health.activeNodes > health.nodes) throw new Error(`${label}.health.activeNodes cannot exceed nodes.`);
+  if (health.activeEdges !== undefined && health.edges !== undefined && health.activeEdges > health.edges) throw new Error(`${label}.health.activeEdges cannot exceed edges.`);
+  if (health.reviewedItems !== undefined && health.reviewedNodes !== undefined && health.reviewedEdges !== undefined && health.reviewedItems !== health.reviewedNodes + health.reviewedEdges) throw new Error(`${label}.health.reviewedItems must equal reviewedNodes plus reviewedEdges.`);
+  if (health.conflictingItems !== undefined && health.conflictingNodeIds !== undefined && health.conflictingEdgeIds !== undefined && health.conflictingItems !== health.conflictingNodeIds + health.conflictingEdgeIds) throw new Error(`${label}.health.conflictingItems must equal conflictingNodeIds plus conflictingEdgeIds.`);
+  if (health.nodes !== undefined && health.activeNodes !== undefined && health.rejectedNodes !== undefined) {
+    assertHealthInvariant(health.activeNodes + health.rejectedNodes === health.nodes, "activeNodes plus rejectedNodes must equal nodes.");
+  }
+  if (health.edges !== undefined && health.activeEdges !== undefined && health.rejectedEdges !== undefined) {
+    assertHealthInvariant(health.activeEdges + health.rejectedEdges === health.edges, "activeEdges plus rejectedEdges must equal edges.");
+  }
+  if (health.reviewedNodes !== undefined && health.nodes !== undefined) {
+    assertHealthInvariant(health.reviewedNodes <= health.nodes, "reviewedNodes cannot exceed nodes.");
+  }
+  if (health.reviewedEdges !== undefined && health.edges !== undefined) {
+    assertHealthInvariant(health.reviewedEdges <= health.edges, "reviewedEdges cannot exceed edges.");
+  }
+  if (health.acceptedItems !== undefined && health.rejectedItems !== undefined && health.reviewedItems !== undefined) {
+    assertHealthInvariant(health.acceptedItems + health.rejectedItems <= health.reviewedItems, "acceptedItems plus rejectedItems cannot exceed reviewedItems.");
+  }
+  if (health.supportedNodes !== undefined && health.unsupportedNodes !== undefined && health.activeNodes !== undefined) {
+    assertHealthInvariant(health.supportedNodes + health.unsupportedNodes === health.activeNodes, "supportedNodes plus unsupportedNodes must equal activeNodes.");
+  }
+  if (health.supportedEdges !== undefined && health.unsupportedEdges !== undefined && health.activeEdges !== undefined) {
+    assertHealthInvariant(health.supportedEdges + health.unsupportedEdges === health.activeEdges, "supportedEdges plus unsupportedEdges must equal activeEdges.");
+  }
+  if (health.reviewedSources !== undefined && health.documents !== undefined) {
+    assertHealthInvariant(health.reviewedSources <= health.documents, "reviewedSources cannot exceed documents.");
+  }
+  if (health.sourceQuality !== undefined && health.documents !== undefined) {
+    const sourceQualityTotal = Object.values(health.sourceQuality).reduce((total, count) => total + count, 0);
+    assertHealthInvariant(sourceQualityTotal <= health.documents, "sourceQuality totals cannot exceed documents.");
+  }
+  if (health.feedbackContextAvailable !== undefined && health.feedbackContextRetained !== undefined) {
+    assertHealthInvariant(health.feedbackContextRetained <= health.feedbackContextAvailable, "feedbackContextRetained cannot exceed feedbackContextAvailable.");
+  }
+  if (health.evidenceGroundingCheckedRecords !== undefined
+    && health.anchoredEvidenceRecords !== undefined
+    && health.unanchoredEvidenceRecords !== undefined) {
+    assertHealthInvariant(
+      health.anchoredEvidenceRecords + health.unanchoredEvidenceRecords <= health.evidenceGroundingCheckedRecords,
+      "anchoredEvidenceRecords plus unanchoredEvidenceRecords cannot exceed evidenceGroundingCheckedRecords."
+    );
+  }
+  if (health.reviewCandidates !== undefined && health.staleReviewCandidates !== undefined) {
+    assertHealthInvariant(health.staleReviewCandidates <= health.reviewCandidates, "staleReviewCandidates cannot exceed reviewCandidates.");
+  }
+  if (health.reviewCandidates !== undefined && health.newEvidenceReviewCandidates !== undefined) {
+    assertHealthInvariant(health.newEvidenceReviewCandidates <= health.reviewCandidates, "newEvidenceReviewCandidates cannot exceed reviewCandidates.");
+  }
+  if (health.learningExamples !== undefined && health.staleLearningExamples !== undefined) {
+    assertHealthInvariant(health.staleLearningExamples <= health.learningExamples, "staleLearningExamples cannot exceed learningExamples.");
+  }
+  if (!Array.isArray(value.reviewQueue) || value.reviewQueue.length > MAX_REVIEW_QUEUE_ITEMS) throw new Error(`${label}.reviewQueue must contain at most ${MAX_REVIEW_QUEUE_ITEMS} items.`);
+  if (health.reviewCandidates !== undefined && value.reviewQueue.length > health.reviewCandidates) {
+    throw new Error(`${label}.reviewQueue cannot exceed health.reviewCandidates.`);
+  }
+  value.reviewQueue.forEach((candidate, index) => {
+    const path = `${label}.reviewQueue[${index}]`;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error(`${path} must be an object.`);
+    if (!["node", "edge", "source"].includes(candidate.kind)) throw new Error(`${path}.kind is invalid.`);
+    if (typeof candidate.id !== "string" || !candidate.id.trim() || candidate.id.length > MAX_ID_CHARS) throw new Error(`${path}.id is invalid.`);
+    if (typeof candidate.label !== "string" || candidate.label.length > MAX_CONCEPT_LABEL_CHARS) throw new Error(`${path}.label is invalid.`);
+    if (!Number.isFinite(candidate.priority) || candidate.priority < 0 || candidate.priority > 1000) throw new Error(`${path}.priority is invalid.`);
+    if (!Number.isFinite(candidate.confidence) || candidate.confidence < 0 || candidate.confidence > 1) throw new Error(`${path}.confidence is invalid.`);
+    assertHealthCount(candidate.evidence, `${path}.evidence`, 8);
+    if (typeof candidate.supported !== "boolean" || typeof candidate.reason !== "string" || !candidate.reason.trim() || candidate.reason.length > 200) throw new Error(`${path} has invalid routing metadata.`);
+  });
+  if (value.gate !== undefined) {
+    if (!value.gate || typeof value.gate !== "object" || Array.isArray(value.gate)) throw new Error(`${label}.gate must be an object.`);
+    if (typeof value.gate.passed !== "boolean") throw new Error(`${label}.gate.passed must be boolean.`);
+    if (!Array.isArray(value.gate.violations) || value.gate.violations.length > 12 || value.gate.violations.some((violation) => typeof violation !== "string" || !violation.trim() || violation.length > 200)) {
+      throw new Error(`${label}.gate.violations is invalid.`);
+    }
+    if (!value.gate.passed && value.gate.violations.length === 0) throw new Error(`${label}.gate cannot fail without violations.`);
+    if (value.gate.passed && value.gate.violations.length > 0) throw new Error(`${label}.gate cannot pass with violations.`);
+    if (!value.gate.thresholds || typeof value.gate.thresholds !== "object" || Array.isArray(value.gate.thresholds)) throw new Error(`${label}.gate.thresholds is missing.`);
+    for (const [field, maximum] of Object.entries(HEALTH_GATE_LIMITS)) {
+      const threshold = value.gate.thresholds[field];
+      if (threshold !== undefined && threshold !== null) assertHealthCount(threshold, `${label}.gate.thresholds.${field}`, maximum);
+    }
+    for (const field of ["minProvenance", "minFreshSourceReview"]) {
+      const threshold = value.gate.thresholds[field];
+      if (threshold !== undefined && threshold !== null && (!Number.isFinite(threshold) || threshold < 0 || threshold > 100)) {
+        throw new Error(`${label}.gate.thresholds.${field} must be a percentage from 0 to 100 or null.`);
+      }
+    }
+  }
+  return true;
 }
 
 export function buildHealthReport(value, {
@@ -2616,14 +3272,21 @@ export function buildHealthReport(value, {
 } = {}) {
   const graph = normalizeGraph(value);
   const fallbackInspectionTime = new Date().toISOString();
-  return {
+  const normalizedInspectionTime = asDateTime(inspectedAt, fallbackInspectionTime);
+  const inspectionTime = Date.parse(normalizedInspectionTime);
+  const health = inspectGraph(graph, { now: inspectionTime, includeReviewQueue: true });
+  const reviewCandidates = health.reviewQueue || [];
+  delete health.reviewQueue;
+  const report = {
     format: HEALTH_FORMAT,
     graphSchema: GRAPH_SCHEMA,
     graphVersion: graph.version,
     graphFingerprint: fingerprintBackup(graph),
     appVersion: typeof appVersion === "string" && appVersion.trim() ? appVersion.trim().slice(0, 64) : "unknown",
-    inspectedAt: asDateTime(inspectedAt, fallbackInspectionTime),
-    health: inspectGraph(graph),
-    reviewQueue: reviewQueueExport(graph, MAX_REVIEW_QUEUE_ITEMS)
+    inspectedAt: normalizedInspectionTime,
+    health,
+    reviewQueue: reviewCandidates.map(reviewQueueExportItem)
   };
+  validateHealthReport(report);
+  return report;
 }

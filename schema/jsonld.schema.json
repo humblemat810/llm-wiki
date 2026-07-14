@@ -18,6 +18,7 @@
     "learningExampleCount": { "type": "integer", "minimum": 0, "maximum": 500 },
     "fingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$", "maxLength": 128 },
     "redacted": { "type": "boolean" },
+    "integrity": { "$ref": "#/$defs/integrity" },
     "@graph": {
       "type": "array",
       "maxItems": 16500,
@@ -45,7 +46,42 @@
     "sourceRef": {
       "type": "array",
       "maxItems": 200,
-      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 },
+      "uniqueItems": true
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["ambiguousSourceIds", "ambiguousEdgeIds"],
+      "properties": {
+        "ambiguousSourceIds": { "$ref": "#/$defs/integrityIds" },
+        "ambiguousEdgeIds": { "$ref": "#/$defs/integrityIds" },
+        "conflictingNodeIds": { "$ref": "#/$defs/integrityIds" },
+        "conflictingEdgeIds": { "$ref": "#/$defs/integrityIds" },
+        "truncated": { "$ref": "#/$defs/diagnosticCounts" },
+        "dropped": { "$ref": "#/$defs/diagnosticCounts" }
+      },
+      "additionalProperties": false
+    },
+    "integrityIds": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 },
+      "uniqueItems": true
+    },
+    "diagnosticCounts": {
+      "type": "object",
+      "properties": {
+        "documents": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "nodes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "edges": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "revisions": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "learningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "documentText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "evidenceText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "evidenceItems": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "sourceReferences": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      },
+      "additionalProperties": false
     },
     "evidence": {
       "type": "array",
@@ -139,7 +175,7 @@
                 "lfn:kind": { "enum": ["concept", "relation"] },
                 "lfn:status": { "enum": ["accepted", "rejected"] },
                 "lfn:concept": { "type": "string", "maxLength": 2000 },
-                "lfn:aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 } },
+                "lfn:aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "uniqueItems": true },
                 "lfn:sourceConcept": { "type": "string", "maxLength": 2000 },
                 "lfn:targetConcept": { "type": "string", "maxLength": 2000 },
                 "lfn:sourceLabel": { "type": "string", "maxLength": 120 },

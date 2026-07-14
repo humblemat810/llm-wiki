@@ -23,7 +23,11 @@ export async function readBoundedTextFile(path, maxBytes, {
       if (total > byteLimit) throw new Error(tooLargeMessage);
       chunks.push(buffer.subarray(0, bytesRead));
     }
-    return Buffer.concat(chunks, total).toString("utf8");
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
+    } catch {
+      throw new Error(`${label} is not valid UTF-8: ${path}`);
+    }
   } finally {
     await handle.close();
   }

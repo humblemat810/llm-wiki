@@ -10,6 +10,7 @@
     "graphSchema": { "const": "llm-field-notes/graph@1" },
     "exportedAt": { "type": "string", "format": "date-time" },
     "datasetFingerprint": { "type": "string", "pattern": "^fnv1a-[0-9a-f]{8}(?:[0-9a-f]{8})?$" },
+    "truncatedExamples": { "type": "integer", "minimum": 0, "maximum": 15500 },
     "examples": {
       "type": "array",
       "maxItems": 15000,
@@ -19,7 +20,7 @@
         "properties": {
           "kind": { "enum": ["concept", "relation"] },
           "id": { "type": "string", "minLength": 1, "maxLength": 200 },
-          "aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 } },
+          "aliases": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "uniqueItems": true },
           "label": { "type": "string", "maxLength": 120 },
           "source": { "type": "string", "maxLength": 200 },
           "sourceLabel": { "type": "string", "maxLength": 120 },
@@ -30,7 +31,7 @@
           "confidence": { "type": "number", "minimum": 0.01, "maximum": 0.99 },
           "feedback": { "type": "integer", "minimum": -1000000, "maximum": 1000000 },
           "evidence": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/evidence" } },
-          "sources": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 200 } }
+          "sources": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 200 }, "uniqueItems": true }
         },
         "additionalProperties": true
       }

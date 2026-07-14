@@ -4,7 +4,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateExtraction, EVALUATION_SCHEMA, MAX_EVALUATION_EXAMPLES } from "../evaluation.js";
+import { evaluateExtraction, EVALUATION_SCHEMA, MAX_EVALUATION_EXAMPLES, MAX_EVALUATION_MATCH_COMPARISONS, validateEvaluationReport } from "../evaluation.js";
+import { compareEvaluations } from "../experiments/compare-evaluations.mjs";
 import { fingerprintFeedbackExamples, matchesFeedbackFingerprint } from "../graph-core.js";
 
 const execFileAsync = promisify(execFile);
@@ -66,6 +67,60 @@ assert.equal(report.feedback.relations.accepted.reviewedPrecision, 1);
 assert.equal(report.overall.accepted.recall, .6667);
 assert.equal(report.overall.accepted.evidenceCoverage, 0);
 assert.equal(report.overall.accepted.reviewedPrecision, .6667);
+const selfComparison = compareEvaluations(report, report);
+assert.equal(selfComparison.metrics.length, 12, "evaluation comparisons should emit every supported metric");
+assert.equal(selfComparison.regressions.length, 0, "identical evaluation reports should not regress");
+assert.doesNotThrow(() => validateEvaluationReport(report), "valid evaluation reports should pass the runtime contract");
+assert.throws(
+  () => validateEvaluationReport({ ...report, evaluatedAt: "not-a-timestamp" }),
+  /evaluatedAt must be a valid bounded date-time/,
+  "evaluation validation should reject non-date provenance timestamps"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, evaluatedAt: "2026-07-14" }),
+  /evaluatedAt must be a valid bounded date-time/,
+  "evaluation validation should require a full date-time rather than a date-only value"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, evaluatedAt: "x".repeat(129) }),
+  /evaluatedAt must be a valid bounded date-time/,
+  "evaluation validation should bound provenance timestamp strings"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, unexpected: true }),
+  /evaluation\.unexpected is not allowed/,
+  "evaluation validation should reject unknown root fields"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, feedback: { ...report.feedback, unexpected: true } }),
+  /evaluation\.feedback\.unexpected is not allowed/,
+  "evaluation validation should reject unknown nested fields"
+);
+assert.throws(
+  () => compareEvaluations({ ...report, feedback: { ...report.feedback, examples: MAX_EVALUATION_EXAMPLES + 1 } }, report),
+  /feedback\.examples/,
+  "programmatic promotion comparisons should reject oversized reviewed-example counts"
+);
+assert.throws(
+  () => compareEvaluations({ ...report, overall: { ...report.overall, accepted: { ...report.overall.accepted, found: report.overall.accepted.found + 1 } } }, report),
+  /inconsistent expected, found, and missed counts/,
+  "programmatic promotion comparisons should reject inconsistent metric counts"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, overall: { ...report.overall, accepted: { ...report.overall.accepted, recall: 1 } } }),
+  /recall is inconsistent with its counts/,
+  "evaluation validation should reject fabricated recall ratios"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, overall: { ...report.overall, rejected: { ...report.overall.rejected, suppressionRate: 1 } } }),
+  /suppressionRate is inconsistent with its counts/,
+  "evaluation validation should reject fabricated suppression ratios"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, feedback: { ...report.feedback, concepts: { ...report.feedback.concepts, accepted: { ...report.feedback.concepts.accepted, evidenceCoverage: 1 } } } }),
+  /evidenceCoverage is inconsistent with its counts/,
+  "evaluation validation should reject fabricated evidence coverage ratios"
+);
 const unmatchedReviewedExamples = evaluateExtraction({
   nodes: [{ id: "attention", label: "Attention" }],
   edges: []
@@ -155,6 +210,51 @@ const overlongIdentityReport = evaluateExtraction(
 );
 assert.equal(overlongIdentityReport.feedback.concepts.accepted.found, 1, "evaluation should not collide malformed overlong identities by prefix");
 assert.equal(MAX_EVALUATION_EXAMPLES, 15000);
+assert.equal(MAX_EVALUATION_MATCH_COMPARISONS, 2000000);
+assert.throws(
+  () => evaluateExtraction({ nodes: [], edges: [] }, Array.from({ length: MAX_EVALUATION_EXAMPLES + 1 }, () => ({ kind: "concept", id: "too-many", status: "accepted" }))),
+  /feedback exceeds the 15,000 example safety limit/,
+  "evaluation should reject oversized reviewed datasets instead of silently truncating the benchmark"
+);
+assert.throws(
+  () => evaluateExtraction({ nodes: Array.from({ length: 5001 }, () => ({ id: "too-many", label: "Too many" })), edges: [] }, []),
+  /extraction exceeds the 5,000 concept safety limit/,
+  "evaluation should reject oversized candidate concept output instead of silently truncating it"
+);
+assert.throws(
+  () => evaluateExtraction({ nodes: [], edges: Array.from({ length: 10001 }, () => ({ source: "a", target: "b", label: "related" })) }, []),
+  /extraction exceeds the 10,000 relation safety limit/,
+  "evaluation should reject oversized candidate relation output instead of silently truncating it"
+);
+assert.throws(
+  () => evaluateExtraction({ nodes: [], edges: [] }, [{ kind: "concept", id: "unreviewed", status: "inferred" }]),
+  /feedback example 0 is not a reviewed concept or relation/,
+  "evaluation should reject malformed or unreviewed benchmark examples instead of silently filtering them"
+);
+assert.throws(
+  () => evaluateExtraction({ nodes: [], edges: [] }, [{ kind: "concept", id: "x".repeat(4097), label: "bounded", status: "accepted" }]),
+  /example 0\.id must be a string no longer than 4096/,
+  "evaluation should reject oversized reviewed identities before matching"
+);
+assert.throws(
+  () => evaluateExtraction({ nodes: [], edges: [] }, [{
+    kind: "concept",
+    id: "oversized-evidence",
+    label: "bounded",
+    status: "accepted",
+    evidence: [{ text: "x".repeat(12001), sources: [] }]
+  }]),
+  /example 0\.evidence exceeds the bounded evidence contract/,
+  "evaluation should reject oversized reviewed evidence before matching"
+);
+assert.throws(
+  () => evaluateExtraction(
+    { nodes: Array.from({ length: 1500 }, (_, index) => ({ id: `candidate-${index}`, label: `Candidate ${index}` })), edges: [] },
+    Array.from({ length: 1500 }, (_, index) => ({ kind: "concept", id: `example-${index}`, label: `Example ${index}`, status: "accepted" }))
+  ),
+  /comparison safety limit/,
+  "evaluation matching should fail closed before an adversarial pairwise matrix becomes unbounded"
+);
 const boundedEvaluationAliases = new Array(21).fill("alias");
 Object.defineProperty(boundedEvaluationAliases, 20, { get() { throw new Error("evaluation alias beyond the bound was read"); } });
 assert.doesNotThrow(() => evaluateExtraction(
@@ -176,6 +276,36 @@ const ambiguous = evaluateExtraction(
 );
 assert.equal(ambiguous.feedback.concepts.accepted.found, 1, "one prediction must not satisfy two reviewed concepts");
 assert.equal(ambiguous.feedback.concepts.accepted.missed, 1);
+const overlappingAliasMatches = evaluateExtraction(
+  {
+    nodes: [
+      { id: "specific", label: "Specific", aliases: ["Shared"] },
+      { id: "shared", label: "Shared" }
+    ],
+    edges: []
+  },
+  [
+    { kind: "concept", id: "generic", label: "Shared", status: "accepted" },
+    { kind: "concept", id: "specific", label: "Specific", status: "accepted" }
+  ]
+);
+assert.equal(overlappingAliasMatches.feedback.concepts.accepted.found, 2, "evaluation should match constrained reviewed concepts before overlapping alias matches");
+const maximumAliasMatches = evaluateExtraction(
+  {
+    nodes: [
+      { id: "first", label: "First", aliases: ["a", "b"] },
+      { id: "second", label: "Second", aliases: ["a"] },
+      { id: "third", label: "Third", aliases: ["b", "c"] }
+    ],
+    edges: []
+  },
+  [
+    { kind: "concept", id: "a-example", label: "a", status: "accepted" },
+    { kind: "concept", id: "b-example", label: "b", status: "accepted" },
+    { kind: "concept", id: "c-example", label: "c", status: "accepted" }
+  ]
+);
+assert.equal(maximumAliasMatches.feedback.concepts.accepted.found, 3, "evaluation should find a maximum one-to-one assignment across overlapping aliases");
 const conflicting = evaluateExtraction({ nodes: [{ id: "attention", label: "Attention" }], edges: [] }, [
   { kind: "concept", id: "attention", label: "Attention", status: "accepted" },
   { kind: "concept", id: "attention", label: "Attention", status: "rejected" }

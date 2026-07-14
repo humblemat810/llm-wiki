@@ -1,20 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { buildHealthReport, inspectGraph } from "../graph-core.js";
+import { buildHealthReport, HEALTH_GATE_LIMITS, validateHealthReport } from "../graph-core.js";
 import { readGraphInput } from "./graph-input.mjs";
 
 const APP_VERSION = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
 const [inputPath, ...argumentsList] = process.argv.slice(2);
-const thresholdMaximums = {
-  maxUnsupportedNodes: 5000,
-  maxUnsupportedEdges: 10000,
-  maxReviewCandidates: 15000,
-  maxStaleReviewCandidates: 15000,
-  maxStaleLearningExamples: 500,
-  maxWithheldGuidance: 15500
-};
+const thresholdMaximums = HEALTH_GATE_LIMITS;
 
 function parseThresholds(values) {
-  const thresholds = { minProvenance: null, minFreshSourceReview: null, maxOrphaned: null, maxAmbiguous: null, maxUnsupportedNodes: null, maxUnsupportedEdges: null, maxReviewCandidates: null, maxStaleReviewCandidates: null, maxStaleLearningExamples: null, maxWithheldGuidance: null, maxTruncatedItems: null, maxDroppedItems: null };
+  const thresholds = { minProvenance: null, minFreshSourceReview: null, maxOrphaned: null, maxAmbiguous: null, maxUnsupportedNodes: null, maxUnsupportedEdges: null, maxReviewCandidates: null, maxReviewQueueTruncated: null, maxEvidenceGroundingTruncated: null, maxFeedbackContextTruncated: null, maxStaleReviewCandidates: null, maxStaleLearningExamples: null, maxWithheldGuidance: null, maxUnanchoredEvidence: null, maxConflictingItems: null, maxTruncatedItems: null, maxDroppedItems: null };
   for (let index = 0; index < values.length; index += 1) {
     const option = values[index];
     const key = option === "--min-provenance"
@@ -31,12 +24,22 @@ function parseThresholds(values) {
                   ? "maxUnsupportedEdges"
                   : option === "--max-review-candidates"
                     ? "maxReviewCandidates"
+                      : option === "--max-review-queue-truncated"
+                        ? "maxReviewQueueTruncated"
+                      : option === "--max-evidence-grounding-truncated"
+                        ? "maxEvidenceGroundingTruncated"
+                      : option === "--max-feedback-context-truncated"
+                        ? "maxFeedbackContextTruncated"
                       : option === "--max-stale-review-candidates"
                       ? "maxStaleReviewCandidates"
                       : option === "--max-stale-learning-examples"
                         ? "maxStaleLearningExamples"
                         : option === "--max-withheld-guidance"
                           ? "maxWithheldGuidance"
+                        : option === "--max-unanchored-evidence"
+                          ? "maxUnanchoredEvidence"
+                        : option === "--max-conflicting-items"
+                          ? "maxConflictingItems"
                         : option === "--max-truncated-items"
                           ? "maxTruncatedItems"
                           : option === "--max-dropped-items"
@@ -78,6 +81,15 @@ function runGate(health, thresholds) {
   if (thresholds.maxReviewCandidates !== null && health.reviewCandidates > thresholds.maxReviewCandidates) {
     violations.push(`review candidates ${health.reviewCandidates} exceed ${thresholds.maxReviewCandidates}`);
   }
+  if (thresholds.maxReviewQueueTruncated !== null && (health.reviewQueueTruncated ? 1 : 0) > thresholds.maxReviewQueueTruncated) {
+    violations.push(`review queue is truncated and exceeds ${thresholds.maxReviewQueueTruncated}`);
+  }
+  if (thresholds.maxEvidenceGroundingTruncated !== null && (health.evidenceGroundingTruncated ? 1 : 0) > thresholds.maxEvidenceGroundingTruncated) {
+    violations.push(`evidence grounding is truncated and exceeds ${thresholds.maxEvidenceGroundingTruncated}`);
+  }
+  if (thresholds.maxFeedbackContextTruncated !== null && (health.feedbackContextTruncated ? 1 : 0) > thresholds.maxFeedbackContextTruncated) {
+    violations.push(`extractor guidance context is truncated and exceeds ${thresholds.maxFeedbackContextTruncated}`);
+  }
   if (thresholds.maxStaleReviewCandidates !== null && health.staleReviewCandidates > thresholds.maxStaleReviewCandidates) {
     violations.push(`stale review candidates ${health.staleReviewCandidates} exceed ${thresholds.maxStaleReviewCandidates}`);
   }
@@ -86,6 +98,12 @@ function runGate(health, thresholds) {
   }
   if (thresholds.maxWithheldGuidance !== null && health.feedbackContextExcluded > thresholds.maxWithheldGuidance) {
     violations.push(`withheld extractor guidance ${health.feedbackContextExcluded} exceed ${thresholds.maxWithheldGuidance}`);
+  }
+  if (thresholds.maxUnanchoredEvidence !== null && health.unanchoredEvidenceRecords > thresholds.maxUnanchoredEvidence) {
+    violations.push(`unanchored evidence records ${health.unanchoredEvidenceRecords} exceed ${thresholds.maxUnanchoredEvidence}`);
+  }
+  if (thresholds.maxConflictingItems !== null && health.conflictingItems > thresholds.maxConflictingItems) {
+    violations.push(`contradictory duplicate review records ${health.conflictingItems} exceed ${thresholds.maxConflictingItems}`);
   }
   if (thresholds.maxTruncatedItems !== null && health.truncatedItems > thresholds.maxTruncatedItems) {
     violations.push(`truncated import items ${health.truncatedItems} exceed ${thresholds.maxTruncatedItems}`);
@@ -97,16 +115,14 @@ function runGate(health, thresholds) {
 }
 
 if (!inputPath) {
-  console.error("Usage: node experiments/inspect-graph.mjs <graph-or-backup.json> [--min-provenance 95] [--min-fresh-source-review 90] [--max-orphaned 0] [--max-ambiguous 0] [--max-unsupported-nodes 0] [--max-unsupported-edges 0] [--max-review-candidates 0] [--max-stale-review-candidates 0] [--max-stale-learning-examples 0] [--max-withheld-guidance 0] [--max-truncated-items 0] [--max-dropped-items 0]");
+  console.error("Usage: node experiments/inspect-graph.mjs <graph-or-backup.json> [--min-provenance 95] [--min-fresh-source-review 90] [--max-orphaned 0] [--max-ambiguous 0] [--max-conflicting-items 0] [--max-unsupported-nodes 0] [--max-unsupported-edges 0] [--max-review-candidates 0] [--max-review-queue-truncated 0] [--max-evidence-grounding-truncated 0] [--max-feedback-context-truncated 0] [--max-stale-review-candidates 0] [--max-stale-learning-examples 0] [--max-withheld-guidance 0] [--max-unanchored-evidence 0] [--max-truncated-items 0] [--max-dropped-items 0]");
   process.exitCode = 1;
 } else {
   try {
     const graph = await readGraphInput(inputPath, { label: "Graph health input" });
-    const health = inspectGraph(graph);
-    const report = {
-      ...buildHealthReport(graph, { appVersion: APP_VERSION }),
-      gate: runGate(health, parseThresholds(argumentsList))
-    };
+    const report = buildHealthReport(graph, { appVersion: APP_VERSION });
+    report.gate = runGate(report.health, parseThresholds(argumentsList));
+    validateHealthReport(report, { label: "Graph health report" });
     console.log(JSON.stringify(report, null, 2));
     if (!report.gate.passed) process.exitCode = 1;
   } catch (error) {
