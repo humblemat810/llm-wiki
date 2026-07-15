@@ -4,8 +4,540 @@ All notable changes to LLM Field Notes are documented here.
 
 ## [Unreleased]
 
+- Surface a direct graph-health action for applying reviewed learning to saved
+  sources, making the self-improvement loop easier to discover.
+- Add a one-click, undoable source-review action in the inspector for review
+  queue candidates.
+- Hardened the reference server so runtime readiness and static serving reject
+  symlinked published assets, matching the release and Pages build gates.
+- Added privacy-safe `499` cancellation telemetry for client-aborted extraction
+  requests, including request-correlated latency logs and an aggregate metric.
+- Reject invalid or mismatched `Content-Length` values before interpreting
+  extraction request JSON, including truncated streams that emit `end`.
+- Preserve online 4xx navigation responses in the service worker so deployed
+  branded not-found pages remain visible after the app shell is installed.
+- Route browser operation and runtime errors through one bounded diagnostic
+  normalizer before displaying them in the workbench.
+- Validate declared response lengths in browser and remote extractor readers,
+  rejecting truncated JSON or Markdown bodies before parsing.
+- Require readable, byte-count-validated shell responses before the service
+  worker updates its offline cache.
+- Preserve even empty-body online 4xx responses as client errors while keeping
+  unreadable successful/transient shell responses out of the offline cache.
+- Require actual byte buffers or views in browser binary download helpers before
+  creating bounded ZIP exports.
+- Cache Node static-asset ETags behind bounded metadata and transformation
+  signatures, reducing repeated hashing while preserving invalidation when
+  published files or deployment inputs change.
+- Reject impossible calendar dates across graph, evaluation, and Obsidian
+  timestamp boundaries instead of accepting JavaScript parser rollover.
+- Apply the same timestamp validation to graph, backup, and diff verification
+  commands before accepting exported artifact chronology.
+- Align browser release metadata, source-review edits, and feedback export
+  ordering with the shared timestamp parser.
+- Reject duplicate JSON object keys across extraction, persistence, browser
+  imports, and Obsidian projections instead of silently taking the last value.
+- Apply duplicate-key rejection to graph, diff, JSON-LD, and evaluation
+  verification commands before trusting external artifacts.
+- Bound JSON nesting depth before recursive duplicate-key validation can
+  exhaust the runtime call stack.
+- Bound duplicate-key diagnostic text so oversized malicious keys cannot
+  amplify rejected API responses.
+- Apply the shared duplicate-key and JSON nesting boundary to remote extractor
+  responses and schema contract checks, preventing parser-policy drift across
+  provider and verification paths.
+- Apply the same boundary to IndexedDB pending-write metadata, so ambiguous
+  local synchronization markers fail closed during hydration and cannot
+  replace a newer synchronous mirror with stale durable state.
+- Reject malformed pending-write entries instead of filtering them and risking
+  stale IndexedDB state during browser hydration.
+- Return retryable `503 Server is draining` responses when graceful shutdown
+  aborts active extractor work, instead of exposing a misleading provider
+  failure.
+- Bound graph and curriculum search queries to keep oversized pasted input
+  from triggering disproportionate client-side filtering work.
+- Bound browser file reads with a pre-read slice for text, JSON, and Obsidian
+  imports, preventing oversized file-like inputs from allocating before the
+  safety check.
+- Validate streamed response chunk byte lengths before size accounting, closing
+  a malformed-stream path that could turn the budget into `NaN`.
+- Validate remote extractor stream result shapes and array-buffer byte types
+  before parsing provider responses.
+- Apply the same stream-result and byte-data validation to browser release and
+  learning-note response readers.
+- Require actual byte views for service-worker shell chunks before cache-size
+  accounting.
+- Reject array-like Obsidian ZIP inputs before byte coercion can allocate beyond
+  the archive safety boundary.
+- Reject Obsidian export filenames that exceed the ZIP format's 16-bit header
+  field instead of producing corrupt archives.
+- Give the hero visual an explicit image role so its accessible description is
+  announced by assistive technology.
+- Extend static site checks to catch missing button types and unlabeled generic
+  ARIA elements before publication.
+- Extend site checks to require `noopener` on every generated or static new-tab
+  link.
+- Verify the Web Share API is callable before using it, preserving clipboard
+  fallback behavior with partial browser shims.
+- Verify persistent-storage APIs are callable before requesting them, preserving
+  normal local storage behavior with partial browser shims.
+- Verify service-worker registration APIs are callable before setup, so partial
+  browser shims fail closed without interrupting the workbench.
+- Treat service-worker property access as optional too, keeping restricted
+  embedded environments from failing during app bootstrap.
+- Declare the container's SIGTERM stop signal explicitly so orchestrators use
+  the server's graceful drain path.
+- Make container CI assert the published image stop signal, keeping graceful
+  shutdown behavior from drifting during image changes.
+- Reject symbolic links in Pages output verification, even when they resolve
+  inside the published bundle.
+- Reject symbolic links in release and Pages source assets before copying or
+  hashing them into a deployment.
+- Validate service-worker shell stream result shapes and chunk byte lengths
+  before caching, so malformed network bodies fail closed and cannot bypass
+  offline-shell response limits.
+- Stage Pages output and atomically swap it into place only after all generated
+  assets and manifest checks pass, preserving the prior deployment bundle when
+  a late build step fails.
+- Apply duplicate-key-safe parsing to release metadata, Pages manifests,
+  artifact structured data, and health command package metadata so CLI
+  verification cannot silently accept ambiguous JSON.
+- Reject opaque and cross-origin redirected release or learning-note responses
+  before the browser displays or exports their content.
+- Protect unbuilt document editor drafts with the unload warning, including
+  title and source URI metadata, and clear the warning after successful
+  ingestion.
+- Add bounded local recovery for unfinished editor drafts, restoring only into
+  an empty editor and deleting the recovery copy after successful ingestion.
+- Recheck graph fingerprints after asynchronous Obsidian learning-note
+  collection, preventing mixed-revision vault exports.
+- Add a 30-second aggregate deadline to learning-note vault collection so
+  degraded note delivery cannot multiply per-note timeouts indefinitely.
+- Reject impossible calendar dates in runtime release metadata so `/readyz`
+  cannot accept parser-normalized `version.json` values.
+- Tightened release validation so every GitHub Actions workflow must declare
+  explicit permissions and concurrency controls, pin action revisions, disable
+  persisted checkout credentials, and avoid unsafe `pull_request_target`
+  execution.
+- Enforced rejected learning guidance at the shared extraction boundary so
+  remote providers cannot silently reintroduce rejected concepts or relations.
+- Applied code-point-safe truncation to workbench search, previews, metadata,
+  graph labels, Mermaid output, and operation diagnostics.
+- Extended code-point-safe truncation to normalized document text, slug output,
+  and bounded graph identity/fingerprint inputs.
+- Blocked mutations that preserve dropped malformed-import entries, matching the
+  existing incomplete-import protection for truncated graphs.
+- Preserved the original JSON payload when a graph or backup import is lossy,
+  making recovery downloads useful for repairing the source artifact.
+- Applied incomplete-import protection consistently to domain-level source
+  merges and source replacement, not only final storage writes.
+- Extended incomplete-import protection to feedback, concept merging, source
+  removal, and learning-memory cleanup operations.
+- Updated mutation feedback messages so incomplete-import limits consistently
+  direct users to restore the original export.
+- Made source-removal feedback use the same incomplete-import guidance instead
+  of falling back to a generic removal failure.
+- Reduced avoidable CPU work in the in-process extraction limiter by moving
+  stale client-window cleanup to a bounded periodic sweep.
+- Made readiness decode all published shell assets with fatal UTF-8 handling,
+  preventing corrupted text assets from reporting a usable deployment.
+- Made readiness reject malformed, future-dated, or stale `version.json`
+  metadata that does not match the running package version.
+- Prevented the service worker from caching HTML login or error pages as
+  non-HTML shell assets when a gateway returns them with HTTP 200.
+- Aligned extractor-guidance ordering with its caller-provided inspection
+  timestamp, preventing clock-skewed reviews from losing priority after
+  freshness filtering.
+- Narrowed rejected relation enforcement to the canonical endpoint pair and
+  relation label, preventing one rejected edge from suppressing other
+  semantics between the same concepts.
+- Preserved raw backup history when nested normalization drops malformed or
+  over-capacity entries, closing a recovery gap inside otherwise valid snapshots.
+- Preserved raw graph payloads for programmatic incomplete restores and made
+  restore fail closed if normalization or integrity comparison cannot complete.
+- Made graph verification distinguish fingerprint validity from completeness,
+  reporting truncated or dropped records in the graph and backup history
+  instead of allowing a lossy export to look complete.
+
+- Detect same-revision divergent graph state across tabs and preserve the
+  visible workspace until the user explicitly reloads to inspect persisted
+  state.
+- Stamp undo and restore commits with bounded commit metadata so cross-tab
+  freshness preserves intentional rollbacks instead of resurrecting the graph
+  version they replaced.
+- Prevent bounded learning-note reads from returning a split astral Unicode
+  character at the UTF-16 safety boundary.
+- Apply the same code-point-safe title and summary truncation to Pages builds,
+  keeping static publication metadata aligned with the Node runtime.
+- Apply code-point-safe truncation at graph normalization so bounded source
+  titles, concept labels, relation labels, and revision text remain valid
+  across all projections.
+- Reject contradictory concept or relation guidance at the extraction gateway
+  before a provider can interpret the same reviewed identity inconsistently.
+- Exclude future-dated graph reviews from active learning guidance and return
+  them to the review queue until a real review refreshes their timestamp.
+- Prevent future-dated imported decisions from outranking trusted current
+  graph reviews during conflict resolution.
+- Keep future-dated reusable memory behind trusted current guidance in bounded
+  feedback exports and extractor-context ordering.
+- Ignore future-dated graph and source chronology when choosing same-version
+  freshness or bounded document retention.
+- Keep future-dated source health reviews and Obsidian review merges from
+  masquerading as fresh or outranking trusted current metadata.
+- Make the canonical learning-loop artifact use fresh-only guidance, matching
+  the workbench's production learning boundary.
+- Make `buildExtractorFeedback()` default to fresh-only guidance so new callers
+  cannot accidentally send stale or undated memory to an extractor.
+- Make `feedbackContextStats()` default to the same fresh-only boundary, keeping
+  public guidance counts consistent with actual extractor context.
+- Make the extractor adapter reject malformed or contradictory feedback before
+  sending a provider request, matching the Node gateway contract.
+- Reject unknown feedback fields in the extractor adapter instead of silently
+  stripping them before a provider request.
+- Reject non-array feedback in the extractor adapter instead of silently
+  treating the malformed value as an empty guidance set.
+- Reject explicit null feedback in the extractor adapter instead of treating it
+  as omitted input.
+- Reject unknown document fields in the extractor adapter instead of silently
+  discarding caller metadata before a provider request.
+- Normalize non-conforming fetch results as non-retryable invalid-response
+  errors instead of leaking raw exceptions or retrying malformed responses.
+- Normalize thrown provider/network failures as bounded `NETWORK_ERROR`
+  adapter errors while preserving the original cause for diagnostics.
+- Add bounded `Retry-After` guidance to transient reference-gateway extractor
+  failures, distinguishing ordinary provider failures from timeouts while
+  suppressing retry hints for malformed or oversized provider output.
+- Preserve transiently failed batch documents in the browser queue so a
+  provider or network recovery does not require users to reselect their files.
+- Keep service-worker activation resilient when stale-cache deletion or client
+  claiming fails, so a Cache API fault cannot strand a valid update.
+- Keep service-worker response cancellation non-blocking when a browser stream
+  ignores `reader.cancel()`, preserving the bounded offline fallback.
+- Use bounded parallelism during service-worker shell precaching so first
+  install is faster without creating an unbounded request burst.
+- Strip URL credentials and query parameters from public workbench share links
+  so credentials, deployment metadata, and session data are not copied into
+  shared URLs.
+- Reject query strings and fragments in browser extractor endpoint settings so
+  URL configuration cannot become an accidental credential or metadata channel.
+- Add a release-time curriculum parity gate covering browser notes, no-script
+  links, the Markdown index, and published learning-note assets.
+- Extend curriculum release validation to compare browser note titles with
+  published note frontmatter.
+- Extend the same curriculum gate to compare browser prompt questions with
+  crawler-readable note prompts.
+- Centralize browser and release curriculum metadata in the published
+  `curriculum.js` module to reduce source-parsing drift.
+- Keep static curriculum filter badges synchronized with the shared lesson
+  catalog so discovery surfaces show the same counts.
+- Compare no-script lesson titles with the shared curriculum catalog so
+  crawler-visible discovery cannot drift from the interactive map.
+- Add a visible offline-mode status so local graph work remains clearly
+  available while configured remote extraction is disconnected.
+- Clarify schema extension policy so contributors distinguish extensible graph
+  fields from intentionally closed companion contracts.
+- Bound and normalize browser batch, vault, and rebuild diagnostics before
+  displaying provider or file errors.
+- Warn before closing a tab when a populated graph is ephemeral or storage
+  durability has degraded, reducing accidental local-data loss.
+- Extend the unload warning to in-memory queued batch files, preventing
+  selected documents from disappearing silently on tab close.
+- Surface an explicit process/retry action for retained batch files, including
+  after connectivity is restored.
+- Bound and normalize saved-source rebuild diagnostics so malformed provider
+  errors cannot flood the browser status surface.
+- Treat future-dated evaluation reviews as undated/untrusted so freshness
+  gates fail conservatively under clock skew or fabricated metadata.
+- Scoped published service-worker caches to the Pages asset digest or Node build
+  revision so same-version deployments cannot reuse a mixed shell cache.
+- Made Pages verification recompute the service-worker cache revision from the
+  complete published bundle, including generated crawler assets.
+- Added a bounded, script-free branded 404 recovery page for stale or mistyped
+  links on Pages and the Node host.
+- Fixed cross-tab graph clears being mistaken for stale state and accidentally
+  restoring the graph in another open tab.
+- Made caller cancellation settle remote extractor requests even when an
+  underlying fetch implementation never resolves.
+- Made the Node extraction handler settle disconnected HTTP requests promptly
+  while retaining ignored provider work in the active-capacity count.
+- Added a bounded service-worker update recovery path so a stalled activation
+  does not leave the Update control permanently disabled.
+- Cleaned up stalled service-worker update listeners so a late activation cannot
+  trigger an unexpected reload after recovery.
+- Added explicit failure handling around graph builds and saved-source rebuilds
+  so unexpected errors preserve busy-state cleanup and reach the recovery panel.
+- Bounded browser persistent-storage capability requests so a non-conforming
+  browser API cannot leave the workbench waiting indefinitely.
+- Added a pinned, least-privilege CodeQL workflow for JavaScript/TypeScript
+  security analysis on pushes, pull requests, and a weekly schedule.
+- Added a pinned OpenSSF Scorecard workflow to publish repository
+  supply-chain posture findings on code and branch-protection changes.
+- Added bounded application-version metadata to full backups so long-lived
+  graph archives remain auditable across application releases.
+- Added the same bounded producer-version metadata to Obsidian vault manifests,
+  preserving projection provenance across external viewer round-trips.
+- Added optional bounded producer-version metadata to JSON-LD exports while
+  preserving verification compatibility with older projections.
+- Added the same bounded producer-version metadata to direct graph JSON
+  exports, with vault validation that preserves compatibility with older files.
+- Added contract-check coverage so producer-version bounds cannot drift between
+  graph, backup, health, vault, and JSON-LD schemas.
+- Made vault imports reject mismatched producer versions between the manifest
+  and embedded graph or JSON-LD projections.
+- Added a bounded standalone graph verifier so exported graph and backup
+  fingerprints can be checked before sharing or downstream processing.
+- Made shared graph-input tooling reject malformed, over-capacity, or
+  undated backup history before fingerprint comparison can normalize it.
+- Made saved-source rebuilds reject replacement graphs that drop sources,
+  duplicate source identities, or exceed graph collection bounds.
+- Made saved-source rebuilds reject redacted, truncated, dropped, or ambiguous
+  graphs before sending unsafe source state to an extractor.
 ### Added
 
+- Made evaluation reject oversized or duplicate reviewed alias lists instead
+  of silently scoring a truncated or ambiguous benchmark prefix.
+- Made Obsidian feedback reject duplicate or whitespace-equivalent aliases
+  instead of silently canonicalizing malformed note edits.
+- Made model extraction responses reject malformed, oversized, or duplicate
+  aliases before normalization can silently discard provider output.
+- Made model extraction responses reject malformed evidence and provenance
+  shapes instead of silently dropping grounding metadata.
+- Made model extraction responses reject malformed concept and relation
+  collections instead of fabricating fallbacks or silently dropping records.
+- Added persisted-graph alias clipping diagnostics to integrity, health,
+  diffs, JSON-LD, and the workbench warning surface.
+- Fixed bounded extractor guidance to reserve capacity for every current
+  reviewed concept and relation, preventing historical learning memory from
+  crowding out later human decisions.
+- Applied the same current-review reservation to portable feedback exports and
+  made omitted detached history counts explicit in `truncatedExamples`.
+- Added OCI source-revision metadata to production container builds and CI
+  verification, making a deployed image traceable to the exact repository
+  commit that produced it.
+- Propagated the sanitized build revision into runtime startup logs and
+  Prometheus metrics so operators can correlate a live process with its image
+  without exposing arbitrary environment values.
+- Added the sanitized build revision to liveness and readiness responses,
+  including draining and unavailable states, so deployment probes identify the
+  exact running build without changing graph data contracts.
+- Added bounded revision audit members to JSON-LD exports, preserving operation,
+  extractor lane, reason, chronology, and graph cardinalities for machine-readable
+  consumers.
+- Bound graph diffs to deterministic before/after normalized-graph fingerprints,
+  allowing external tooling to verify diff provenance instead of trusting version
+  numbers alone.
+- Added a public diff verifier CLI and artifact card so existing diff files can
+  be recomputed and checked against their source graph exports.
+- Made diff verification canonicalization locale-independent, keeping artifact
+  checks stable across developer machines and CI runners.
+- Added bounded operation tags to graph revisions so ingestion, rebuilds,
+  feedback, learning-memory changes, manual edits, Obsidian projection imports,
+  migrations, and source removals remain auditable without storing prompts or
+  provider credentials.
+- Added bounded local-versus-remote extractor provenance to extraction and
+  rebuild revisions, making model-backed graph changes distinguishable from
+  the zero-configuration heuristic path without persisting endpoint details.
+- Added a release-gated artifact gallery consistency check so visible cards,
+  structured discovery metadata, downloadable files, and published assets
+  cannot drift apart.
+- Added executable smoke coverage for every public artifact command and
+  consistent `--help` entry points for argument-requiring tooling, so gallery
+  commands work when copied exactly as shown.
+- Made direct Pages builds enforce the artifact gallery contract before
+  publication, keeping release safety consistent outside the full test command.
+- Added Pages smoke coverage proving the direct builder actually executes that
+  artifact gate before generating the published bundle.
+- Removed release-only artifact and schema-check tooling from the production
+  Docker context while retaining the shared runtime asset contract.
+- Clarified artifact onboarding copy so help and inspection commands are not
+  presented as full experiment runs.
+- Disabled persisted GitHub checkout credentials in verification and Pages
+  workflows, reducing token exposure to repository build and test tooling.
+- Centralized the 200-character document-title bound across graph normalization,
+  extraction, rebuilding, UI editing, and the request contract.
+- Aligned the learning-loop artifact's concept-label and identifier bounds with
+  the canonical graph contract.
+- Applied the shared document-title bound to Obsidian source feedback parsing
+  and source metadata mutation.
+- Made non-empty invalid `PUBLIC_ORIGIN` values fail Node startup and Pages
+  publication instead of silently disabling canonical, crawler, and
+  same-origin deployment behavior.
+- Correlated static application-error logs with the response request ID while
+  preserving the privacy-safe logging boundary.
+- Refuse source removal and replacement when imported duplicate source IDs are
+  marked ambiguous, preventing destructive edits against the wrong document.
+- Added a recovery-download action to the runtime error panel, preserving raw
+  graph/history snapshots before a user reloads a failed workbench view.
+- Hardened graph ID generation against restricted crypto runtimes without
+  falling back to weak `Math.random()` entropy.
+- Made every public artifact card immediately runnable by showing its exact
+  copy-paste Node command.
+- Published a deterministic sample graph export so graph health, diff, and
+  JSON-LD tooling can be tried without first opening the browser workbench.
+- Added a whole-graph integrity fingerprint to the published sample export so
+  external tooling can detect starter-artifact drift before use.
+- Made note links, Markdown projections, and contribution templates resilient
+  to unavailable Clipboard API permissions through one tested browser fallback.
+- Added a release smoke test for the published sample graph’s fingerprint,
+  provenance, evidence grounding, and truncation/dropped-item health gate.
+- Aligned browser storage hydration and cross-tab synchronization with the
+  persisted UTF-8 byte ceiling, preventing Unicode-heavy values from bypassing
+  the memory bound.
+- Added a confirmation before the sample walkthrough mutates a non-empty
+  workspace, preventing shared sample links from silently mixing into saved
+  knowledge.
+- Added a draft-overwrite confirmation to the in-workbench sample loader,
+  protecting pasted documents and queued files from accidental replacement.
+- Made release validation reject future-dated public metadata so feeds and
+  deployment footers cannot claim a release before it exists.
+- Added standard OCI description and license labels to production container
+  images, with release validation preventing metadata drift.
+- Hardened the service worker against opaque or cross-origin redirect
+  responses reaching or poisoning the offline application shell cache.
+- Added a direct backup action to the health strip when browser storage is
+  unavailable and graph state exists only for the current tab.
+- Added a cancelable, conflict-checked rebuild action that re-runs saved
+  sources through the current extractor and reviewed feedback as one graph
+  commit.
+- Rebuilds now fail closed for redacted graphs that no longer contain source
+  text.
+- Rebuilds now preflight truncated or malformed imports before making provider
+  requests.
+- Rebuilds now preflight ambiguous source identities before making provider
+  requests.
+- The public rebuild adapter now validates source-record shape and bounds
+  before invoking host extractors.
+- Saved-source rebuilds now snapshot fresh reviewed guidance once, preventing
+  earlier replacements from withholding that guidance from later sources.
+- Added an explicit malformed-HTTP boundary response with sanitized protocol
+  logging, making parser failures deterministic without exposing parser details.
+- Successful graph mutations now state immediately when persistence reduced undo
+  history, directing users to export a backup before leaving the tab.
+- Added an end-to-end smoke assertion that generated editable Obsidian notes are
+  accepted by the feedback importer before a release can pass.
+- Added a direct backup action beside reduced undo-history warnings, keeping
+  degraded recovery states actionable in the health strip.
+- Added a persistent accessible privacy warning to source-bearing export
+  controls, making redacted actions the clear public-sharing path.
+- Recovery snapshot downloads now report blocked or oversized export failures
+  in the workbench status instead of leaving the recovery action ambiguous.
+- Added a curated community artifact index and structured submission template
+  so runnable experiments, graph exports, benchmarks, visualizations, and
+  honest failed attempts have a visible path into the wiki.
+- Published the curated artifact source files with the Pages bundle and routed
+  public artifact guidance through a deployment-safe contributor link, keeping
+  shared examples runnable outside the repository browser.
+- Added a portable artifact-submission template so the contribution path works
+  from the published Pages site as well as from GitHub's issue form.
+- Kept the curated public experiment sources in the Docker context so the
+  container readiness and static-asset contracts remain deployable.
+- Served published `.mjs` artifact sources with an explicit JavaScript MIME
+  type so browser and tooling previews remain inspectable.
+- Published the complete dependency-free experiment set, keeping the runnable
+  experiment guide, Pages bundle, service-worker shell, and container context
+  aligned instead of exposing only a curated subset.
+- Added artifact discovery and submission links to `llms.txt` and removed the
+  completed artifact-gallery item from the roadmap.
+- Replaced focusable graph list containers with native inspect buttons, giving
+  keyboard and assistive-technology users a distinct inspection action beside
+  the separate review controls.
+- Preserved selected concept and relation state across list rerenders with
+  `aria-current`, so review context is not lost after graph mutations.
+- Moved focus to the updated inspector after keyboard selection while leaving
+  pointer selection in place, making review results immediately readable.
+- Expanded the public artifact gallery to cover evaluation, health, input-boundary,
+  verification, and tiny-training tools already shipped in the repository.
+- Added a deterministic `asset-manifest.json` to Pages builds so mirrors and
+  operators can verify the exact published file inventory and SHA-256 digests.
+- Added the generated asset manifest to the Pages service-worker shell so
+  offline installations retain their release-integrity inventory.
+- Added `npm run verify:pages` and a Pages workflow step so the published
+  inventory can be checked independently of the build process.
+- Excluded the Pages verifier from production Docker images because it is a
+  release-time tool rather than runtime application code.
+- Added direct artifact links to the primary and footer navigation so runnable
+  work is discoverable without first opening the contribution section.
+- Added a script-free `artifacts.html` gallery so static deployments present
+  runnable work as a polished page while retaining `ARTIFACTS.md` as the
+  forkable source index.
+- Added complete Open Graph and Twitter preview metadata to the artifact
+  gallery so shared runnable work has a useful social preview.
+- Added an inventory-driven gallery check so newly published experiment
+  modules cannot silently disappear from the public artifact page.
+- Added the artifact gallery and experiment index to both Node and Pages
+  sitemaps so runnable public work is discoverable beyond the landing page.
+- Made artifact-gallery canonical, Open Graph, and Twitter image URLs absolute
+  on configured deployments, improving previews for project subpaths and mirrors.
+- Added response-level `script-src 'none'` enforcement for the static artifact
+  gallery, matching its document CSP and keeping source links non-executable.
+- Added bounded `CollectionPage` and `ItemList` structured metadata for the
+  artifact gallery so search engines can understand and enumerate runnable work.
+- Added an end-to-end dependency-free learning-loop artifact showing extraction,
+  human review, portable guidance, and improved follow-up extraction together.
+- Added the experiment index and Obsidian vault schema to the offline shell so
+  public learning and projection contracts remain available without a network.
+- Made release validation reject duplicate public/offline assets and sitemap
+  entries that are not part of the published asset contract.
+- Replaced focusable source-row containers with native buttons so keyboard and
+  assistive-technology users get the same inspection semantics as graph rows.
+- Added selected-state semantics, SVG focus compatibility, and a visible focus
+  ring to keyboard-navigable graph nodes.
+- Made the site check validate the artifact gallery’s structured inventory
+  against the shipped experiment modules, preventing metadata drift.
+- Added `aria-current` to selected source inspection buttons so source
+  selection is announced consistently with graph-item selection.
+- Kept source inspection buttons valid HTML by using phrasing-content wrappers
+  instead of block-level children inside native buttons.
+- Added the self-improvement walkthrough to `llms.txt` so machine-readable
+  discovery points directly to the canonical extract-review-improve example.
+- Added `npm run learning:loop` as the stable command for running the
+  self-improvement walkthrough locally.
+- Added an experiment smoke assertion through the package command itself, so
+  the documented learning-loop entry point cannot drift from its artifact.
+- Added a direct landing-page link to the learning-loop artifact so the
+  central self-improvement workflow is discoverable in one click.
+- Made both landing-page brand links resolve to the stable canonical root
+  instead of mutating the URL to an empty fragment.
+- Clarified the README’s production-facing language: the local browser
+  workbench is the supported product surface, while model providers remain
+  an optional deployment boundary.
+- Made configured-origin metadata rewrites literal-safe for valid deployment
+  paths containing dollar signs.
+- Extended Pages smoke coverage to prove literal-safe origin rewriting in the
+  generated static artifact, not only the Node host.
+- Added a global button-content regression guard so future interactive UI
+  cannot reintroduce invalid block-level children inside native buttons.
+- Restored a visible `:focus-visible` ring for source buttons after making
+  source inspection native and keyboard-accessible.
+- Made Node-hosted origin-transformed artifact pages use `no-cache`, preventing
+  stale canonical and social metadata after deployment-origin changes.
+- Added an explicit `HEAD /readyz` regression check so orchestrator probes keep
+  the bodyless HTTP contract while retaining the GET representation length.
+- Fixed the documented `/api/extract-graph` browser configuration by resolving
+  relative same-origin paths before they reach the provider URL validator.
+- Added browser-boundary smoke coverage for relative endpoint resolution and
+  cross-origin rejection.
+- Strengthened the public learning-loop artifact with an unguided baseline and
+  measurable before/after guidance delta, so its suppression proof isolates
+  reviewed feedback from heuristic phrase filtering.
+- Added a versioned learning-loop output schema and runtime validator, publishing
+  the artifact contract in the Pages and offline asset sets.
+- Closed the learning-loop runtime validator against unknown fields so its
+  behavior matches the published schema instead of silently accepting drift.
+- Aligned learning-loop runtime validation with the schema's label, concept,
+  relation, and comparison-delta bounds.
+- Made the ingest mode indicator switch between `LOCAL` and `MODEL` so the
+  document privacy boundary stays visible when a provider endpoint is enabled.
+- Added an explicit `INVALID` ingest mode while endpoint text is malformed, so
+  transient configuration input cannot claim that documents will be sent.
+- Made the dynamic privacy disclosure an accessible live status so endpoint
+  changes are announced to assistive technology as well as visible users.
+- Separated concise privacy state announcements from the detailed visible
+  disclosure, preventing screen-reader chatter while endpoint text is edited.
+- Added distinct visual treatment for `MODEL` and `INVALID` extractor states,
+  so configuration errors cannot look like a healthy local status.
+- Updated workbench copy to distinguish the supported zero-configuration local
+  extractor from the optional model-backed provider path.
 - Made release verification enforce the digest-pinned Node 22 container
   baseline, keeping deployment runtime drift visible before publication.
 - Added package-synchronized OCI version metadata to production container
@@ -22,6 +554,28 @@ All notable changes to LLM Field Notes are documented here.
   cancellation controls remain usable on mobile.
 - Declared the published CC BY 4.0 license in package metadata and release
   validation for machine-readable distribution tooling.
+- Added a structured standalone startup log with the deployed version and port
+  for faster incident and rollout correlation.
+- Added structured graceful-shutdown and forced-stop lifecycle events so
+  operators can distinguish a clean provider drain from abandoned work.
+- Extended CI's standalone-server smoke to assert the ready, draining, and
+  stopped lifecycle log contract before a change can deploy.
+- Enforced the published storage-key ceiling before browser persistence writes,
+  preventing oversized namespace keys from reaching localStorage or IndexedDB.
+- Enforced the application storage namespace at the adapter boundary so
+  unrelated same-origin keys cannot be read, written, or lost during hydration.
+- Guarded full and redacted Obsidian vault exports against concurrent duplicate
+  ZIP builds and learning-note fetches.
+- Released completed service-worker response readers so repeated shell
+  revalidation does not retain unnecessary stream locks.
+- Made text and binary download cleanup unconditional so failed browser
+  download triggers cannot retain blob object URLs.
+- Cleaned up canceled source-replacement file pickers so repeated dialog
+  cancellations do not accumulate hidden DOM inputs.
+- Flushes pending durable browser writes when the workbench becomes hidden as
+  well as during page unload, improving mobile/background-tab recovery.
+- Cancels unread terminal extractor response bodies before surfacing provider
+  errors, reducing leaked keep-alive and stream resources.
 - Extended the CI compatibility matrix through Node 24 while retaining the
   Node 18, 20, and 22 lanes.
 - Made oversized-upload smoke checks portable across Node runtime versions
@@ -1327,6 +1881,3 @@ All notable changes to LLM Field Notes are documented here.
   URI metadata alongside document text and bounded reviewed feedback.
 - Full smoke, fuzz, storage, projection, evaluator, service-worker, and
   container verification across Node 18, 20, and 22.
-## Unreleased
-
-- Refuse source removal and replacement when imported duplicate source IDs are marked ambiguous, preventing destructive edits against the wrong document.

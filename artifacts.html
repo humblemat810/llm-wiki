@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'none'; worker-src 'none'; manifest-src 'none'" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta name="robots" content="index,follow" />
+    <meta name="description" content="Runnable, inspectable artifacts from LLM Field Notes." />
+    <meta property="og:title" content="Community artifacts · LLM Field Notes" />
+    <meta property="og:description" content="Runnable experiments, graph tooling, and honest handles for the next curious person." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="LLM Field Notes" />
+    <meta property="og:url" content="./artifacts.html" />
+    <meta property="og:image" content="social-card.svg" />
+    <meta property="og:image:type" content="image/svg+xml" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="LLM Field Notes: documents into a living map" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Community artifacts · LLM Field Notes" />
+    <meta name="twitter:description" content="Runnable experiments, graph tooling, and honest handles for the next curious person." />
+    <meta name="twitter:image" content="social-card.svg" />
+    <meta name="twitter:image:alt" content="LLM Field Notes: documents into a living map" />
+    <link rel="canonical" href="./artifacts.html" />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage","@id":"./artifacts.html","url":"./artifacts.html","name":"Community artifacts · LLM Field Notes","description":"Runnable, inspectable artifacts from LLM Field Notes.","mainEntity":{"@type":"ItemList","name":"LLM Field Notes community artifacts","numberOfItems":16,"itemListElement":[{"@type":"ListItem","position":1,"name":"Tiny BPE tokenizer","url":"experiments/tiny-bpe.mjs"},{"@type":"ListItem","position":2,"name":"Tiny attention","url":"experiments/tiny-attention.mjs"},{"@type":"ListItem","position":3,"name":"Tiny training loop","url":"experiments/tiny-training.mjs"},{"@type":"ListItem","position":4,"name":"Tiny transformer","url":"experiments/tiny-transformer.mjs"},{"@type":"ListItem","position":5,"name":"Feedback evaluation","url":"experiments/evaluate-feedback.mjs"},{"@type":"ListItem","position":6,"name":"Learning loop","url":"experiments/learning-loop.mjs"},{"@type":"ListItem","position":7,"name":"Promotion gate","url":"experiments/compare-evaluations.mjs"},{"@type":"ListItem","position":8,"name":"Graph health inspector","url":"experiments/inspect-graph.mjs"},{"@type":"ListItem","position":9,"name":"Graph input boundary","url":"experiments/graph-input.mjs"},{"@type":"ListItem","position":10,"name":"Bounded file reader","url":"experiments/bounded-file.mjs"},{"@type":"ListItem","position":11,"name":"JSON-LD projection","url":"experiments/project-jsonld.mjs"},{"@type":"ListItem","position":12,"name":"JSON-LD verifier","url":"experiments/verify-jsonld.mjs"},{"@type":"ListItem","position":13,"name":"Graph diff","url":"experiments/diff-graphs.mjs"},{"@type":"ListItem","position":14,"name":"Diff verifier","url":"experiments/verify-diff.mjs"},{"@type":"ListItem","position":15,"name":"Graph verifier","url":"experiments/verify-graph.mjs"},{"@type":"ListItem","position":16,"name":"Sample graph export","url":"examples/sample-graph.json"}]}}</script>
+    <title>Artifacts · LLM Field Notes</title>
+  </head>
+  <body class="artifact-page">
+    <main class="section-shell artifact-shell">
+      <header class="artifact-header">
+        <a class="brand" href="./" aria-label="LLM Field Notes home">
+          <span class="brand-mark">⌁</span>
+          <span><strong>LLM FIELD NOTES</strong><small>an open learning map</small></span>
+        </a>
+        <a class="text-link" href="CONTRIBUTING.md">Improve the collection ↗</a>
+      </header>
+      <div class="section-label"><span class="section-number">07</span><span>COMMUNITY ARTIFACTS</span></div>
+      <h1>Small things<br /><em>worth running.</em></h1>
+      <p class="artifact-lede">Runnable experiments, graph tooling, and honest handles for the next curious person. Every artifact is dependency-free and designed to be read before it is extended.</p>
+      <div class="artifact-grid">
+        <a class="artifact-card" href="experiments/tiny-bpe.mjs"><span>FOUNDATIONS</span><h2>Tiny BPE tokenizer</h2><p>Build byte-pair merges and inspect vocabulary trade-offs.</p><code>node experiments/tiny-bpe.mjs</code></a>
+        <a class="artifact-card" href="experiments/tiny-attention.mjs"><span>FOUNDATIONS</span><h2>Tiny attention</h2><p>Make the weighted lookup behind attention concrete.</p><code>node experiments/tiny-attention.mjs</code></a>
+        <a class="artifact-card" href="experiments/tiny-training.mjs"><span>FOUNDATIONS</span><h2>Tiny training loop</h2><p>Watch a deterministic character-level model learn.</p><code>node experiments/tiny-training.mjs</code></a>
+        <a class="artifact-card" href="experiments/tiny-transformer.mjs"><span>ARCHITECTURE</span><h2>Tiny transformer</h2><p>Connect tokens, positions, attention, residuals, and logits.</p><code>node experiments/tiny-transformer.mjs</code></a>
+        <a class="artifact-card" href="experiments/evaluate-feedback.mjs"><span>QUALITY</span><h2>Feedback evaluation</h2><p>Measure whether reviewed decisions improve later extraction.</p><code>node experiments/evaluate-feedback.mjs --help</code></a>
+        <a class="artifact-card" id="learning-loop" href="experiments/learning-loop.mjs"><span>QUALITY</span><h2>Learning loop</h2><p>Run extraction, review, portable guidance, and improvement end to end.</p><code>node experiments/learning-loop.mjs</code></a>
+        <a class="artifact-card" href="experiments/compare-evaluations.mjs"><span>QUALITY</span><h2>Promotion gate</h2><p>Compare candidate evaluation reports before promotion.</p><code>node experiments/compare-evaluations.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/inspect-graph.mjs"><span>QUALITY</span><h2>Graph health inspector</h2><p>Turn provenance, freshness, and grounding into gates.</p><code>node experiments/inspect-graph.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/graph-input.mjs"><span>BOUNDARIES</span><h2>Graph input boundary</h2><p>Read bounded, fingerprint-verified graph inputs in CI.</p><code>node experiments/graph-input.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/bounded-file.mjs"><span>BOUNDARIES</span><h2>Bounded file reader</h2><p>Fail closed at text and byte-reading boundaries.</p><code>node experiments/bounded-file.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/project-jsonld.mjs"><span>PROJECTIONS</span><h2>JSON-LD projection</h2><p>Turn the internal graph into portable linked data.</p><code>node experiments/project-jsonld.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/verify-jsonld.mjs"><span>PROJECTIONS</span><h2>JSON-LD verifier</h2><p>Verify a semantic-web artifact against its source graph.</p><code>node experiments/verify-jsonld.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/diff-graphs.mjs"><span>PROJECTIONS</span><h2>Graph diff</h2><p>Inspect exactly how a representation changed.</p><code>node experiments/diff-graphs.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/verify-diff.mjs"><span>PROJECTIONS</span><h2>Diff verifier</h2><p>Verify a diff against its before and after graph exports.</p><code>node experiments/verify-diff.mjs --help</code></a>
+        <a class="artifact-card" href="experiments/verify-graph.mjs"><span>PROJECTIONS</span><h2>Graph verifier</h2><p>Verify a graph export or full backup before sharing or consuming it.</p><code>node experiments/verify-graph.mjs --help</code></a>
+        <a class="artifact-card" href="examples/sample-graph.json"><span>START HERE</span><h2>Sample graph export</h2><p>Download a small evidence-backed graph for health, diff, and JSON-LD experiments.</p><code>npm run health -- examples/sample-graph.json</code></a>
+      </div>
+      <footer class="artifact-footer">
+        <p>Want to add one? Use the <a href="ARTIFACT_SUBMISSION.md">portable submission template</a> or read the <a href="ARTIFACTS.md">forkable Markdown index</a>.</p>
+        <a href="./">← Back to LLM Field Notes</a>
+      </footer>
+    </main>
+  </body>
+</html>

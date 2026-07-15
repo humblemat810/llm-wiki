@@ -1,4 +1,4 @@
-import { GRAPH_SCHEMA, MAX_CONCEPT_LABEL_CHARS, MAX_EVIDENCE_CHARS, MAX_EVIDENCE_RECORDS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_ID_CHARS, MAX_RELATION_LABEL_CHARS, MAX_SOURCE_REFERENCES, MAX_TIMESTAMP_CHARS, REVIEW_STALE_DAYS, fingerprintFeedbackExamples, normalizeExtraction, slugify } from "./graph-core.js";
+import { GRAPH_SCHEMA, MAX_ALIASES, MAX_CONCEPT_LABEL_CHARS, MAX_EVIDENCE_CHARS, MAX_EVIDENCE_RECORDS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_ID_CHARS, MAX_RELATION_LABEL_CHARS, MAX_SOURCE_REFERENCES, MAX_TIMESTAMP_CHARS, REVIEW_STALE_DAYS, fingerprintFeedbackExamples, normalizeExtraction, parseTimestamp, sliceTextAtCodePointBoundary, slugify } from "./graph-core.js";
 
 export const EVALUATION_SCHEMA = "llm-field-notes/evaluation@1";
 export const MAX_EVALUATION_EXAMPLES = 15000;
@@ -9,7 +9,7 @@ const reviewedStatuses = new Set(["accepted", "rejected"]);
 const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function asText(value, limit = MAX_ID_CHARS) {
-  return typeof value === "string" ? value.trim().slice(0, limit) : "";
+  return typeof value === "string" ? sliceTextAtCodePointBoundary(value.trim(), limit) : "";
 }
 
 function normalized(value, limit = MAX_ID_CHARS) {
@@ -52,7 +52,10 @@ function assertReviewableExamples(examples) {
       throw new Error(`${path}.aliases exceeds the bounded unique alias contract.`);
     }
     if (Array.isArray(example.aliases)) {
-      const aliases = example.aliases.slice(0, 20);
+      if (example.aliases.length > MAX_ALIASES || new Set(example.aliases).size !== example.aliases.length) {
+        throw new Error(`${path}.aliases exceeds the bounded unique alias contract.`);
+      }
+      const aliases = example.aliases;
       if (aliases.some((alias) => typeof alias !== "string" || alias.length > MAX_CONCEPT_LABEL_CHARS)) {
         throw new Error(`${path}.aliases exceeds the bounded unique alias contract.`);
       }
@@ -60,7 +63,7 @@ function assertReviewableExamples(examples) {
     if (example.lastReviewedAt !== undefined && example.lastReviewedAt !== null
       && (typeof example.lastReviewedAt !== "string"
         || example.lastReviewedAt.length > MAX_TIMESTAMP_CHARS
-        || Number.isNaN(Date.parse(example.lastReviewedAt)))) {
+        || Number.isNaN(parseTimestamp(example.lastReviewedAt)))) {
       throw new Error(`${path}.lastReviewedAt must be a valid bounded timestamp.`);
     }
     if (example.sources !== undefined && (
@@ -88,9 +91,9 @@ function assertReviewableExamples(examples) {
 function freshnessCounts(examples, now = Date.now()) {
   return examples.reduce((counts, example) => {
     const timestamp = typeof example.lastReviewedAt === "string"
-      ? Date.parse(example.lastReviewedAt)
+      ? parseTimestamp(example.lastReviewedAt)
       : Number.NaN;
-    if (Number.isNaN(timestamp)) {
+    if (Number.isNaN(timestamp) || timestamp > now) {
       counts.undatedExamples += 1;
     } else if (now - timestamp >= REVIEW_STALE_DAYS * 86400000) {
       counts.staleExamples += 1;
@@ -121,7 +124,7 @@ function feedbackKey(example) {
 }
 
 function conceptKeys(concept) {
-  const aliases = Array.isArray(concept.aliases) ? concept.aliases.slice(0, 20) : [];
+  const aliases = Array.isArray(concept.aliases) ? concept.aliases.slice(0, MAX_ALIASES) : [];
   return new Set([
     identity(concept.id),
     normalized(concept.label, 120),
@@ -237,6 +240,14 @@ function validateCategory(value, path) {
   validateRejectedMetric(value.rejected, `${path}.rejected`);
 }
 
+function validateCategoryAgainstExtraction(value, path, extractionCount) {
+  const acceptedFound = value.accepted.found;
+  const rejectedPresent = value.rejected.present;
+  if (acceptedFound > extractionCount || rejectedPresent > extractionCount) {
+    throw new Error(`${path} reports more matched candidates than the extraction contains.`);
+  }
+}
+
 export function validateEvaluationReport(value, { label = "evaluation", allowEmpty = false } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
   assertKnownKeys(value, new Set(["schema", "graphSchema", "evaluatedAt", "extraction", "feedback", "overall"]), label);
@@ -246,7 +257,7 @@ export function validateEvaluationReport(value, { label = "evaluation", allowEmp
     || !value.evaluatedAt.trim()
     || value.evaluatedAt.length > MAX_TIMESTAMP_CHARS
     || !DATE_TIME_PATTERN.test(value.evaluatedAt)
-    || Number.isNaN(Date.parse(value.evaluatedAt))) {
+    || Number.isNaN(parseTimestamp(value.evaluatedAt))) {
     throw new Error(`${label}.evaluatedAt must be a valid bounded date-time.`);
   }
   if (!value.extraction || typeof value.extraction !== "object" || Array.isArray(value.extraction)) throw new Error(`${label}.extraction is missing.`);
@@ -278,6 +289,8 @@ export function validateEvaluationReport(value, { label = "evaluation", allowEmp
   }
   validateCategory(feedback.concepts, `${label}.feedback.concepts`);
   validateCategory(feedback.relations, `${label}.feedback.relations`);
+  validateCategoryAgainstExtraction(feedback.concepts, `${label}.feedback.concepts`, value.extraction.concepts);
+  validateCategoryAgainstExtraction(feedback.relations, `${label}.feedback.relations`, value.extraction.relations);
   if (!value.overall || typeof value.overall !== "object" || Array.isArray(value.overall)) throw new Error(`${label}.overall is missing.`);
   assertKnownKeys(value.overall, new Set(["accepted", "rejected"]), `${label}.overall`);
   validateAcceptedMetric(value.overall.accepted, `${label}.overall.accepted`);
@@ -288,6 +301,9 @@ export function validateEvaluationReport(value, { label = "evaluation", allowEmp
   const rejectedExpected = feedback.concepts.rejected.expected + feedback.relations.rejected.expected;
   const rejectedPresent = feedback.concepts.rejected.present + feedback.relations.rejected.present;
   const rejectedSuppressed = feedback.concepts.rejected.suppressed + feedback.relations.rejected.suppressed;
+  if (acceptedExpected + rejectedExpected !== feedback.examples) {
+    throw new Error(`${label}.feedback category counts do not match the reviewed-example count.`);
+  }
   if (value.overall.accepted.expected !== acceptedExpected
     || value.overall.accepted.found !== acceptedFound
     || value.overall.accepted.missed !== acceptedMissed
@@ -308,7 +324,7 @@ function stableMatchKey(value) {
     value?.sourceLabel || "",
     value?.targetLabel || "",
     value?.label || "",
-    ...(Array.isArray(value?.aliases) ? value.aliases.slice(0, 20).map(String).sort() : [])
+    ...(Array.isArray(value?.aliases) ? value.aliases.slice(0, MAX_ALIASES).map(String).sort() : [])
   ].join("\u0000");
 }
 

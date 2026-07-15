@@ -60,5 +60,25 @@ assert(hostilePage.includes("&lt;img src=x onerror=alert(1)&gt;"), "learning-not
 assert(!hostilePage.includes('href="javascript:'), "learning-note renderer should not emit executable URL schemes");
 assert(!hostilePage.includes('href="https://user:password@example.org/private"'), "learning-note renderer should not emit credential-bearing external links");
 assert(!hostilePage.includes("<script>alert"), "learning-note renderer should not emit executable note HTML");
+assert.throws(
+  () => buildLearningNotePage({
+    id: "unsafe-origin",
+    title: "Unsafe origin",
+    description: "The origin must be validated at the rendering boundary.",
+    content: "content",
+    origin: "javascript:alert(1)"
+  }),
+  /absolute credential-free HTTP\(S\) origin/,
+  "learning-note renderer should reject executable origins before building links"
+);
+const originPage = buildLearningNotePage({
+  id: "safe-origin",
+  title: "Safe origin",
+  description: "The origin is normalized at the rendering boundary.",
+  content: "content",
+  origin: "https://notes.example.test/field-notes///"
+});
+assert(originPage.includes('href="https://notes.example.test/field-notes/notes/safe-origin.html"'), "learning-note renderer should normalize safe deployment origins");
+assert(!originPage.includes("field-notes////"), "learning-note renderer should avoid duplicated origin separators");
 
 console.log(`notes smoke ok: ${noteFiles.length} learning notes`);

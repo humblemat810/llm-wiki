@@ -10,6 +10,7 @@ import {
   advanceGraphVersion,
   LEGACY_GRAPH_SCHEMAS,
   MAX_DOCUMENT_CHARS,
+  MAX_DOCUMENT_TITLE_CHARS,
   MAX_GRAPH_DOCUMENT_CHARS,
   MAX_GRAPH_DOCUMENTS,
   MAX_GRAPH_NODES,
@@ -20,10 +21,13 @@ import {
   MAX_FEEDBACK_EXPORT_OMITTED,
   MAX_REVIEW_QUEUE_ITEMS,
   MAX_SOURCE_URI_CHARS,
+  MAX_PRODUCER_VERSION_CHARS,
   sampleDocument,
   makeId,
   normalizeGraph,
   canonicalizeGraphForExport,
+  buildBackupEnvelope,
+  buildGraphExport,
   compareGraphFreshness,
   extractGraph,
   mergeExtraction,
@@ -36,6 +40,7 @@ import {
   buildExtractorFeedback,
   clearLearningMemory,
   clearStaleLearningMemory,
+  markSourceReviewed,
   rememberLearningItem,
   removeSource,
   inspectGraph,
@@ -49,28 +54,18 @@ import {
   asArray,
   normalizeSourceUri,
   SOURCE_QUALITIES,
-  DEFAULT_GRAPH_TIMESTAMP
+  DEFAULT_GRAPH_TIMESTAMP,
+  parseJsonWithUniqueKeys,
+  parseTimestamp,
+  sliceTextAtCodePointBoundary
 } from "./graph-core.js";
 import { GRAPH_KEY, createGraphStore } from "./graph-store.js";
 import { MAX_FEEDBACK_NOTE_CHARS, MAX_ZIP_BYTES, MAX_ZIP_FILES, applyObsidianFeedback, looksLikeObsidianFeedback, parseObsidianFeedback, parseObsidianVault } from "./projection-adapter.js";
 import { createRemoteExtractor } from "./extractor-adapter.js";
-import { getBrowserStorage } from "./storage-adapter.js";
+import { rebuildSources } from "./rebuild-adapter.js";
+import { getBrowserStorage, isExternalStorageRemoval } from "./storage-adapter.js";
 import { buildJsonLd } from "./jsonld-projection.js";
-
-const notes = [
-  { id: "tokens", category: "foundations", number: "01", tag: "FOUNDATIONS", title: "Tokens are the interface", description: "What a model actually sees, why text becomes integers, and where the seams show.", meta: "12 min read", question: "Why can't the model see words?" },
-  { id: "embeddings", category: "foundations", number: "02", tag: "FOUNDATIONS", title: "Meaning in a vector", description: "A geometric intuition for embeddings, similarity, and the strange power of coordinates.", meta: "18 min read", question: "How does a model store meaning?" },
-  { id: "attention", category: "foundations", number: "03", tag: "FOUNDATIONS", title: "Attention is a lookup", description: "Build the core operation by hand. Queries, keys, values—and why context has a cost.", meta: "24 min read", question: "How does context enter the computation?" },
-  { id: "training", category: "foundations", number: "04", tag: "FOUNDATIONS", title: "Loss is a compass", description: "The training loop as a measurement instrument, not a ritual. Follow the gradient.", meta: "21 min read", question: "What does 'learning' mean here?" },
-  { id: "transformers", category: "systems", number: "05", tag: "SYSTEMS", title: "The transformer stack", description: "The smallest complete map of the architecture: blocks, residuals, norms, and logits.", meta: "31 min read", question: "What is the machine made of?" },
-  { id: "scaling", category: "systems", number: "06", tag: "SYSTEMS", title: "Scale changes the game", description: "Parameters, data, compute, and the empirical laws that make bigger surprisingly useful.", meta: "16 min read", question: "Why does scale work?" },
-  { id: "inference", category: "systems", number: "07", tag: "SYSTEMS", title: "One token at a time", description: "Sampling, temperature, KV caches, and the time-sensitive path from prompt to response.", meta: "19 min read", question: "What happens at inference?" },
-  { id: "evaluation", category: "systems", number: "08", tag: "SYSTEMS", title: "Measure the thing", description: "A practical evaluation loop for when benchmark scores are not enough—or even relevant.", meta: "22 min read", question: "How do I know if it works?" },
-  { id: "rag", category: "shipping", number: "09", tag: "SHIPPING", title: "Give it a library", description: "Retrieval augmented generation without the hand-waving: chunk, search, cite, inspect.", meta: "27 min read", question: "How can a model use my data?" },
-  { id: "finetuning", category: "shipping", number: "10", tag: "SHIPPING", title: "Teach, don't just prompt", description: "When to use fine-tuning, what the dataset is really doing, and how to avoid cargo culting.", meta: "25 min read", question: "When should I change the weights?" },
-  { id: "agents", category: "shipping", number: "11", tag: "SHIPPING", title: "Tools make a system", description: "The useful unit is often a model surrounded by tools, state, checks, and a clear stop condition.", meta: "23 min read", question: "How does a model take action?" },
-  { id: "production", category: "shipping", number: "12", tag: "SHIPPING", title: "Ship the boring parts", description: "Latency, cost, observability, fallbacks, and the path from demo to something people trust.", meta: "29 min read", question: "What survives contact with users?" }
-];
+import { notes, noteDetails } from "./curriculum.js";
 
 const path = [
   ["01–03", "Build a tokenizer", "Make the text-to-integer boundary visible."],
@@ -81,26 +76,65 @@ const path = [
   ["27–30", "Ship a useful edge", "Put one narrow capability in front of a real person."]
 ];
 
-const noteDetails = {
-  tokens: ["A language model never receives words. It receives a sequence of token IDs produced by a tokenizer. That boundary explains spelling weirdness, context limits, cost, and why changing one character can change the whole computation.", "Write a byte-pair tokenizer for a small text file. Print token IDs, decoded text, and compression ratio for five surprising strings.", "Compare how your tokenizer splits a name, an emoji, code, and a sentence in another language."],
-  embeddings: ["An embedding is a learned coordinate system. Similar uses tend to land near one another, but the dimensions are not a hand-labeled dictionary—they are shaped by the task and the data.", "Load a small embedding model and plot 30 words with PCA. Label clusters, then inspect the nearest neighbors of an ambiguous word.", "Find one useful neighborhood and one misleading one. Ask what the corpus taught the geometry."],
-  attention: ["Attention lets every position make a weighted lookup over other positions. Queries ask what is needed, keys advertise what is available, and values carry the information back.", "Implement scaled dot-product attention in a few lines of array code. Print the attention matrix for a sentence and explain one row.", "Mask future positions and watch the matrix become causal—the small detail that turns a lookup into language modeling."],
-  training: ["Loss compresses a prediction error into a signal that can move parameters. It is useful because it is differentiable, not because it perfectly captures usefulness.", "Run `node experiments/tiny-training.mjs`, read the character-level bigram model, then change its steps and learning rate before adding architecture.", "Keep the loss falling while making the output worse. That tension is the beginning of evaluation."],
-  transformers: ["A transformer repeats a simple block: mix information across positions with attention, transform each position with an MLP, and preserve a clean path with residual connections.", "Implement a character-level transformer with one block. Keep it small enough to read every tensor shape in a debugger.", "Remove one component at a time. Record which failure is graceful, catastrophic, or merely slower."],
-  scaling: ["More parameters alone are not a strategy. Useful scaling balances model capacity, data, and compute so the model keeps finding structure rather than memorizing noise.", "Train three tiny models under a fixed compute budget. Log parameter count, tokens seen, wall time, and validation loss.", "Use the measurements to predict which model should win before checking the result."],
-  inference: ["Generation is a loop: run the model, turn logits into a distribution, choose one token, append it, and repeat. The cache keeps old key/value computations from being repeated.", "Write a sampler with greedy, temperature, and top-k modes. Time it with and without a simple key/value cache.", "Generate the same prompt at three temperatures and describe the change without using the word “creative.”"],
-  evaluation: ["Evaluation is a decision instrument. Define the user task, create representative examples, record acceptable failures, and measure changes with a repeatable harness.", "Create a 30-example eval set for one narrow task. Include adversarial and ambiguous cases, a rubric, and a baseline.", "Have two people score the same outputs. Investigate disagreement before adding more examples."],
-  rag: ["Retrieval gives a model relevant context at request time instead of asking its weights to contain every fact. The quality bottleneck is often search and chunking, not the final prompt.", "Index ten documents with simple lexical search. Return the top three chunks with source labels before asking the model to answer.", "Create questions whose answer spans two chunks. See whether your retriever brings both pieces together."],
-  finetuning: ["Fine-tuning changes behavior through examples. It fits repeatable format, style, or task behavior—not a magic database update.", "Write 50 high-quality input/output examples for one narrow behavior. Hold out a test set and compare prompt-only versus tuned behavior.", "Remove the weakest quarter of your examples. If performance improves, your dataset was teaching noise."],
-  agents: ["An agent is a control loop around a model: decide, call a tool, observe, and decide again. Reliability comes from constrained actions and explicit checks, not a grander persona.", "Give a model exactly two tools and a maximum of five steps. Log every decision, tool input, output, and stop reason.", "Add a dry-run mode. A safe system should be inspectable before it is powerful."],
-  production: ["A production system is a set of promises: response time, cost, availability, data handling, and behavior when the model is wrong or unavailable.", "Make a request log with latency, token counts, model version, outcome, and a redacted trace. Add one fallback and one human escape hatch.", "Ask a real person to use the system without your narration. Every question they ask is a missing product surface."]
-};
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+const MAX_OPERATION_DIAGNOSTIC_CHARS = 240;
+const boundedOperationDiagnostic = (error, fallback) => {
+  const detail = error instanceof Error ? error.message : fallback;
+  const normalized = String(detail).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return sliceTextAtCodePointBoundary(normalized || fallback, MAX_OPERATION_DIAGNOSTIC_CHARS);
+};
+async function copyText(value) {
+  if (typeof value !== "string") throw new TypeError("Copy text must be a string.");
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch {
+    // Fall through when Clipboard API permissions or secure-context policy
+    // prevent the asynchronous path.
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.width = "1px";
+  textarea.style.height = "1px";
+  textarea.style.padding = "0";
+  textarea.style.border = "0";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  const previousFocus = document.activeElement;
+  let copied = false;
+  try {
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, value.length);
+    copied = typeof document.execCommand === "function" && document.execCommand("copy");
+  } finally {
+    textarea.remove();
+    if (previousFocus && typeof previousFocus.focus === "function") {
+      try {
+        previousFocus.focus({ preventScroll: true });
+      } catch {
+        previousFocus.focus();
+      }
+    }
+  }
+  if (!copied) throw new Error("Copy is unavailable in this browser.");
+}
 
 const browserStorage = getBrowserStorage();
 await browserStorage.ready;
-window.addEventListener("pagehide", () => {
+const flushBrowserStorage = () => {
   void browserStorage.flush?.();
+};
+window.addEventListener("pagehide", flushBrowserStorage);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushBrowserStorage();
 });
 const RELEASE_METADATA_TIMEOUT_MS = 5000;
 const MAX_RELEASE_METADATA_CHARS = 4096;
@@ -109,20 +143,38 @@ const declaredResponseBytes = (response) => {
   const normalized = typeof header === "string" ? header.trim() : "";
   return /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
 };
+const isReadableSameOriginResponse = (response) => {
+  if (response?.type === "opaque" || response?.type === "opaqueredirect") return false;
+  if (typeof response?.url !== "string" || !response.url) return true;
+  try {
+    return new URL(response.url, location.href).origin === location.origin;
+  } catch {
+    return false;
+  }
+};
 const releaseController = new AbortController();
 const releaseTimeout = setTimeout(() => releaseController.abort(), RELEASE_METADATA_TIMEOUT_MS);
 const releaseInfo = await fetch("./version.json", { cache: "no-cache", signal: releaseController.signal }).then((response) => {
+  if (!isReadableSameOriginResponse(response)) throw new Error("Release metadata crossed the app origin boundary.");
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const declaredLength = declaredResponseBytes(response);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_RELEASE_METADATA_CHARS * 4) {
     throw new Error("Release metadata is oversized.");
   }
   return readBoundedTextResponse(response, MAX_RELEASE_METADATA_CHARS, "Release metadata is oversized.", releaseController.signal).then((text) => {
-    const value = JSON.parse(text);
+    const value = parseJsonWithUniqueKeys(text, "Release metadata");
+    const releaseDate = typeof value?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.date)
+      ? parseTimestamp(value.date)
+      : Number.NaN;
     if (!value || typeof value !== "object" || Array.isArray(value)
       || typeof value.version !== "string" || value.version.length > 64
       || (value.channel !== undefined && (typeof value.channel !== "string" || value.channel.length > 64))
-      || (value.date !== undefined && (typeof value.date !== "string" || value.date.length > 64))) {
+      || (value.date !== undefined && (
+        typeof value.date !== "string"
+        || value.date.length > 64
+        || Number.isNaN(releaseDate)
+        || releaseDate > Date.now()
+      ))) {
       throw new Error("Release metadata is invalid.");
     }
     return {
@@ -137,12 +189,129 @@ const releaseVersion = document.querySelector("#release-version");
 if (releaseVersion && typeof releaseInfo.version === "string") {
   releaseVersion.textContent = `v${releaseInfo.version} · ${releaseInfo.channel || "stable"}${releaseInfo.date ? ` · ${releaseInfo.date}` : ""}`;
 }
+const connectionStatus = document.querySelector("#connection-status");
+const retryQueuedFilesButton = document.querySelector("#retry-queued-files");
+let pendingFiles = [];
+const browserIsOffline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+const readDocumentDraftParts = () => [
+  document.querySelector("#document-title")?.value || "",
+  document.querySelector("#document-uri")?.value || "",
+  document.querySelector("#document-input")?.value || ""
+];
+const readDocumentDraft = () => JSON.stringify(readDocumentDraftParts());
+let committedDocumentDraft = readDocumentDraft();
+const hasUnsavedDocumentDraft = () => readDocumentDraft() !== committedDocumentDraft;
+const documentDraftKey = "llm-field-notes-document-draft";
+const MAX_DOCUMENT_DRAFT_JSON_CHARS = MAX_DOCUMENT_CHARS + MAX_DOCUMENT_TITLE_CHARS + MAX_SOURCE_URI_CHARS + 128;
+let draftSaveTimer = null;
+const clearStoredDocumentDraft = () => {
+  try {
+    appStorage.removeItem(documentDraftKey);
+  } catch {
+    // Draft recovery is an enhancement; the unload warning remains active.
+  }
+};
+const saveDocumentDraft = () => {
+  const parts = readDocumentDraftParts();
+  if (!parts.some((value) => value.trim())) {
+    clearStoredDocumentDraft();
+    return;
+  }
+  const serialized = JSON.stringify(parts);
+  if (serialized.length > MAX_DOCUMENT_DRAFT_JSON_CHARS) return;
+  try {
+    appStorage.setItem(documentDraftKey, serialized);
+  } catch {
+    // Draft recovery is an enhancement; the unload warning remains active.
+  }
+};
+const scheduleDocumentDraftSave = () => {
+  if (draftSaveTimer) clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => {
+    draftSaveTimer = null;
+    saveDocumentDraft();
+  }, 250);
+};
+const restoreStoredDocumentDraft = () => {
+  if (readDocumentDraftParts().some((value) => value.trim())) return false;
+  try {
+    const raw = appStorage.getItem(documentDraftKey);
+    if (typeof raw !== "string" || raw.length > MAX_DOCUMENT_DRAFT_JSON_CHARS) return false;
+    const parts = parseJsonWithUniqueKeys(raw, "Document draft");
+    if (!Array.isArray(parts)
+      || parts.length !== 3
+      || typeof parts[0] !== "string"
+      || typeof parts[1] !== "string"
+      || typeof parts[2] !== "string"
+      || parts[0].length > MAX_DOCUMENT_TITLE_CHARS
+      || parts[1].length > MAX_SOURCE_URI_CHARS
+      || parts[2].length > MAX_DOCUMENT_CHARS) return false;
+    document.querySelector("#document-title").value = parts[0];
+    document.querySelector("#document-uri").value = parts[1];
+    document.querySelector("#document-input").value = parts[2];
+    return parts.some((value) => value.trim());
+  } catch {
+    return false;
+  }
+};
+const commitDocumentDraft = () => {
+  committedDocumentDraft = readDocumentDraft();
+  clearStoredDocumentDraft();
+};
+const updateConnectionStatus = () => {
+  if (!connectionStatus) return;
+  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  const queued = pendingFiles.length > 0;
+  connectionStatus.hidden = !offline && !queued;
+  connectionStatus.dataset.state = offline ? "offline" : queued ? "queued" : "";
+  const heading = connectionStatus.querySelector("strong");
+  const message = connectionStatus.querySelector("span");
+  if (!offline && queued) {
+    if (heading) heading.textContent = "Queued files waiting.";
+    if (message) message.textContent = "Queued files are ready; process them when the extractor is available.";
+  } else if (offline) {
+    if (heading) heading.textContent = "Offline mode.";
+    if (message) message.textContent = "The local graph and cached wiki remain available; remote extraction will resume when you reconnect.";
+  }
+};
+window.addEventListener("online", updateConnectionStatus);
+window.addEventListener("offline", updateConnectionStatus);
+updateConnectionStatus();
 const { storage: appStorage, persistent: hasPersistentStorage } = browserStorage;
 let hasDurableStorage = browserStorage.durable;
 let storageDurabilityFailure = browserStorage.storageFailure;
+const recoveredDocumentDraft = restoreStoredDocumentDraft();
+if (recoveredDocumentDraft) {
+  document.querySelector("#ingest-status").textContent = "Recovered an unfinished document draft. Build it or clear it when ready.";
+}
+["#document-title", "#document-uri", "#document-input"].forEach((selector) => {
+  document.querySelector(selector)?.addEventListener("input", scheduleDocumentDraftSave);
+});
+const graphHasContent = (graph) => Boolean(
+  graph?.documents?.length
+  || graph?.nodes?.length
+  || graph?.edges?.length
+  || graph?.learning?.examples?.length
+);
+window.addEventListener("beforeunload", (event) => {
+  const queuedFiles = pendingFiles.length > 0;
+  const unsavedDocumentDraft = hasUnsavedDocumentDraft();
+  if (!queuedFiles && !unsavedDocumentDraft && hasPersistentStorage && !storageDurabilityFailure) return;
+  let graph;
+  try {
+    graph = graphStore.read();
+  } catch {
+    graph = null;
+  }
+  if (!queuedFiles && !unsavedDocumentDraft && !graphHasContent(graph)) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 const notesGrid = document.querySelector("#notes-grid");
 const emptyState = document.querySelector("#empty-state");
 const searchInput = document.querySelector("#search");
+const MAX_SEARCH_QUERY_CHARS = 256;
+const boundedSearchQuery = (value) => sliceTextAtCodePointBoundary(String(value || ""), MAX_SEARCH_QUERY_CHARS).trim();
 const filters = document.querySelectorAll(".filter");
 const progressKey = "llm-field-notes-progress";
 const pathProgressKey = "llm-field-notes-path";
@@ -153,7 +322,7 @@ const readStoredList = (key) => {
   try {
     const raw = appStorage.getItem(key);
     if (typeof raw !== "string" || raw.length > MAX_PROGRESS_JSON_CHARS) return [];
-    const value = JSON.parse(raw || "[]");
+    const value = parseJsonWithUniqueKeys(raw || "[]", "Learning progress");
     if (!Array.isArray(value)) return [];
     if (key === progressKey) return [...new Set(value.filter((item) => typeof item === "string" && notes.some((note) => note.id === item)))];
     if (key === pathProgressKey) return [...new Set(value.filter((item) => Number.isInteger(item) && item >= 0 && item < path.length))];
@@ -199,7 +368,7 @@ const setMetadataContent = (selector, content) => {
   if (element) element.setAttribute("content", content);
 };
 function setNoteMetadata(note) {
-  const description = `${note.question} ${note.description}`.replace(/\s+/g, " ").trim().slice(0, 280);
+  const description = sliceTextAtCodePointBoundary(`${note.question} ${note.description}`.replace(/\s+/g, " ").trim(), 280);
   document.title = `${note.title} · LLM Field Notes`;
   setMetadataContent('meta[name="description"]', description);
   setMetadataContent('meta[property="og:title"]', `${note.title} · LLM Field Notes`);
@@ -256,7 +425,7 @@ function openNoteFromLocation() {
 }
 
 function renderNotes() {
-  const query = searchInput.value.toLowerCase().trim();
+  const query = boundedSearchQuery(searchInput.value).toLowerCase();
   const activeFilter = document.querySelector(".filter.active").dataset.filter;
   const done = getProgress();
   const visible = notes.filter((note) => {
@@ -306,7 +475,11 @@ filters.forEach((filter) => filter.addEventListener("click", () => {
   filter.classList.add("active");
   renderNotes();
 }));
-searchInput.addEventListener("input", renderNotes);
+searchInput.addEventListener("input", (event) => {
+  const bounded = boundedSearchQuery(event.target.value);
+  if (event.target.value !== bounded) event.target.value = bounded;
+  renderNotes();
+});
 document.addEventListener("click", async (event) => {
   const noteButton = event.target.closest(".mark-done");
   if (noteButton) {
@@ -338,11 +511,10 @@ document.addEventListener("click", async (event) => {
     const shareUrl = new URL(`./notes/${encodeURIComponent(copyButton.dataset.copyNote)}.html`, location.href);
     const feedback = document.querySelector("#share-status");
     try {
-      if (!navigator.clipboard) throw new Error("Copy is unavailable in this browser.");
-      await navigator.clipboard.writeText(shareUrl.toString());
+      await copyText(shareUrl.toString());
       feedback.textContent = "Note link copied.";
     } catch (error) {
-      feedback.textContent = error instanceof Error ? error.message : "The note link could not be copied.";
+      feedback.textContent = boundedOperationDiagnostic(error, "The note link could not be copied.");
     }
     setTimeout(() => { feedback.textContent = ""; }, 4000);
   }
@@ -385,7 +557,7 @@ document.querySelector("#copy-prompt").addEventListener("click", async () => {
   const template = `# [A clear title]\n\n> The question this page answers in one sentence.\n\n## The short version\n\n## Build it\n\n## What surprised me\n\n## Failure modes\n\n## Sources\n\n## Try it yourself`;
   const feedback = document.querySelector("#copy-feedback");
   try {
-    await navigator.clipboard.writeText(template);
+    await copyText(template);
     feedback.textContent = "Template copied. Go make the next page.";
   } catch {
     feedback.textContent = "Copy blocked by your browser — use the page structure above as a starting point.";
@@ -394,6 +566,8 @@ document.querySelector("#copy-prompt").addEventListener("click", async () => {
 });
 document.querySelector("#share-wiki").addEventListener("click", async () => {
   const shareUrl = new URL(location.href);
+  shareUrl.username = "";
+  shareUrl.password = "";
   const noteHash = location.hash.match(/^#note=[^&]+/i)?.[0];
   let sharedNote = null;
   if (noteHash) {
@@ -409,6 +583,7 @@ document.querySelector("#share-wiki").addEventListener("click", async () => {
     shareUrl.search = "";
     shareUrl.hash = "";
   } else {
+    shareUrl.search = "";
     shareUrl.hash = "workbench";
   }
   const shareData = {
@@ -418,17 +593,15 @@ document.querySelector("#share-wiki").addEventListener("click", async () => {
   };
   const feedback = document.querySelector("#share-status");
   try {
-    if (navigator.share) {
+    if (typeof navigator.share === "function") {
       await navigator.share(shareData);
       feedback.textContent = "Share sheet opened.";
-    } else if (navigator.clipboard) {
-      await navigator.clipboard.writeText(shareUrl.toString());
-      feedback.textContent = "Link copied.";
     } else {
-      throw new Error("Sharing is unavailable in this browser.");
+      await copyText(shareUrl.toString());
+      feedback.textContent = "Link copied.";
     }
   } catch (error) {
-    if (error?.name !== "AbortError") feedback.textContent = error instanceof Error ? error.message : "Sharing is unavailable in this browser.";
+    if (error?.name !== "AbortError") feedback.textContent = boundedOperationDiagnostic(error, "Sharing is unavailable in this browser.");
   }
   setTimeout(() => { feedback.textContent = ""; }, 5000);
 });
@@ -438,8 +611,8 @@ renderPath();
 openNoteFromLocation();
 
 // --- Knowledge workbench ---------------------------------------------------
-// This is intentionally provider-agnostic. The local extractor gives the UI a
-// useful first pass today; a future model adapter can replace extractGraph()
+// This is intentionally provider-agnostic. The local extractor is the
+// zero-configuration path; a model-backed adapter can replace extractGraph()
 // without changing the graph schema, renderer, or export formats.
 const lexicalCompare = (left, right) => {
   const leftText = String(left);
@@ -455,6 +628,7 @@ const MAX_FEEDBACK_NOTE_BYTES = MAX_FEEDBACK_NOTE_CHARS * 4;
 const LEARNING_NOTE_TIMEOUT_MS = 10000;
 const MAX_LEARNING_NOTE_CHARS = 1_000_000;
 const MAX_LEARNING_NOTES_CHARS = 10 * 1024 * 1024;
+const MAX_LEARNING_VAULT_EXPORT_MS = 30000;
 const MAX_MARKDOWN_PREVIEW_EVIDENCE_CHARS = 250000;
 const WORKBENCH_DERIVED_CACHE_TTL_MS = 30000;
 const MAX_SEARCH_TEXT_CHARS = 12000;
@@ -463,25 +637,56 @@ const MAX_RENDERED_GRAPH_NODES = 250;
 const MAX_RENDERED_GRAPH_EDGES = 500;
 const MAX_EXPORT_BYTES = 50 * 1024 * 1024;
 const graphStore = createGraphStore(appStorage);
+const hasImportIntegrityLoss = (graph) => [
+  ...Object.values(graph?.integrity?.truncated || {}),
+  ...Object.values(graph?.integrity?.dropped || {})
+].some((count) => Number.isSafeInteger(count) && count > 0);
+const incompleteImportMessage = "This imported graph is incomplete. Restore the original export before making edits.";
+const mutationLimitMessage = (result, fallback) => result?.limited === "import-truncated" ? incompleteImportMessage : fallback;
 const graphWriteFailureMessage = (fallback, conflict) => {
   const mode = graphStore.getLastWriteMode();
   if (mode === "integrity") return "This graph came from an incomplete import. Restore the original export before making edits.";
   if (mode === "conflict") return conflict;
   return fallback;
 };
-async function readBrowserFileText(file, maxBytes, errorMessage = `That file exceeds the ${Math.round(maxBytes / 1000000)} MB safety limit.`) {
+const graphWriteSuccessMessage = (message) => {
+  const mode = graphStore.getLastWriteMode();
+  return mode === "without-history" || mode === "without-new-history"
+    ? `${message} Undo history was reduced; export a backup before leaving this tab.`
+    : message;
+};
+async function readBrowserFileBytes(file, maxBytes, errorMessage = `That file exceeds the ${Math.round(maxBytes / 1000000)} MB safety limit.`) {
   const byteLimit = Math.max(1, Math.floor(maxBytes));
   if (Number.isFinite(file?.size) && file.size > byteLimit) throw new Error(errorMessage);
-  if (typeof file?.arrayBuffer === "function") {
-    const bytes = new Uint8Array(await file.arrayBuffer());
+  if (typeof file?.slice !== "function") throw new Error("This browser cannot validate file size safely.");
+  const boundedFile = file.slice(0, byteLimit + 1);
+  if (typeof boundedFile?.arrayBuffer === "function") {
+    const rawBytes = await boundedFile.arrayBuffer();
+    const bytes = rawBytes instanceof ArrayBuffer
+      ? new Uint8Array(rawBytes)
+      : ArrayBuffer.isView(rawBytes)
+        ? new Uint8Array(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength)
+        : null;
+    if (!bytes || !Number.isSafeInteger(bytes.byteLength) || bytes.byteLength < 0) {
+      throw new Error("This browser cannot validate file size safely.");
+    }
     if (bytes.byteLength > byteLimit) throw new Error(errorMessage);
+    return bytes;
+  }
+  throw new Error("This browser cannot validate file size safely.");
+}
+async function readBrowserFileText(file, maxBytes, errorMessage = `That file exceeds the ${Math.round(maxBytes / 1000000)} MB safety limit.`) {
+  try {
+    const bytes = await readBrowserFileBytes(file, maxBytes, errorMessage);
     try {
       return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       throw new Error("That file is not valid UTF-8.");
     }
+  } catch (error) {
+    if (error?.message === "This browser cannot validate file size safely.") throw error;
+    throw error;
   }
-  throw new Error("This browser cannot validate file encoding safely.");
 }
 const graphStoreOptions = (graph) => ({
   expectedVersion: graph.version,
@@ -489,6 +694,7 @@ const graphStoreOptions = (graph) => ({
 });
 const extractorEndpointInput = document.querySelector("#extractor-endpoint");
 const privacyNote = document.querySelector("#privacy-note");
+const privacyLive = document.querySelector("#privacy-live");
 const cancelExtractionButton = document.querySelector("#cancel-extraction");
 const readStoredExtractorEndpoint = () => {
   try {
@@ -505,8 +711,10 @@ const validateExtractorEndpoint = (value) => {
   const endpointUrl = new URL(endpoint, location.href);
   if (endpointUrl.origin !== location.origin) throw new Error("The browser extractor endpoint must be same-origin with this app.");
   if (endpointUrl.username || endpointUrl.password) throw new Error("The browser extractor endpoint must not contain embedded credentials.");
+  if (endpointUrl.search || endpointUrl.hash) throw new Error("The browser extractor endpoint must not contain a query string or fragment.");
   return endpoint;
 };
+const absoluteExtractorEndpoint = (endpoint) => new URL(validateExtractorEndpoint(endpoint), location.href).toString();
 let storedExtractorEndpoint = "";
 try {
   storedExtractorEndpoint = validateExtractorEndpoint(readStoredExtractorEndpoint());
@@ -546,8 +754,26 @@ browserStorage.subscribe((event) => {
     return;
   }
   if (!event.external || event.key !== GRAPH_KEY) return;
+  if (isExternalStorageRemoval(event, GRAPH_KEY)) {
+    lastRenderedGraphState = null;
+    renderWorkbench();
+    document.querySelector("#ingest-status").textContent = "Graph cleared in another tab; this view was refreshed.";
+    return;
+  }
   const incomingGraph = graphStore.read();
-  if (lastRenderedGraphState && compareGraphFreshness(incomingGraph, lastRenderedGraphState.graph) < 0) {
+  const incomingFingerprint = fingerprintBackup(incomingGraph);
+  const renderedFingerprint = lastRenderedGraphState?.fingerprint || fingerprintBackup(lastRenderedGraphState?.graph);
+  const freshness = lastRenderedGraphState
+    ? compareGraphFreshness(incomingGraph, lastRenderedGraphState.graph)
+    : 1;
+  if (lastRenderedGraphState
+    && freshness === 0
+    && incomingGraph.version === lastRenderedGraphState.graph.version
+    && incomingFingerprint !== renderedFingerprint) {
+    document.querySelector("#ingest-status").textContent = "A divergent graph with the same revision arrived from another tab. This view was kept; reload to inspect the persisted graph.";
+    return;
+  }
+  if (lastRenderedGraphState && freshness < 0) {
     const repaired = graphStore.write(lastRenderedGraphState.graph, {
       recordHistory: false,
       expectedVersion: incomingGraph.version,
@@ -565,6 +791,30 @@ browserStorage.subscribe((event) => {
   document.querySelector("#ingest-status").textContent = "Graph updated in another tab; this view was refreshed.";
 });
 function updatePrivacyNote() {
+  const endpointValue = extractorEndpointInput.value.trim();
+  let extractorState = "LOCAL";
+  if (endpointValue) {
+    try {
+      validateExtractorEndpoint(endpointValue);
+      extractorState = "MODEL";
+    } catch {
+      extractorState = "INVALID";
+    }
+  }
+  const usingRemoteExtractor = extractorState === "MODEL";
+  const extractorMode = document.querySelector("#extractor-mode");
+  if (extractorMode) {
+    extractorMode.textContent = extractorState;
+    extractorMode.parentElement?.setAttribute("data-mode", extractorState);
+  }
+  if (privacyLive && privacyLive.dataset.state !== extractorState) {
+    privacyLive.dataset.state = extractorState;
+    privacyLive.textContent = extractorState === "LOCAL"
+      ? "Extraction mode: local."
+      : extractorState === "MODEL"
+        ? "Extraction mode: model endpoint enabled; documents may be sent remotely."
+        : "Extraction mode: invalid endpoint; remote sending is disabled.";
+  }
   const storageNote = storageDurabilityFailure
     ? "Durable browser storage is unavailable; export a backup before leaving this tab."
     : hasPersistentStorage
@@ -572,7 +822,9 @@ function updatePrivacyNote() {
       ? "The graph remains in durable browser storage; do not configure secrets in this page."
       : "The graph remains in browser storage; do not configure secrets in this page."
     : "Browser storage is unavailable, so this graph will last only until this tab is reloaded.";
-  privacyNote.textContent = extractorEndpointInput.value.trim()
+  privacyNote.textContent = extractorState === "INVALID"
+    ? `The extractor endpoint is invalid; no document will be sent remotely until it is corrected. ${storageNote}`
+    : usingRemoteExtractor
     ? `Documents, optional source URI, and bounded reviewed feedback will be sent to the configured same-origin extractor endpoint. ${storageNote}`
     : `No document extraction call while the extractor endpoint is blank. ${storageNote}${hasPersistentStorage ? " The app may request persistent storage to reduce eviction risk." : ""}`;
 }
@@ -589,7 +841,7 @@ extractorEndpointInput.addEventListener("change", () => {
     } catch {
       // Configuration persistence is an enhancement; extraction validation still applies.
     }
-    document.querySelector("#ingest-status").textContent = error instanceof Error ? error.message : "The extractor endpoint configuration is invalid.";
+    document.querySelector("#ingest-status").textContent = boundedOperationDiagnostic(error, "The extractor endpoint configuration is invalid.");
   }
   updatePrivacyNote();
 });
@@ -615,14 +867,23 @@ cancelExtractionButton.addEventListener("click", () => {
   activeExtractionController?.abort();
 });
 let persistenceRequested = false;
+const PERSISTENCE_REQUEST_TIMEOUT_MS = 3000;
 async function requestPersistentStorage() {
-  if (persistenceRequested || !navigator.storage?.persist) return;
+  const storageManager = navigator.storage;
+  if (persistenceRequested || typeof storageManager?.persist !== "function") return;
   persistenceRequested = true;
+  let timeout;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("Persistent storage request timed out.")), PERSISTENCE_REQUEST_TIMEOUT_MS);
+  });
   try {
-    if (navigator.storage.persisted && await navigator.storage.persisted()) return;
-    await navigator.storage.persist();
+    if (typeof storageManager.persisted === "function"
+      && await Promise.race([storageManager.persisted(), timeoutPromise])) return;
+    await Promise.race([storageManager.persist(), timeoutPromise]);
   } catch {
     // Persistence is an enhancement; normal local storage remains usable.
+  } finally {
+    clearTimeout(timeout);
   }
 }
 let graphSearchQuery = "";
@@ -633,17 +894,18 @@ function createGraphSearchIndex(graph) {
   const sourceSearchTextCache = new Map();
   const evidenceText = (evidence) => evidence
     .slice(0, 8)
-    .map((item) => item.text.slice(0, MAX_SEARCH_EVIDENCE_CHARS))
+    .map((item) => sliceTextAtCodePointBoundary(item.text, MAX_SEARCH_EVIDENCE_CHARS))
     .join(" ");
   const sourceSearchText = (document) => {
     if (sourceSearchTextCache.has(document)) return sourceSearchTextCache.get(document);
-    const text = [
+    const parts = [
       document.title || document.id,
       document.uri || "",
       document.quality || "",
       document.lastReviewedAt || "",
-      document.text.slice(0, MAX_SEARCH_TEXT_CHARS)
-    ].join(" ").slice(0, MAX_SEARCH_TEXT_CHARS).toLowerCase();
+      sliceTextAtCodePointBoundary(document.text, MAX_SEARCH_TEXT_CHARS)
+    ];
+    const text = sliceTextAtCodePointBoundary(parts.join(" "), MAX_SEARCH_TEXT_CHARS).toLowerCase();
     sourceSearchTextCache.set(document, text);
     return text;
   };
@@ -653,26 +915,26 @@ function createGraphSearchIndex(graph) {
   }).join(" ");
   const nodeText = (node) => {
     if (nodeTextCache.has(node)) return nodeTextCache.get(node);
-    const text = [
+    const text = sliceTextAtCodePointBoundary([
       node.label,
       ...(node.aliases || []),
       node.type,
       sourceTitles(node.sources),
       evidenceText(node.evidence)
-    ].join(" ").slice(0, MAX_SEARCH_TEXT_CHARS).toLowerCase();
+    ].join(" "), MAX_SEARCH_TEXT_CHARS).toLowerCase();
     nodeTextCache.set(node, text);
     return text;
   };
   const edgeText = (edge, nodeName) => {
     if (edgeTextCache.has(edge)) return edgeTextCache.get(edge);
-    const text = [
+    const text = sliceTextAtCodePointBoundary([
       nodeName(edge.source),
       edge.label,
       nodeName(edge.target),
       edge.status,
       sourceTitles(edge.sources),
       evidenceText(edge.evidence)
-    ].join(" ").slice(0, MAX_SEARCH_TEXT_CHARS).toLowerCase();
+    ].join(" "), MAX_SEARCH_TEXT_CHARS).toLowerCase();
     edgeTextCache.set(edge, text);
     return text;
   };
@@ -757,13 +1019,14 @@ function renderInspector(graph) {
       return;
     }
     const previewLimit = 12000;
-    const preview = source.text.slice(0, previewLimit);
+    const preview = sliceTextAtCodePointBoundary(source.text, previewLimit);
     const relatedNodes = graph.nodes.filter((node) => node.sources.includes(source.id));
     const qualityOptions = [...SOURCE_QUALITIES].map((quality) => `<option value="${escapeHtml(quality)}"${source.quality === quality ? " selected" : ""}>${escapeHtml(quality)}</option>`).join("");
     const reviewedDate = source.lastReviewedAt ? source.lastReviewedAt.slice(0, 10) : "";
     panel.innerHTML = `
       <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small></div>
-      <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="200" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" /><button type="button" data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
+      <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="${MAX_DOCUMENT_TITLE_CHARS}" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" /><button type="button" data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
+      <button type="button" class="text-button" data-review-source="${escapeHtml(source.id)}">mark reviewed today</button>
       <button type="button" class="replace-source" data-replace-source="${escapeHtml(source.id)}">Replace source with a newer file</button>
       <button type="button" class="remove-source" data-remove-source="${escapeHtml(source.id)}">Remove source from graph</button>
       <div class="inspector-source-actions"><span class="inspector-label">CONCEPTS FOUND</span>${relatedNodes.length ? relatedNodes.map((node) => `<button type="button" class="inspector-link" data-select-node="${escapeHtml(node.id)}">${escapeHtml(node.label)} <small>${escapeHtml(node.status)}</small></button>`).join("") : "<p class=\"inspector-muted\">No concepts attached.</p>"}</div>
@@ -840,14 +1103,20 @@ function renderWorkbenchUnsafe() {
   const historyRecoveryAvailable = Boolean(graphStore.readHistoryRecovery());
   const recoverySuppressed = Boolean(graphStore.hasRecoverySuppression?.());
   const storageMode = graphStore.getLastWriteMode();
+  const reducedHistory = storageMode === "without-history" || storageMode === "without-new-history";
+  const ephemeralStorage = !hasPersistentStorage;
   const storageWarning = [
-    storageMode === "without-history" || storageMode === "without-new-history" ? "Saved with reduced undo history" : "",
-    storageDurabilityFailure ? `<small class="storage-warning">Durable storage unavailable</small><button type="button" data-storage-action="backup">download backup</button>` : ""
+    ephemeralStorage ? "<small class=\"storage-warning\">Browser storage unavailable; changes last only this tab</small>" : "",
+    reducedHistory ? "<small class=\"storage-warning\">Saved with reduced undo history</small>" : "",
+    storageDurabilityFailure ? "<small class=\"storage-warning\">Durable storage unavailable</small>" : "",
+    ephemeralStorage || reducedHistory || storageDurabilityFailure ? `<button type="button" data-storage-action="backup">download backup</button>` : ""
   ].filter(Boolean).join("");
   const truncationDetails = [
+    health.truncatedDocumentTitle ? `${health.truncatedDocumentTitle} document title${health.truncatedDocumentTitle === 1 ? "" : "s"} clipped` : "",
     health.truncatedDocumentText ? `${health.truncatedDocumentText} document text clipped or omitted` : "",
     health.truncatedEvidenceText ? `${health.truncatedEvidenceText} evidence text clipped` : "",
     health.truncatedEvidenceItems ? `${health.truncatedEvidenceItems} evidence entr${health.truncatedEvidenceItems === 1 ? "y" : "ies"} omitted` : "",
+    health.truncatedAliases ? `${health.truncatedAliases} alias entr${health.truncatedAliases === 1 ? "y" : "ies"} clipped` : "",
     health.truncatedSourceReferences ? `${health.truncatedSourceReferences} provenance reference${health.truncatedSourceReferences === 1 ? "" : "s"} omitted` : "",
     health.truncatedDocuments ? `${health.truncatedDocuments} document entr${health.truncatedDocuments === 1 ? "y" : "ies"} omitted` : "",
     health.truncatedNodes ? `${health.truncatedNodes} concept entr${health.truncatedNodes === 1 ? "y" : "ies"} omitted` : "",
@@ -855,7 +1124,7 @@ function renderWorkbenchUnsafe() {
     health.truncatedRevisions ? `${health.truncatedRevisions} revision entr${health.truncatedRevisions === 1 ? "y" : "ies"} omitted` : "",
     health.truncatedLearningExamples ? `${health.truncatedLearningExamples} learning entr${health.truncatedLearningExamples === 1 ? "y" : "ies"} omitted` : ""
   ].filter(Boolean).join(" · ");
-  document.querySelector("#graph-health").innerHTML = `<span>HEALTH</span><small>${health.provenanceCoverage}% provenance</small><small>${health.sourceReviewCoverage}% sources reviewed · ${health.freshSourceReviewCoverage}% fresh</small><small>${health.reviewedItems} feedback decision${health.reviewedItems === 1 ? "" : "s"} in memory</small><small>guidance: ${health.feedbackContextRetained}/${health.feedbackContextAvailable}${health.feedbackContextExcluded ? ` · ${health.feedbackContextExcluded} withheld` : ""}${health.feedbackContextTruncated ? " capped" : ""}</small><small>learning: ${health.acceptedItems} accepted · ${health.rejectedItems} rejected · ${health.learningExamples} reusable${health.staleLearningExamples ? ` · ${health.staleLearningExamples} stale` : ""}</small>${health.learningExamples ? `<button type="button" data-learning-action="clear">forget reusable memory</button>` : ""}${health.staleLearningExamples ? `<button type="button" data-learning-action="clear-stale">forget stale learning</button>` : ""}${health.truncated ? `<small class="privacy-warning">import truncated ${health.truncatedItems} item${health.truncatedItems === 1 ? "" : "s"}: ${escapeHtml(truncationDetails)} — restore the original export before editing</small>` : ""}${health.dropped ? `<small class="privacy-warning">import dropped ${health.droppedItems} malformed item${health.droppedItems === 1 ? "" : "s"} — inspect the original export</small>` : ""}${health.conflictingItems ? `<small class="privacy-warning">${health.conflictingItems} duplicate concept/relation record${health.conflictingItems === 1 ? "" : "s"} had contradictory review statuses — inspect the original export</small>` : ""}${health.redacted ? "<small class=\"privacy-warning\">redacted source content</small>" : ""}<small>quality: ${escapeHtml(sourceQualitySummary)}</small><small>${health.unsupportedNodes} unsupported concept${health.unsupportedNodes === 1 ? "" : "s"}</small><small>${health.unsupportedEdges} unsupported relation${health.unsupportedEdges === 1 ? "" : "s"}</small>${health.ambiguousLabels ? `<small>${health.ambiguousLabels} ambiguous concept label${health.ambiguousLabels === 1 ? "" : "s"}</small>` : ""}${reviews.length ? `<small>${reviews.length} review candidate${reviews.length === 1 ? "" : "s"}${health.staleReviewCandidates ? ` · ${health.staleReviewCandidates} stale` : ""}${health.newEvidenceReviewCandidates ? ` · ${health.newEvidenceReviewCandidates} new evidence` : ""}</small><button type="button" data-review-action="next">review next</button>` : ""}${health.orphanedSourceReferences ? `<small>${health.orphanedSourceReferences} broken source reference${health.orphanedSourceReferences === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousSourceIds ? `<small>${health.ambiguousSourceIds} ambiguous source ID${health.ambiguousSourceIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousEdgeIds ? `<small>${health.ambiguousEdgeIds} ambiguous relation ID${health.ambiguousEdgeIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousSourceReferences ? `<small>${health.ambiguousSourceReferences} ambiguous provenance reference${health.ambiguousSourceReferences === 1 ? "" : "s"}</small>` : ""}${storageWarning}${recoveryAvailable ? `<small class="recovery-warning">Recovery snapshot available</small><button type="button" data-recovery-action="download">download recovery</button><button type="button" data-recovery-action="dismiss">dismiss</button>` : ""}${historyRecoveryAvailable ? `<small class="recovery-warning">Undo history recovery available</small><button type="button" data-recovery-action="history-download">download history recovery</button><button type="button" data-recovery-action="history-dismiss">dismiss</button>` : ""}`;
+  document.querySelector("#graph-health").innerHTML = `<span>HEALTH</span><small>${health.provenanceCoverage}% provenance</small><small>${health.sourceReviewCoverage}% sources reviewed · ${health.freshSourceReviewCoverage}% fresh</small><small>${health.reviewedItems} feedback decision${health.reviewedItems === 1 ? "" : "s"} in memory</small><small>guidance: ${health.feedbackContextRetained}/${health.feedbackContextAvailable}${health.feedbackContextExcluded ? ` · ${health.feedbackContextExcluded} withheld` : ""}${health.feedbackContextTruncated ? " capped" : ""}</small><small>learning: ${health.acceptedItems} accepted · ${health.rejectedItems} rejected · ${health.learningExamples} reusable${health.staleLearningExamples ? ` · ${health.staleLearningExamples} stale` : ""}</small>${health.learningExamples ? `<button type="button" data-learning-action="clear">forget reusable memory</button>` : ""}${health.staleLearningExamples ? `<button type="button" data-learning-action="clear-stale">forget stale learning</button>` : ""}${health.learningExamples && graph.documents.length ? `<button type="button" data-learning-action="rebuild">apply learning to saved sources</button>` : ""}${health.truncated ? `<small class="privacy-warning">import truncated ${health.truncatedItems} item${health.truncatedItems === 1 ? "" : "s"}: ${escapeHtml(truncationDetails)} — restore the original export before editing</small>` : ""}${health.dropped ? `<small class="privacy-warning">import dropped ${health.droppedItems} malformed item${health.droppedItems === 1 ? "" : "s"} — inspect the original export</small>` : ""}${health.conflictingItems ? `<small class="privacy-warning">${health.conflictingItems} duplicate concept/relation record${health.conflictingItems === 1 ? "" : "s"} had contradictory review statuses — inspect the original export</small>` : ""}${health.redacted ? "<small class=\"privacy-warning\">redacted source content</small>" : ""}<small>quality: ${escapeHtml(sourceQualitySummary)}</small><small>${health.unsupportedNodes} unsupported concept${health.unsupportedNodes === 1 ? "" : "s"}</small><small>${health.unsupportedEdges} unsupported relation${health.unsupportedEdges === 1 ? "" : "s"}</small>${health.ambiguousLabels ? `<small>${health.ambiguousLabels} ambiguous concept label${health.ambiguousLabels === 1 ? "" : "s"}</small>` : ""}${reviews.length ? `<small>${reviews.length} review candidate${reviews.length === 1 ? "" : "s"}${health.staleReviewCandidates ? ` · ${health.staleReviewCandidates} stale` : ""}${health.newEvidenceReviewCandidates ? ` · ${health.newEvidenceReviewCandidates} new evidence` : ""}</small><button type="button" data-review-action="next">review next</button>` : ""}${health.orphanedSourceReferences ? `<small>${health.orphanedSourceReferences} broken source reference${health.orphanedSourceReferences === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousSourceIds ? `<small>${health.ambiguousSourceIds} ambiguous source ID${health.ambiguousSourceIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousEdgeIds ? `<small>${health.ambiguousEdgeIds} ambiguous relation ID${health.ambiguousEdgeIds === 1 ? "" : "s"} — inspect import</small>` : ""}${health.ambiguousSourceReferences ? `<small>${health.ambiguousSourceReferences} ambiguous provenance reference${health.ambiguousSourceReferences === 1 ? "" : "s"}</small>` : ""}${storageWarning}${recoveryAvailable ? `<small class="recovery-warning">Recovery snapshot available</small><button type="button" data-recovery-action="download">download recovery</button><button type="button" data-recovery-action="dismiss">dismiss</button>` : ""}${historyRecoveryAvailable ? `<small class="recovery-warning">Undo history recovery available</small><button type="button" data-recovery-action="history-download">download history recovery</button><button type="button" data-recovery-action="history-dismiss">dismiss</button>` : ""}`;
   if (health.reviewQueueTruncated) {
     const warning = document.createElement("small");
     warning.className = "privacy-warning";
@@ -904,7 +1173,10 @@ function renderWorkbenchUnsafe() {
       if (!source || !target) return "";
       return `<line class="graph-edge" x1="${source.x}" y1="${source.y}" x2="${target.x}" y2="${target.y}" /><text class="edge-label" x="${(source.x + target.x) / 2}" y="${(source.y + target.y) / 2 - 5}">${escapeHtml(edge.label)}</text>`;
     }).join("");
-    const nodes = positions.map((node) => `<g class="graph-node" data-node-id="${escapeHtml(node.id)}" tabindex="0" role="button" aria-label="Inspect ${escapeHtml(node.label)}"><title>${escapeHtml(node.label)} — ${(node.confidence * 100).toFixed(0)}% confidence</title><circle cx="${node.x}" cy="${node.y}" r="${Math.min(29, 19 + node.mentions * 2)}"></circle><text x="${node.x}" y="${node.y + 4}">${escapeHtml(node.label.slice(0, 18))}</text></g>`).join("");
+    const nodes = positions.map((node) => {
+      const selected = selectedGraphItem?.kind === "node" && selectedGraphItem.id === node.id;
+      return `<g class="graph-node" data-node-id="${escapeHtml(node.id)}" tabindex="0" focusable="true" role="button" aria-current="${selected ? "true" : "false"}" aria-label="Inspect ${escapeHtml(node.label)}"><title>${escapeHtml(node.label)} — ${(node.confidence * 100).toFixed(0)}% confidence</title><circle cx="${node.x}" cy="${node.y}" r="${Math.min(29, 19 + node.mentions * 2)}"></circle><text x="${node.x}" y="${node.y + 4}">${escapeHtml(sliceTextAtCodePointBoundary(node.label, 18))}</text></g>`;
+    }).join("");
     canvas.innerHTML = `<g class="graph-edges">${edges}</g><g class="graph-nodes">${nodes}</g>`;
   }
   const query = graphSearchQuery.toLowerCase().trim();
@@ -913,7 +1185,10 @@ function renderWorkbenchUnsafe() {
     return searchIndex.nodeText(node).includes(query);
   });
   const visibleGraphNodes = matchingGraphNodes.slice(0, MAX_RENDERED_GRAPH_NODES);
-  list.innerHTML = visibleGraphNodes.map((node) => `<div class="node-row ${node.status === "rejected" ? "rejected" : ""}" data-node-id="${escapeHtml(node.id)}" tabindex="0" role="group" aria-label="Inspect concept ${escapeHtml(node.label)}"><div><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${escapeHtml(node.status)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback</small></div><div class="node-feedback">${node.status === "rejected" ? `<button type="button" data-feedback="restore" data-node-id="${escapeHtml(node.id)}" aria-label="Restore ${escapeHtml(node.label)}">↺ restore</button>` : `<button type="button" data-feedback="up" data-node-id="${escapeHtml(node.id)}" aria-label="Confirm ${escapeHtml(node.label)}">+ confirm</button><button type="button" data-feedback="down" data-node-id="${escapeHtml(node.id)}" aria-label="Dismiss ${escapeHtml(node.label)}">− dismiss</button>`}</div></div>`).join("");
+  list.innerHTML = visibleGraphNodes.map((node) => {
+    const selected = selectedGraphItem?.kind === "node" && selectedGraphItem.id === node.id;
+    return `<div class="node-row ${node.status === "rejected" ? "rejected" : ""}${selected ? " selected" : ""}" data-node-id="${escapeHtml(node.id)}"><button type="button" class="row-inspect" data-select-node="${escapeHtml(node.id)}" aria-current="${selected ? "true" : "false"}" aria-label="Inspect concept ${escapeHtml(node.label)}"><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${escapeHtml(node.status)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback</small></button><div class="node-feedback">${node.status === "rejected" ? `<button type="button" data-feedback="restore" data-node-id="${escapeHtml(node.id)}" aria-label="Restore ${escapeHtml(node.label)}">↺ restore</button>` : `<button type="button" data-feedback="up" data-node-id="${escapeHtml(node.id)}" aria-label="Confirm ${escapeHtml(node.label)}">+ confirm</button><button type="button" data-feedback="down" data-node-id="${escapeHtml(node.id)}" aria-label="Dismiss ${escapeHtml(node.label)}">− dismiss</button>`}</div></div>`;
+  }).join("");
   const nodeName = (id) => nodeById.get(id)?.label || id;
   const matchingGraphEdges = graph.edges.filter((edge) => {
     if (!query) return true;
@@ -922,7 +1197,8 @@ function renderWorkbenchUnsafe() {
   const visibleGraphEdges = matchingGraphEdges.slice(0, MAX_RENDERED_GRAPH_EDGES);
   relationList.innerHTML = visibleGraphEdges.map((edge) => {
     const relationName = `${nodeName(edge.source)} ${edge.label} ${nodeName(edge.target)}`;
-    return `<div class="relation-row ${edge.status === "rejected" ? "rejected" : ""}" data-edge-id="${escapeHtml(edge.id)}" tabindex="0" role="group" aria-label="Inspect relation ${escapeHtml(relationName)}"><div><strong>${escapeHtml(nodeName(edge.source))} <span>${escapeHtml(edge.label)}</span> ${escapeHtml(nodeName(edge.target))}</strong><small>${escapeHtml(edge.status)} · ${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}</small></div><div class="node-feedback">${edge.status === "rejected" ? `<button type="button" data-edge-feedback="restore" data-edge-id="${escapeHtml(edge.id)}" aria-label="Restore relation ${escapeHtml(relationName)}">↺ restore</button>` : `<button type="button" data-edge-feedback="up" data-edge-id="${escapeHtml(edge.id)}" aria-label="Confirm relation ${escapeHtml(relationName)}">+ confirm</button><button type="button" data-edge-feedback="down" data-edge-id="${escapeHtml(edge.id)}" aria-label="Dismiss relation ${escapeHtml(relationName)}">− dismiss</button>`}</div></div>`;
+    const selected = selectedGraphItem?.kind === "edge" && selectedGraphItem.id === edge.id;
+    return `<div class="relation-row ${edge.status === "rejected" ? "rejected" : ""}${selected ? " selected" : ""}" data-edge-id="${escapeHtml(edge.id)}"><button type="button" class="row-inspect" data-select-edge="${escapeHtml(edge.id)}" aria-current="${selected ? "true" : "false"}" aria-label="Inspect relation ${escapeHtml(relationName)}"><strong>${escapeHtml(nodeName(edge.source))} <span>${escapeHtml(edge.label)}</span> ${escapeHtml(nodeName(edge.target))}</strong><small>${escapeHtml(edge.status)} · ${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}</small></button><div class="node-feedback">${edge.status === "rejected" ? `<button type="button" data-edge-feedback="restore" data-edge-id="${escapeHtml(edge.id)}" aria-label="Restore relation ${escapeHtml(relationName)}">↺ restore</button>` : `<button type="button" data-edge-feedback="up" data-edge-id="${escapeHtml(edge.id)}" aria-label="Confirm relation ${escapeHtml(relationName)}">+ confirm</button><button type="button" data-edge-feedback="down" data-edge-id="${escapeHtml(edge.id)}" aria-label="Dismiss relation ${escapeHtml(relationName)}">− dismiss</button>`}</div></div>`;
   }).join("");
   const sourceNodeCounts = new Map();
   graph.nodes.forEach((node) => node.sources.forEach((sourceId) => {
@@ -930,7 +1206,7 @@ function renderWorkbenchUnsafe() {
   }));
   const visibleSources = matchingSourceDocuments.slice(0, MAX_RENDERED_GRAPH_NODES);
   sourceList.innerHTML = visibleSources.length
-    ? `<div class="source-list-heading">SOURCE DOCUMENTS · ${visibleSources.length}${graph.documents.length > visibleSources.length ? `/${graph.documents.length}` : ""}</div>${visibleSources.map((document) => `<div class="source-row${selectedGraphItem?.kind === "source" && selectedGraphItem.id === document.id ? " selected" : ""}" data-source-id="${escapeHtml(document.id)}" tabindex="0" role="button" aria-label="Inspect source ${escapeHtml(document.title)}"><div><strong>${escapeHtml(document.title)}</strong><small>${document.text.length.toLocaleString()} characters · <em>${escapeHtml(document.quality)}</em> quality${document.lastReviewedAt ? ` · reviewed ${escapeHtml(document.lastReviewedAt)}` : ""}</small></div><small>${sourceNodeCounts.get(document.id) || 0} concepts</small></div>`).join("")}`
+    ? `<div class="source-list-heading">SOURCE DOCUMENTS · ${visibleSources.length}${graph.documents.length > visibleSources.length ? `/${graph.documents.length}` : ""}</div>${visibleSources.map((document) => { const selected = selectedGraphItem?.kind === "source" && selectedGraphItem.id === document.id; return `<button type="button" class="source-row${selected ? " selected" : ""}" data-source-id="${escapeHtml(document.id)}" aria-current="${selected ? "true" : "false"}" aria-label="Inspect source ${escapeHtml(document.title)}"><span class="source-row-main"><strong>${escapeHtml(document.title)}</strong><small>${document.text.length.toLocaleString()} characters · <em>${escapeHtml(document.quality)}</em> quality${document.lastReviewedAt ? ` · reviewed ${escapeHtml(document.lastReviewedAt)}` : ""}</small></span><small>${sourceNodeCounts.get(document.id) || 0} concepts</small></button>`; }).join("")}`
     : "<div class=\"source-list-heading\">No matching source documents.</div>";
   const manualNodes = graph.nodes
     .filter((node) => node.status !== "rejected" && (!query || searchIndex.nodeText(node).includes(query)))
@@ -950,7 +1226,7 @@ function renderWorkbenchUnsafe() {
   const revisionLog = document.querySelector("#revision-log");
   const wasRevisionOpen = revisionLog.querySelector("details")?.open;
   revisionLog.innerHTML = graph.revisions.length
-    ? `<details${wasRevisionOpen ? " open" : ""}><summary><span>MEMORY</span><small>${graph.revisions.length} retained revision${graph.revisions.length === 1 ? "" : "s"}</small></summary><div class="revision-items">${graph.revisions.map((revision) => `<div><b>v${revision.version}</b><span>${escapeHtml(revision.reason)}</span><small>${escapeHtml(revision.timestamp)} · ${revision.nodes} nodes · ${revision.edges} relations</small></div>`).join("")}</div></details>`
+    ? `<details${wasRevisionOpen ? " open" : ""}><summary><span>MEMORY</span><small>${graph.revisions.length} retained revision${graph.revisions.length === 1 ? "" : "s"}</small></summary><div class="revision-items">${graph.revisions.map((revision) => `<div><b>v${revision.version}</b><span>${escapeHtml(revision.reason)}</span><small>${escapeHtml(revision.timestamp)} · ${escapeHtml(revision.operation || "unknown")}${revision.extractor && revision.extractor !== "unknown" ? ` · ${escapeHtml(revision.extractor)} extractor` : ""} · ${revision.nodes} nodes · ${revision.edges} relations</small></div>`).join("")}</div></details>`
     : "<span>MEMORY</span><small>No revisions yet.</small>";
   const revisionDiffPreview = document.querySelector("#revision-diff-preview");
   const history = graphStore.readHistory();
@@ -996,7 +1272,7 @@ function renderWorkbench() {
     errorPanel.hidden = true;
   } catch (error) {
     errorPanel.hidden = false;
-    document.querySelector("#app-error-message").textContent = error instanceof Error ? error.message : "The saved graph was preserved, but this view could not render.";
+    document.querySelector("#app-error-message").textContent = boundedOperationDiagnostic(error, "The saved graph was preserved, but this view could not render.");
   }
 }
 
@@ -1026,7 +1302,7 @@ function buildMarkdown(graph, { maxEvidenceChars = Number.POSITIVE_INFINITY, gra
   const conceptLink = (id) => paths.nodes.has(id) ? `[[${paths.nodes.get(id)}|${nodeLabel(id)}]]` : `[[${nodeLabel(id)}]]`;
   const sourceLink = (id) => paths.sources.has(id) ? `[[${paths.sources.get(id)}|${sourceLabel(id)}]]` : `[[${sourceLabel(id)}]]`;
   const revisionLines = graph.revisions.length
-    ? graph.revisions.map((revision) => `- v${revision.version} · ${revision.timestamp} · ${safeMarkdownLabel(revision.reason)} · ${revision.nodes} concepts · ${revision.edges} relations`)
+    ? graph.revisions.map((revision) => `- v${revision.version} · ${revision.timestamp} · ${revision.operation || "unknown"}${revision.extractor && revision.extractor !== "unknown" ? ` · ${revision.extractor} extractor` : ""} · ${safeMarkdownLabel(revision.reason)} · ${revision.nodes} concepts · ${revision.edges} relations`)
     : ["- none"];
   const learningLines = (graph.learning?.examples || []).map((example) => {
     const reviewedAt = example.lastReviewedAt ? `, reviewed ${safeMarkdownLabel(example.lastReviewedAt)}` : "";
@@ -1039,7 +1315,7 @@ function buildMarkdown(graph, { maxEvidenceChars = Number.POSITIVE_INFINITY, gra
   const rejected = [...graph.nodes.filter((node) => node.status === "rejected").map((node) => `- concept: ${conceptLink(node.id)}`), ...graph.edges.filter((edge) => edge.status === "rejected").map((edge) => `- relation: ${conceptLink(edge.source)} — ${safeMarkdownLabel(edge.label)} → ${conceptLink(edge.target)}`)];
   const mermaidNodes = graph.nodes.slice(0, 150);
   const mermaidIds = new Map(mermaidNodes.map((node, index) => [node.id, `n${index}`]));
-  const mermaidText = (value) => String(value).replace(/["\\\r\n[\]<>]/g, " ").replace(/\|/g, "/").slice(0, 120);
+  const mermaidText = (value) => sliceTextAtCodePointBoundary(String(value).replace(/["\\\r\n[\]<>]/g, " ").replace(/\|/g, "/"), 120);
   const mermaidCandidateEdges = graph.edges.filter((edge) => mermaidIds.has(edge.source) && mermaidIds.has(edge.target));
   const mermaidEdges = mermaidCandidateEdges.slice(0, 300);
   const omittedMermaidNodes = Math.max(0, graph.nodes.length - mermaidNodes.length);
@@ -1169,6 +1445,10 @@ function buildRedactedMarkdownProjection() {
 }
 
 function buildFeedbackDataset(graph) {
+  const trustedFeedbackTime = (value) => {
+    const timestamp = parseTimestamp(value);
+    return Number.isFinite(timestamp) && timestamp <= Date.now() ? timestamp : Number.NaN;
+  };
   const compare = (left, right) => {
     const leftText = String(left);
     const rightText = String(right);
@@ -1191,13 +1471,14 @@ function buildFeedbackDataset(graph) {
   const learningKeys = new Set((graph.learning?.examples || []).map((example) => (
     example.kind === "concept" ? `concept|${example.id}` : `relation|${example.id}`
   )));
-  const reservedCurrentKeys = new Set([
-    reviewedNodes[0] ? `concept|${reviewedNodes[0].id}` : null,
-    reviewedEdges[0] ? `relation|${reviewedEdges[0].id}` : null
-  ].filter((key) => key && !learningKeys.has(key)));
+  const currentKeys = new Set([
+    ...reviewedNodes.map((node) => `concept|${node.id}`),
+    ...reviewedEdges.map((edge) => `relation|${edge.id}`)
+  ]);
+  const reservedCurrentKeys = new Set([...currentKeys].filter((key) => !learningKeys.has(key)));
   const orderedLearningExamples = [...(graph.learning?.examples || [])].sort((left, right) => {
-    const leftTime = left.lastReviewedAt ? Date.parse(left.lastReviewedAt) : Number.NaN;
-    const rightTime = right.lastReviewedAt ? Date.parse(right.lastReviewedAt) : Number.NaN;
+    const leftTime = trustedFeedbackTime(left.lastReviewedAt);
+    const rightTime = trustedFeedbackTime(right.lastReviewedAt);
     if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return rightTime - leftTime;
     if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? -1 : 1;
     return compare(
@@ -1235,7 +1516,18 @@ function buildFeedbackDataset(graph) {
     });
   };
   const learningBudget = Math.max(0, MAX_FEEDBACK_EXAMPLES - reservedCurrentKeys.size);
-  (learningBudget ? orderedLearningExamples.slice(0, learningBudget) : []).forEach(addExample);
+  let learningSlots = learningBudget;
+  const learningCandidates = [];
+  orderedLearningExamples.forEach((example) => {
+    const key = example.kind === "concept" ? `concept|${example.id}` : `relation|${example.id}`;
+    if (currentKeys.has(key) || learningSlots > 0) {
+      learningCandidates.push(example);
+      if (!currentKeys.has(key)) learningSlots -= 1;
+    } else {
+      omittedExamples += 1;
+    }
+  });
+  learningCandidates.forEach(addExample);
   reviewedNodes.forEach((node) => addExample({
       kind: "concept",
       id: node.id,
@@ -1332,10 +1624,13 @@ function buildProjectionPaths(graph) {
   return { nodes, sources, relations };
 }
 
-function buildVaultFiles(graph) {
+function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
   assertGraphTextExportBudget([graph]);
   const graphFingerprint = fingerprintBackup(graph);
   const generatedAt = graph.updatedAt || DEFAULT_GRAPH_TIMESTAMP;
+  const normalizedAppVersion = typeof appVersion === "string" && appVersion.trim()
+    ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS)
+    : "unknown";
   const compare = (left, right) => {
     const leftText = String(left);
     const rightText = String(right);
@@ -1448,6 +1743,7 @@ function buildVaultFiles(graph) {
       graphSchema: GRAPH_SCHEMA,
       graphVersion: projectedGraph.version,
       graphFingerprint,
+      appVersion: normalizedAppVersion,
       redacted: projectedGraph.redacted === true,
       generatedAt
     }, null, 2)
@@ -1472,8 +1768,8 @@ function buildVaultFiles(graph) {
         ""
       ])
     ].join("\n") });
-  addVaultFile({ name: "graph.json", content: JSON.stringify({ ...projectedGraph, graphFingerprint }, null, 2) });
-  addVaultFile({ name: "graph.jsonld", content: JSON.stringify(buildJsonLd(projectedGraph), null, 2) });
+  addVaultFile({ name: "graph.json", content: JSON.stringify(buildGraphExport(projectedGraph, { appVersion: normalizedAppVersion }), null, 2) });
+  addVaultFile({ name: "graph.jsonld", content: JSON.stringify(buildJsonLd(projectedGraph, { appVersion: normalizedAppVersion }), null, 2) });
   projectedNodes.forEach((node) => {
     const related = relatedByNode.get(node.id) || [];
     addVaultFile({
@@ -1554,11 +1850,18 @@ async function buildLearningVaultFiles({ estimatedArchiveBytes = 22 } = {}) {
   const files = [];
   const failures = [];
   let totalChars = 0;
+  const exportDeadline = Date.now() + MAX_LEARNING_VAULT_EXPORT_MS;
   for (const note of notes) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), LEARNING_NOTE_TIMEOUT_MS);
-    try {
-      const response = await fetch(`./notes/${encodeURIComponent(note.id)}.md`, { cache: "no-cache", signal: controller.signal });
+    const remainingMs = exportDeadline - Date.now();
+    if (remainingMs <= 0) {
+      failures.push(`${note.id}: export timed out`);
+      continue;
+    }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), Math.min(LEARNING_NOTE_TIMEOUT_MS, remainingMs));
+      try {
+        const response = await fetch(`./notes/${encodeURIComponent(note.id)}.md`, { cache: "no-cache", signal: controller.signal });
+      if (!isReadableSameOriginResponse(response)) throw new Error("learning note response crossed the app origin boundary");
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const content = await readBoundedTextResponse(response, MAX_LEARNING_NOTE_CHARS, "note exceeds the 1 MB safety limit", controller.signal);
       totalChars += content.length;
@@ -1573,13 +1876,42 @@ async function buildLearningVaultFiles({ estimatedArchiveBytes = 22 } = {}) {
       files.push(file);
     } catch (error) {
       if (error?.code === "VAULT_TOO_LARGE") throw error;
-      failures.push(`${note.id}: ${error?.name === "AbortError" ? "request timed out" : error instanceof Error ? error.message : "could not load"}`);
+      failures.push(`${note.id}: ${error?.name === "AbortError" ? "request timed out" : boundedOperationDiagnostic(error, "could not load")}`);
     } finally {
       clearTimeout(timeout);
     }
   }
   return { files, failures };
 }
+
+let vaultExportInFlight = false;
+async function withVaultExport(action) {
+  if (vaultExportInFlight) return false;
+  vaultExportInFlight = true;
+  const vaultButtons = [
+    document.querySelector("#download-vault"),
+    document.querySelector("#download-redacted-vault")
+  ].filter(Boolean);
+  vaultButtons.forEach((button) => {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+  });
+  try {
+    await action();
+    return true;
+  } finally {
+    vaultExportInFlight = false;
+    vaultButtons.forEach((button) => {
+      button.disabled = false;
+      button.setAttribute("aria-busy", "false");
+    });
+  }
+}
+const assertVaultGraphUnchanged = (fingerprint) => {
+  if (fingerprintBackup(graphStore.read()) !== fingerprint) {
+    throw new Error("The graph changed while the Obsidian vault was being prepared. Try the export again.");
+  }
+};
 
 async function readBoundedTextResponse(response, maxChars, errorMessage = "note exceeds the 1 MB safety limit", signal) {
   const maxBytes = maxChars * 4;
@@ -1610,9 +1942,20 @@ async function readBoundedTextResponse(response, maxChars, errorMessage = "note 
         const rawBytes = abortPromise
           ? await Promise.race([response.arrayBuffer(), abortPromise])
           : await response.arrayBuffer();
-        const bytes = new Uint8Array(rawBytes);
+        if (!(rawBytes instanceof ArrayBuffer) && !ArrayBuffer.isView(rawBytes)) {
+          throw new Error("The response does not contain byte data.");
+        }
+        const bytes = rawBytes instanceof ArrayBuffer
+          ? new Uint8Array(rawBytes)
+          : new Uint8Array(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength);
+        if (!Number.isSafeInteger(bytes.byteLength) || bytes.byteLength < 0) {
+          throw new Error("The response contains an invalid byte length.");
+        }
         if (signal?.aborted) throw Object.assign(new Error("The response read was aborted."), { name: "AbortError" });
         if (bytes.byteLength > maxBytes) throw new Error(errorMessage);
+        if (Number.isFinite(declaredLength) && bytes.byteLength !== declaredLength) {
+          throw new Error("The response byte length does not match Content-Length.");
+        }
         const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
         if (content.length > maxChars) throw new Error(errorMessage);
         return content;
@@ -1673,19 +2016,38 @@ async function readBoundedTextResponse(response, maxChars, errorMessage = "note 
       if (signal?.aborted) throw Object.assign(new Error("The response read was aborted."), { name: "AbortError" });
       const result = await readChunk();
       if (signal?.aborted) throw Object.assign(new Error("The response read was aborted."), { name: "AbortError" });
+      if (!result
+        || typeof result !== "object"
+        || typeof result.done !== "boolean"
+        || (result.done && result.value !== undefined)) {
+        cancelReader();
+        throw new Error("The response body contains an invalid stream result.");
+      }
       if (result.done) break;
-      bytes += result.value.byteLength;
+      const chunk = ArrayBuffer.isView(result.value)
+        && Number.isSafeInteger(result.value.byteLength)
+        && result.value.byteLength >= 0
+        ? new Uint8Array(result.value.buffer, result.value.byteOffset, result.value.byteLength)
+        : null;
+      if (!chunk) {
+        cancelReader();
+        throw new Error("The response body contains an invalid byte chunk.");
+      }
+      bytes += chunk.byteLength;
       if (bytes > maxBytes) {
         cancelReader();
         throw new Error(errorMessage);
       }
-      content += decoder.decode(result.value, { stream: true });
+      content += decoder.decode(chunk, { stream: true });
       if (content.length > maxChars) {
         cancelReader();
         throw new Error(errorMessage);
       }
     }
     content += decoder.decode();
+    if (Number.isFinite(declaredLength) && bytes !== declaredLength) {
+      throw new Error("The response byte length does not match Content-Length.");
+    }
     if (content.length > maxChars) throw new Error(errorMessage);
     return content;
   } finally {
@@ -1738,6 +2100,7 @@ function zipStore(files, maxBytes = MAX_ZIP_BYTES) {
   let estimatedArchiveBytes = 22;
   files.forEach((file) => {
     const nameBytes = textEncoder.encode(file.name);
+    if (nameBytes.length > 0xffff) throw new Error("The vault export contains a file name that is too long.");
     const contentBytes = textEncoder.encode(file.content);
     estimatedArchiveBytes += 30 + nameBytes.length + contentBytes.length + 46 + nameBytes.length;
     if (estimatedArchiveBytes > archiveLimit) throw new Error("The vault archive exceeds the 50 MB safety limit.");
@@ -1795,58 +2158,131 @@ function zipStore(files, maxBytes = MAX_ZIP_BYTES) {
   return concatBytes([...localParts, centralDirectory, end]);
 }
 
+function revokeObjectUrlLater(url) {
+  setTimeout(() => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // URL cleanup is best effort in restricted or test environments.
+    }
+  }, 1000);
+}
 function downloadFile(filename, content, type) {
   if (textEncoder.encode(content).byteLength > MAX_EXPORT_BYTES) throw new Error("This export exceeds the 50 MB safety limit.");
   const blob = new Blob([content], { type });
   const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.style.display = "none";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    link.href = objectUrl;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+  } finally {
+    try {
+      link.remove();
+    } finally {
+      revokeObjectUrlLater(objectUrl);
+    }
+  }
 }
 function downloadBytes(filename, bytes, type) {
-  if (!bytes || typeof bytes.byteLength !== "number" || bytes.byteLength > MAX_EXPORT_BYTES) {
+  const byteView = bytes instanceof ArrayBuffer
+    ? new Uint8Array(bytes)
+    : ArrayBuffer.isView(bytes)
+      ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      : null;
+  if (!byteView || !Number.isSafeInteger(byteView.byteLength) || byteView.byteLength < 0 || byteView.byteLength > MAX_EXPORT_BYTES) {
     throw new Error("This export exceeds the 50 MB safety limit.");
   }
-  const blob = new Blob([bytes], { type });
+  const blob = new Blob([byteView], { type });
   const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.style.display = "none";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    link.href = objectUrl;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+  } finally {
+    try {
+      link.remove();
+    } finally {
+      revokeObjectUrlLater(objectUrl);
+    }
+  }
 }
 function exportBackupSnapshot() {
-  const graph = canonicalizeGraphForExport(graphStore.read());
-  const history = graphStore.readHistory().map(canonicalizeGraphForExport);
-  assertGraphTextExportBudget([graph, ...history]);
-  const backup = {
-    format: BACKUP_FORMAT,
-    exportedAt: new Date().toISOString(),
-    graph,
-    history,
-    graphFingerprint: fingerprintBackup(graph, history)
-  };
+  const backup = buildBackupEnvelope(graphStore.read(), graphStore.readHistory(), { appVersion: releaseInfo.version });
+  assertGraphTextExportBudget([backup.graph, ...backup.history]);
   downloadFile("llm-field-notes-backup.json", JSON.stringify(backup, null, 2), "application/json");
   return backup;
 }
+function downloadRuntimeRecovery() {
+  const rawGraphRecovery = graphStore.readRecovery();
+  const rawHistoryRecovery = graphStore.readHistoryRecovery();
+  if (!rawGraphRecovery && !rawHistoryRecovery) {
+    exportBackupSnapshot();
+    return "Recovery backup downloaded.";
+  }
+  if (rawGraphRecovery) downloadFile("llm-field-notes-recovery.json", rawGraphRecovery, "application/json");
+  if (rawHistoryRecovery) downloadFile("llm-field-notes-history-recovery.json", rawHistoryRecovery, "application/json");
+  return `Recovery snapshot${rawGraphRecovery && rawHistoryRecovery ? "s" : ""} downloaded.`;
+}
+globalThis.document?.querySelector("#download-error-backup")?.addEventListener("click", () => {
+  const message = globalThis.document?.querySelector("#app-error-message");
+  if (!message) return;
+  try {
+    message.textContent = downloadRuntimeRecovery();
+  } catch (error) {
+    message.textContent = error instanceof Error
+      ? `Recovery download failed: ${boundedOperationDiagnostic(error, "the export could not be created")}`
+      : "Recovery download failed; export a backup from the workbench after reloading.";
+  }
+});
 
+let bypassSampleDraftConfirmation = false;
 document.querySelector("#load-sample").addEventListener("click", () => {
+  const title = document.querySelector("#document-title").value.trim();
+  const uri = document.querySelector("#document-uri").value.trim();
+  const text = document.querySelector("#document-input").value.trim();
+  const hasDraft = pendingFiles.length || title || uri || text;
+  if (hasDraft && !bypassSampleDraftConfirmation
+    && !window.confirm("Replace the current unbuilt document with the sample? Your saved graph will remain unchanged.")) {
+    document.querySelector("#ingest-status").textContent = "Sample not loaded; the current document draft was kept.";
+    return;
+  }
   pendingFiles = [];
   document.querySelector("#document-file").value = "";
   renderFileQueue();
   document.querySelector("#document-title").value = sampleDocument.title;
   document.querySelector("#document-uri").value = "";
   document.querySelector("#document-input").value = sampleDocument.text;
+  saveDocumentDraft();
   document.querySelector("#ingest-status").textContent = "Sample loaded. Build the graph when ready.";
 });
 function startSampleWalkthrough() {
-  loadSampleButton.click();
+  if (workbenchBusy()) {
+    document.querySelector("#ingest-status").textContent = "A graph build is already in progress. Cancel it before starting the sample.";
+    document.querySelector("#workbench").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  const currentGraph = graphStore.read();
+  const hasGraphContent = currentGraph.nodes.length
+    || currentGraph.edges.length
+    || currentGraph.documents.length
+    || currentGraph.learning?.examples?.length;
+  if (hasGraphContent && !window.confirm("Add the sample document to this existing workspace? Your current graph remains undoable.")) {
+    document.querySelector("#ingest-status").textContent = "Sample walkthrough canceled; the current graph was kept.";
+    document.querySelector("#workbench").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  bypassSampleDraftConfirmation = true;
+  try {
+    loadSampleButton.click();
+  } finally {
+    bypassSampleDraftConfirmation = false;
+  }
   document.querySelector("#workbench").scrollIntoView({ behavior: "smooth", block: "start" });
   ingestButton.click();
 }
@@ -1857,20 +2293,25 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
       const backup = exportBackupSnapshot();
       document.querySelector("#ingest-status").textContent = `Backup downloaded · ${backup.history.length} undo snapshot${backup.history.length === 1 ? "" : "s"}.`;
     } catch (error) {
-      document.querySelector("#ingest-status").textContent = error instanceof Error ? error.message : "The backup could not be exported.";
+      document.querySelector("#ingest-status").textContent = boundedOperationDiagnostic(error, "The backup could not be exported.");
     }
     return;
   }
   const learningAction = event.target.closest("[data-learning-action]")?.dataset.learningAction;
+  if (learningAction === "rebuild") {
+    void rebuildSavedSources();
+    return;
+  }
   if (learningAction === "clear-stale") {
     const currentGraph = graphStore.read();
     const staleCount = inspectGraph(currentGraph).staleLearningExamples;
     if (!staleCount || !window.confirm(`Forget ${staleCount} stale reusable learning example${staleCount === 1 ? "" : "s"}? Fresh learning memory will remain.`)) return;
     const result = clearStaleLearningMemory(currentGraph);
     if (!result.changed) {
-      document.querySelector("#ingest-status").textContent = result.limited === "version"
-        ? "This graph has reached its revision limit. Export a backup before changing reusable memory."
-        : "No stale reusable learning memory remains.";
+      document.querySelector("#ingest-status").textContent = mutationLimitMessage(result,
+        result.limited === "version"
+          ? "This graph has reached its revision limit. Export a backup before changing reusable memory."
+          : "No stale reusable learning memory remains.");
       return;
     }
     if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
@@ -1880,7 +2321,7 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
       return;
     }
     renderWorkbench();
-    document.querySelector("#ingest-status").textContent = `Forgot ${result.removed} stale reusable learning example${result.removed === 1 ? "" : "s"}.`;
+    document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage(`Forgot ${result.removed} stale reusable learning example${result.removed === 1 ? "" : "s"}.`);
     return;
   }
   if (learningAction === "clear") {
@@ -1888,7 +2329,12 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
     const currentGraph = graphStore.read();
     const result = clearLearningMemory(currentGraph);
     if (!result.changed) {
-      if (result.limited === "version") document.querySelector("#ingest-status").textContent = "This graph has reached its revision limit. Export a backup before changing reusable memory.";
+      if (result.limited) {
+        document.querySelector("#ingest-status").textContent = mutationLimitMessage(
+          result,
+          "This graph has reached its revision limit. Export a backup before changing reusable memory."
+        );
+      }
       return;
     }
     if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
@@ -1898,7 +2344,7 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
       return;
     }
     renderWorkbench();
-    document.querySelector("#ingest-status").textContent = `Forgot ${result.removed} reusable learning example${result.removed === 1 ? "" : "s"}.`;
+    document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage(`Forgot ${result.removed} reusable learning example${result.removed === 1 ? "" : "s"}.`);
     return;
   }
   const reviewAction = event.target.closest("[data-review-action]")?.dataset.reviewAction;
@@ -1929,8 +2375,14 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
   if (action === "history-download") {
     const rawHistory = graphStore.readHistoryRecovery();
     if (!rawHistory) return;
-    downloadFile("llm-field-notes-history-recovery.json", rawHistory, "application/json");
-    document.querySelector("#ingest-status").textContent = "Undo history recovery downloaded. Inspect it before dismissing the warning.";
+    try {
+      downloadFile("llm-field-notes-history-recovery.json", rawHistory, "application/json");
+      document.querySelector("#ingest-status").textContent = "Undo history recovery downloaded. Inspect it before dismissing the warning.";
+    } catch (error) {
+      document.querySelector("#ingest-status").textContent = error instanceof Error
+        ? error.message
+        : "The undo history recovery could not be downloaded.";
+    }
     return;
   }
   if (action === "dismiss") {
@@ -1941,8 +2393,14 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
   }
   const raw = graphStore.readRecovery();
   if (!raw) return;
-  downloadFile("llm-field-notes-recovery.json", raw, "application/json");
-  document.querySelector("#ingest-status").textContent = "Recovery snapshot downloaded. Inspect it before dismissing the warning.";
+  try {
+    downloadFile("llm-field-notes-recovery.json", raw, "application/json");
+    document.querySelector("#ingest-status").textContent = "Recovery snapshot downloaded. Inspect it before dismissing the warning.";
+  } catch (error) {
+    document.querySelector("#ingest-status").textContent = error instanceof Error
+      ? error.message
+      : "The recovery snapshot could not be downloaded.";
+  }
 });
 document.querySelector("#review-queue").addEventListener("click", (event) => {
   const item = event.target.closest("[data-review-queue-kind]");
@@ -1961,12 +2419,16 @@ document.querySelector("#review-queue").addEventListener("click", (event) => {
   document.querySelector("#inspector-panel").focus();
   document.querySelector("#ingest-status").textContent = "Review candidate opened.";
 });
-let pendingFiles = [];
+const syncRetryQueuedFilesButton = () => {
+  if (retryQueuedFilesButton) retryQueuedFilesButton.hidden = pendingFiles.length === 0;
+  updateConnectionStatus();
+};
 function renderFileQueue(message = "") {
   const queue = document.querySelector("#file-queue");
   queue.innerHTML = pendingFiles.length
     ? `<span>${pendingFiles.length} document${pendingFiles.length === 1 ? "" : "s"} queued</span>${pendingFiles.map((file) => `<small>${escapeHtml(file.name)}</small>`).join("")}`
     : message;
+  syncRetryQueuedFilesButton();
 }
 document.querySelector("#clear-graph").addEventListener("click", () => {
   const status = document.querySelector("#ingest-status");
@@ -1978,7 +2440,7 @@ document.querySelector("#clear-graph").addEventListener("click", () => {
   if (!hasSavedState || window.confirm("Clear this browser's saved graph and reusable learning memory?")) {
     if (graphStore.clear(graphStoreOptions(currentGraph))) {
       renderWorkbench();
-      status.textContent = "Local graph cleared.";
+      status.textContent = graphWriteSuccessMessage("Local graph cleared.");
     } else {
       status.textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab. It was not cleared; reload and try again."
@@ -1996,7 +2458,7 @@ document.querySelector("#undo-graph").addEventListener("click", () => {
     return;
   }
   renderWorkbench();
-  status.textContent = "Last graph change undone.";
+  status.textContent = graphWriteSuccessMessage("Last graph change undone.");
 });
 document.querySelector("#document-file").addEventListener("change", async (event) => {
   const files = [...(event.target.files || [])];
@@ -2022,7 +2484,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
         const expectedVersion = expectedGraph.version;
         const expectedFingerprint = fingerprintBackup(expectedGraph);
       const text = await readBrowserFileText(file, MAX_IMPORT_BYTES);
-      const imported = JSON.parse(text);
+      const imported = parseJsonWithUniqueKeys(text, "Imported graph");
       if (imported.format === FEEDBACK_FORMAT) {
         if (imported.graphSchema !== GRAPH_SCHEMA || !Array.isArray(imported.examples)) throw new Error("That feedback file is not compatible with this graph.");
         if (imported.truncatedExamples !== undefined
@@ -2042,6 +2504,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
           throw new Error("That feedback file's dataset fingerprint does not match its examples.");
         }
         const result = applyFeedbackDataset(graphStore.read(), imported.examples);
+        if (!result.changed && result.limited === "import-truncated") throw new Error(incompleteImportMessage);
         if (!result.changed && result.limited === "version") throw new Error("This graph has reached its revision limit. Export a backup before importing more feedback.");
         if (!result.changed && result.limited === "feedback-examples") throw new Error(`That feedback dataset contains more than ${MAX_FEEDBACK_FINGERPRINT_EXAMPLES.toLocaleString()} examples.`);
         if (!result.changed && !result.conflicts && result.skipped) throw new Error("No matching reviewed concepts or relations were found in that feedback dataset.");
@@ -2065,7 +2528,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
             : "The feedback dataset could not be saved in this browser.");
         }
         renderWorkbench();
-        status.textContent = `Feedback dataset imported · ${result.updates} reviewed item${result.updates === 1 ? "" : "s"} applied${result.learned ? ` · ${result.learned} reusable learning example${result.learned === 1 ? "" : "s"} retained` : ""}${result.skipped ? ` · ${result.skipped} unmatched or invalid example${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} contradictory decision${result.conflicts === 1 ? "" : "s"} detected; freshness or deterministic tie-breaking selected a value` : ""}${imported.truncatedExamples ? ` · source export omitted ${imported.truncatedExamples} reviewed item${imported.truncatedExamples === 1 ? "" : "s"}` : ""}.`;
+        status.textContent = graphWriteSuccessMessage(`Feedback dataset imported · ${result.updates} reviewed item${result.updates === 1 ? "" : "s"} applied${result.learned ? ` · ${result.learned} reusable learning example${result.learned === 1 ? "" : "s"} retained` : ""}${result.skipped ? ` · ${result.skipped} unmatched or invalid example${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} contradictory decision${result.conflicts === 1 ? "" : "s"} detected; freshness or deterministic tie-breaking selected a value` : ""}${imported.truncatedExamples ? ` · source export omitted ${imported.truncatedExamples} reviewed item${imported.truncatedExamples === 1 ? "" : "s"}` : ""}.`);
         pendingFiles = [];
         document.querySelector("#document-file").value = "";
         renderFileQueue();
@@ -2079,6 +2542,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
         }
         const importedGraph = normalizeGraph(imported.graph);
         const importedHistory = asArray(imported.history);
+        if (hasImportIntegrityLoss(importedGraph)) graphStore.captureRecoverySnapshot(text);
         const currentGraph = graphStore.read();
         const currentHasContent = currentGraph.nodes.length
           || currentGraph.edges.length
@@ -2099,7 +2563,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
         }
         const restoredHistoryCount = graphStore.readHistory().length;
         renderWorkbench();
-        status.textContent = `Full backup restored · revision ${importedGraph.version} with ${restoredHistoryCount} undo snapshot${restoredHistoryCount === 1 ? "" : "s"}.`;
+        status.textContent = graphWriteSuccessMessage(`Full backup restored · revision ${importedGraph.version} with ${restoredHistoryCount} undo snapshot${restoredHistoryCount === 1 ? "" : "s"}.`);
         pendingFiles = [];
         document.querySelector("#document-file").value = "";
         renderFileQueue();
@@ -2111,6 +2575,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
         throw new Error("That graph's fingerprint does not match its contents.");
       }
       const importedGraph = normalizeGraph(imported);
+      if (hasImportIntegrityLoss(importedGraph)) graphStore.captureRecoverySnapshot(text);
       if (importedGraph.redacted) {
         status.textContent = "This graph is redacted: source text, evidence quotes, and source URIs are unavailable.";
       }
@@ -2133,9 +2598,9 @@ document.querySelector("#document-file").addEventListener("change", async (event
           : "The graph could not be saved in this browser.");
       }
       renderWorkbench();
-      status.textContent = importedGraph.redacted
+      status.textContent = graphWriteSuccessMessage(importedGraph.redacted
         ? `Redacted graph imported · revision ${importedGraph.version} restored; source text, evidence quotes, and URIs are unavailable.`
-        : `Graph imported · revision ${importedGraph.version} restored.`;
+        : `Graph imported · revision ${importedGraph.version} restored.`);
       pendingFiles = [];
       document.querySelector("#document-file").value = "";
       renderFileQueue();
@@ -2148,13 +2613,14 @@ document.querySelector("#document-file").addEventListener("change", async (event
     if (firstText.length > MAX_DOCUMENT_CHARS) throw new Error(`That file is larger than the ${Math.round(MAX_DOCUMENT_CHARS / 1000)}k character limit.`);
     document.querySelector("#document-title").value = pendingFiles[0].name.replace(/\.[^/.]+$/, "");
     document.querySelector("#document-input").value = firstText;
+    saveDocumentDraft();
     renderFileQueue();
     status.textContent = pendingFiles.length === 1 ? `${pendingFiles[0].name} loaded. Build the graph when ready.` : `${pendingFiles.length} files loaded. Build the batch when ready.`;
   } catch (error) {
     pendingFiles = [];
     event.target.value = "";
     renderFileQueue();
-    status.textContent = error instanceof Error ? error.message : "That file could not be loaded.";
+      status.textContent = boundedOperationDiagnostic(error, "That file could not be loaded.");
   }
 });
 async function buildGraphFromInput() {
@@ -2170,8 +2636,8 @@ async function buildGraphFromInput() {
   const sourceUri = rawSourceUri ? normalizeSourceUri(rawSourceUri) : null;
   const text = document.querySelector("#document-input").value.trim();
   const status = document.querySelector("#ingest-status");
-  if (rawTitle.length > 200) {
-    status.textContent = "Document titles must be no longer than 200 characters.";
+  if (rawTitle.length > MAX_DOCUMENT_TITLE_CHARS) {
+    status.textContent = `Document titles must be no longer than ${MAX_DOCUMENT_TITLE_CHARS} characters.`;
     return;
   }
   if (rawSourceUri && !sourceUri) {
@@ -2192,7 +2658,8 @@ async function buildGraphFromInput() {
         const currentGraph = graphStore.read();
         const expectedVersion = currentGraph.version;
         const expectedFingerprint = fingerprintBackup(currentGraph);
-        const vault = parseObsidianVault(await files[0].arrayBuffer());
+        const vaultBytes = await readBrowserFileBytes(files[0], MAX_ZIP_BYTES, "The vault archive is larger than the 50 MB safety limit.");
+        const vault = parseObsidianVault(vaultBytes);
         if (vault.invalidFeedbackFiles?.length) {
           status.textContent = `That vault contains ${vault.invalidFeedbackFiles.length} malformed concept or relation note${vault.invalidFeedbackFiles.length === 1 ? "" : "s"}; no feedback was applied. Fix or remove those notes and try again.`;
           return;
@@ -2235,13 +2702,13 @@ async function buildGraphFromInput() {
         }
         const result = applyObsidianFeedback(currentGraph, vault.feedbacks);
         if (!result.changed) {
-          status.textContent = result.limited === "version"
+          status.textContent = mutationLimitMessage(result, result.limited === "version"
             ? "This graph has reached its revision limit. Export a backup before importing vault feedback."
             : result.limited === "feedback-items"
               ? "That vault contains too many feedback items to apply safely in one operation."
             : result.conflicts
               ? `The vault contains ${result.conflicts} conflicting feedback item${result.conflicts === 1 ? "" : "s"}; those edits were skipped.`
-            : "No matching graph items or changes were found in that vault.";
+            : "No matching graph items or changes were found in that vault.");
           return;
         }
         if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
@@ -2254,9 +2721,9 @@ async function buildGraphFromInput() {
         document.querySelector("#document-file").value = "";
         renderFileQueue();
         renderWorkbench();
-        status.textContent = `Obsidian vault feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} duplicate conflict${result.conflicts === 1 ? "" : "s"} skipped` : ""}.${manifestNote}`;
+        status.textContent = graphWriteSuccessMessage(`Obsidian vault feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} duplicate conflict${result.conflicts === 1 ? "" : "s"} skipped` : ""}.${manifestNote}`);
       } catch (error) {
-        status.textContent = error instanceof Error ? error.message : "That vault could not be read.";
+        status.textContent = boundedOperationDiagnostic(error, "That vault could not be read.");
       }
       return;
     }
@@ -2276,7 +2743,7 @@ async function buildGraphFromInput() {
         fileTexts.push(fileText);
       }
     } catch (error) {
-      status.textContent = error instanceof Error ? error.message : "One or more selected notes could not be read.";
+      status.textContent = boundedOperationDiagnostic(error, "One or more selected notes could not be read.");
       return;
     }
     const feedbacks = fileTexts.map(parseObsidianFeedback).filter(Boolean);
@@ -2301,13 +2768,13 @@ async function buildGraphFromInput() {
       }
       const result = applyObsidianFeedback(currentGraph, feedbacks);
       if (!result.changed) {
-        status.textContent = result.limited === "version"
+        status.textContent = mutationLimitMessage(result, result.limited === "version"
           ? "This graph has reached its revision limit. Export a backup before importing Obsidian feedback."
           : result.limited === "feedback-items"
             ? "That feedback selection contains too many items to apply safely in one operation."
           : result.conflicts
             ? `The selected notes contain ${result.conflicts} conflicting feedback item${result.conflicts === 1 ? "" : "s"}; those edits were skipped.`
-          : "No matching graph items or changes were found in those Obsidian notes.";
+          : "No matching graph items or changes were found in those Obsidian notes.");
         return;
       }
       if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
@@ -2320,15 +2787,19 @@ async function buildGraphFromInput() {
       document.querySelector("#document-file").value = "";
       renderFileQueue();
       renderWorkbench();
-      status.textContent = `Obsidian feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} duplicate conflict${result.conflicts === 1 ? "" : "s"} skipped` : ""}.${projectionNote}`;
+      status.textContent = graphWriteSuccessMessage(`Obsidian feedback imported · ${result.updates} update${result.updates === 1 ? "" : "s"} saved${result.skipped ? ` · ${result.skipped} conflicting label${result.skipped === 1 ? "" : "s"} skipped` : ""}${result.conflicts ? ` · ${result.conflicts} duplicate conflict${result.conflicts === 1 ? "" : "s"} skipped` : ""}.${projectionNote}`);
       return;
     }
   }
   if (endpoint) {
+    if (browserIsOffline()) {
+      status.textContent = "Remote extraction is unavailable offline. Reconnect or clear the endpoint to use local extraction.";
+      return;
+    }
     try {
-      remoteExtractor = createRemoteExtractor({ endpoint: validateExtractorEndpoint(endpoint) });
+      remoteExtractor = createRemoteExtractor({ endpoint: absoluteExtractorEndpoint(endpoint) });
     } catch (error) {
-      status.textContent = error instanceof Error ? error.message : "The remote extractor configuration is invalid.";
+      status.textContent = boundedOperationDiagnostic(error, "The remote extractor configuration is invalid.");
       return;
     }
   }
@@ -2346,6 +2817,7 @@ async function buildGraphFromInput() {
     let duplicates = 0;
     let batchChars = 0;
     const failures = [];
+    const retryableBatchFiles = [];
     let canceled = false;
     let fileIndex = 0;
     for (; fileIndex < files.length; fileIndex += 1) {
@@ -2367,8 +2839,8 @@ async function buildGraphFromInput() {
           continue;
         }
         const fileTitle = file.name.replace(/\.[^/.]+$/, "").trim() || "Untitled document";
-        if (fileTitle.length > 200) {
-          failures.push(`${file.name}: title over 200 characters`);
+        if (fileTitle.length > MAX_DOCUMENT_TITLE_CHARS) {
+          failures.push(`${file.name}: title over ${MAX_DOCUMENT_TITLE_CHARS} characters`);
           continue;
         }
         if (batchChars + fileText.length > MAX_BATCH_CHARS) {
@@ -2384,7 +2856,9 @@ async function buildGraphFromInput() {
           )
           : extractGraph(fileTitle, fileText.trim(), { feedback: buildExtractorFeedback(graph, { includeStale: false }) });
         ensureBuildActive();
-        const result = mergeExtraction(graph, extraction);
+        const result = mergeExtraction(graph, extraction, {
+          revisionExtractor: remoteExtractor ? "remote" : "local"
+        });
         if (result.duplicate) duplicates += 1;
         else if (result.limited) failures.push(`${file.name}: graph ${result.limited} limit reached`);
         else {
@@ -2396,7 +2870,10 @@ async function buildGraphFromInput() {
           canceled = true;
           break;
         }
-        failures.push(`${file.name}: ${error instanceof Error ? error.message : "could not extract"}`);
+        failures.push(`${file.name}: ${boundedOperationDiagnostic(error, "could not extract")}`);
+        if (["NETWORK_ERROR", "REMOTE_ERROR", "TIMEOUT"].includes(error?.code)) {
+          retryableBatchFiles.push(file);
+        }
       }
     }
     if (added && !graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
@@ -2405,16 +2882,22 @@ async function buildGraphFromInput() {
         : "The batch could not be saved. Your browser may be out of storage.";
       return;
     }
-    pendingFiles = canceled ? files.slice(fileIndex) : [];
+    pendingFiles = canceled
+      ? [...retryableBatchFiles, ...files.slice(fileIndex)]
+      : retryableBatchFiles;
+    if (!pendingFiles.length && !canceled && !failures.length) commitDocumentDraft();
     if (!pendingFiles.length) document.querySelector("#document-file").value = "";
     renderFileQueue();
     renderWorkbench();
-    const failureSummary = failures.slice(0, 3).map((failure) => failure.slice(0, 180)).join(" · ");
+    const failureSummary = failures.slice(0, 3).map((failure) => sliceTextAtCodePointBoundary(failure, 180)).join(" · ");
     const addedSummary = `${added} document${added === 1 ? "" : "s"} added`;
     const remainingSummary = pendingFiles.length
       ? ` · ${pendingFiles.length} file${pendingFiles.length === 1 ? "" : "s"} remain queued`
       : "";
-    status.textContent = `${canceled ? "Build canceled · " : ""}${addedSummary}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped` : ""}${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 3 ? " · …" : ""}` : ""}` : ""}${remainingSummary}.`;
+    const retrySummary = retryableBatchFiles.length
+      ? ` · ${retryableBatchFiles.length} transient failure${retryableBatchFiles.length === 1 ? "" : "s"} kept for retry`
+      : "";
+    status.textContent = graphWriteSuccessMessage(`${canceled ? "Build canceled · " : ""}${addedSummary}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped` : ""}${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 3 ? " · …" : ""}` : ""}` : ""}${retrySummary}${remainingSummary}.`);
     return;
   }
   if (text.length < 40) {
@@ -2422,7 +2905,7 @@ async function buildGraphFromInput() {
     return;
   }
   if (text.length > MAX_DOCUMENT_CHARS) {
-    status.textContent = `Keep documents under ${Math.round(MAX_DOCUMENT_CHARS / 1000)}k characters for this local prototype.`;
+    status.textContent = `Keep documents under ${Math.round(MAX_DOCUMENT_CHARS / 1000)}k characters for this workbench.`;
     return;
   }
   const currentGraph = graphStore.read();
@@ -2437,10 +2920,12 @@ async function buildGraphFromInput() {
   } catch (error) {
     status.textContent = error?.name === "AbortError" || error?.code === "CANCELED"
       ? "Build canceled; no graph changes were written."
-      : error instanceof Error ? error.message : "The document could not be extracted.";
+      : boundedOperationDiagnostic(error, "The document could not be extracted.");
     return;
   }
-  const result = mergeExtraction(currentGraph, extraction);
+  const result = mergeExtraction(currentGraph, extraction, {
+    revisionExtractor: remoteExtractor ? "remote" : "local"
+  });
   if (result.duplicate) {
     status.textContent = "This document is already in the graph; no duplicate revision was created.";
     return;
@@ -2469,14 +2954,19 @@ async function buildGraphFromInput() {
     return;
   }
   renderWorkbench();
-  status.textContent = `Revision ${result.graph.version} saved · ${result.graph.nodes.length} concepts now in memory.`;
+  status.textContent = graphWriteSuccessMessage(`Revision ${result.graph.version} saved · ${result.graph.nodes.length} concepts now in memory.`);
+  commitDocumentDraft();
   pendingFiles = [];
   document.querySelector("#document-file").value = "";
   renderFileQueue();
 }
 const ingestButton = document.querySelector("#ingest-document");
 const loadSampleButton = document.querySelector("#load-sample");
+const rebuildSourcesButton = document.querySelector("#rebuild-sources");
 const documentFileInput = document.querySelector("#document-file");
+retryQueuedFilesButton?.addEventListener("click", () => {
+  if (!ingestInFlight) ingestButton.click();
+});
 let ingestInFlight = false;
 let sourceReplacementInFlight = false;
 const workbench = document.querySelector("#workbench");
@@ -2502,6 +2992,10 @@ ingestButton.addEventListener("click", async () => {
   cancelExtractionButton.disabled = false;
   try {
     await buildGraphFromInput();
+  } catch (error) {
+    const message = boundedOperationDiagnostic(error, "The graph build failed; your saved graph was preserved.");
+    document.querySelector("#ingest-status").textContent = message;
+    reportRuntimeError(error);
   } finally {
     if (activeBuildController) activeBuildController = null;
     cancelExtractionButton.disabled = true;
@@ -2513,6 +3007,92 @@ ingestButton.addEventListener("click", async () => {
     documentFileInput.disabled = false;
   }
 });
+async function rebuildSavedSources() {
+  if (ingestInFlight || sourceReplacementInFlight) return;
+  const status = document.querySelector("#ingest-status");
+  const initialGraph = graphStore.read();
+  const sources = initialGraph.documents.slice();
+  if (!sources.length) {
+    status.textContent = "Add a source document before rebuilding saved sources.";
+    return;
+  }
+  if (initialGraph.redacted) {
+    status.textContent = "This graph is redacted: restore a full backup or original sources before rebuilding.";
+    return;
+  }
+  const incompleteImport = [...Object.values(initialGraph.integrity?.truncated || {}), ...Object.values(initialGraph.integrity?.dropped || {})]
+    .some((count) => Number.isSafeInteger(count) && count > 0);
+  if (incompleteImport) {
+    status.textContent = "This imported graph is incomplete. Restore the original export before rebuilding saved sources.";
+    return;
+  }
+  if (Array.isArray(initialGraph.integrity?.ambiguousSourceIds) && initialGraph.integrity.ambiguousSourceIds.length) {
+    status.textContent = "This graph contains ambiguous source IDs. Repair the original export before rebuilding saved sources.";
+    return;
+  }
+  if (extractorEndpointInput.value.trim() && browserIsOffline()) {
+    status.textContent = "Remote extraction is unavailable offline. Reconnect or clear the endpoint to use local extraction.";
+    return;
+  }
+  if (!window.confirm(`Rebuild ${sources.length} saved source${sources.length === 1 ? "" : "s"} using the current extractor and reviewed feedback? Successful replacements will be saved together.`)) return;
+  sourceReplacementInFlight = true;
+  syncWorkbenchBusy();
+  ingestButton.disabled = true;
+  loadSampleButton.disabled = true;
+  rebuildSourcesButton.disabled = true;
+  rebuildSourcesButton.setAttribute("aria-busy", "true");
+  documentFileInput.disabled = true;
+  cancelExtractionButton.disabled = false;
+  activeBuildController = new AbortController();
+  const expectedVersion = initialGraph.version;
+  const expectedFingerprint = fingerprintBackup(initialGraph);
+  const rebuildFeedback = buildExtractorFeedback(initialGraph, { includeStale: false });
+  try {
+    const result = await rebuildSources(initialGraph, {
+      revisionExtractor: extractorEndpointInput.value.trim() ? "remote" : "local",
+      signal: activeBuildController.signal,
+      onProgress: ({ sourceIndex, source, total }) => {
+        status.textContent = `Rebuilding source ${sourceIndex + 1} of ${total} · ${source.title}`;
+      },
+      extract: (source) => {
+        const endpoint = extractorEndpointInput.value.trim();
+        return endpoint
+          ? runRemoteExtraction(
+            createRemoteExtractor({ endpoint: absoluteExtractorEndpoint(endpoint) }),
+            { title: source.title, text: source.text, uri: source.uri || undefined },
+            rebuildFeedback
+          )
+          : extractGraph(source.title, source.text, { feedback: rebuildFeedback, sourceUri: source.uri });
+      }
+    });
+    const { graph, rebuilt, failures, canceled } = result;
+    if (rebuilt && !graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
+      status.textContent = graphStore.getLastWriteMode() === "conflict"
+        ? "The graph changed in another tab while rebuilding. No rebuilt sources were written; reload and try again."
+        : "The rebuilt sources could not be saved. Your prior graph is still intact.";
+      return;
+    }
+    if (rebuilt) renderWorkbench();
+    const failureSummary = sliceTextAtCodePointBoundary(failures.slice(0, 2).join(" · "), 360);
+    status.textContent = graphWriteSuccessMessage(
+      `${canceled ? "Rebuild canceled · " : ""}${rebuilt} source${rebuilt === 1 ? "" : "s"} rebuilt${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 2 ? " · …" : ""}` : ""}` : ""}.`
+    );
+  } catch (error) {
+    status.textContent = `Rebuild failed; your saved graph was preserved. ${boundedOperationDiagnostic(error, "The rebuild could not be completed.")}`;
+    reportRuntimeError(error);
+  } finally {
+    if (activeBuildController) activeBuildController = null;
+    sourceReplacementInFlight = false;
+    cancelExtractionButton.disabled = true;
+    ingestButton.disabled = false;
+    loadSampleButton.disabled = false;
+    rebuildSourcesButton.disabled = false;
+    rebuildSourcesButton.setAttribute("aria-busy", "false");
+    documentFileInput.disabled = false;
+    syncWorkbenchBusy();
+  }
+}
+rebuildSourcesButton.addEventListener("click", rebuildSavedSources);
 document.querySelector("#try-sample").addEventListener("click", startSampleWalkthrough);
 if (location.hash === "#sample") {
   history.replaceState({}, "", "#workbench");
@@ -2540,7 +3120,8 @@ function scheduleSearchRender() {
   else setTimeout(flush, 0);
 }
 document.querySelector("#graph-search").addEventListener("input", (event) => {
-  graphSearchQuery = event.target.value;
+  graphSearchQuery = boundedSearchQuery(event.target.value);
+  if (event.target.value !== graphSearchQuery) event.target.value = graphSearchQuery;
   scheduleSearchRender();
 });
 function commitManualGraph(graph, reason) {
@@ -2552,7 +3133,7 @@ function commitManualGraph(graph, reason) {
     return false;
   }
   graph.updatedAt = new Date().toISOString();
-  graph.revisions.unshift({ id: `rev-${graph.version}`, version: graph.version, timestamp: graph.updatedAt, reason, nodes: graph.nodes.length, edges: graph.edges.length });
+  graph.revisions.unshift({ id: `rev-${graph.version}`, version: graph.version, timestamp: graph.updatedAt, reason, operation: "manual", nodes: graph.nodes.length, edges: graph.edges.length });
   graph.revisions = graph.revisions.slice(0, MAX_GRAPH_REVISIONS);
   if (!graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
     document.querySelector("#ingest-status").textContent = graphWriteFailureMessage(
@@ -2562,7 +3143,7 @@ function commitManualGraph(graph, reason) {
     return false;
   }
   renderWorkbench();
-  document.querySelector("#ingest-status").textContent = `${reason} · revision ${graph.version} saved.`;
+  document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage(`${reason} · revision ${graph.version} saved.`);
   return true;
 }
 document.querySelector("#add-manual-node").addEventListener("click", () => {
@@ -2688,9 +3269,10 @@ function persistFeedbackDecision(kind, id, action) {
   const currentGraph = graphStore.read();
   const result = applyFeedback(currentGraph, kind, id, action);
   if (!result.changed) {
-    status.textContent = result.limited === "version"
-      ? `This graph has reached its revision limit. Export a backup before reviewing more ${kind === "node" ? "concepts" : "relations"}.`
-      : "That feedback could not be applied.";
+    status.textContent = mutationLimitMessage(result,
+      result.limited === "version"
+        ? `This graph has reached its revision limit. Export a backup before reviewing more ${kind === "node" ? "concepts" : "relations"}.`
+        : "That feedback could not be applied.");
     return false;
   }
   if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
@@ -2708,7 +3290,10 @@ document.querySelector("#node-list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-feedback]");
   if (!button) {
     const row = event.target.closest(".node-row");
-    if (row) selectGraphNode(row.dataset.nodeId);
+    if (row) {
+      selectGraphNode(row.dataset.nodeId);
+      if (event.detail === 0) document.querySelector("#inspector-panel").focus();
+    }
     return;
   }
   const action = button.dataset.feedback;
@@ -2719,7 +3304,10 @@ document.querySelector("#relation-list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-edge-feedback]");
   if (!button) {
     const row = event.target.closest(".relation-row");
-    if (row) selectGraphEdge(row.dataset.edgeId);
+    if (row) {
+      selectGraphEdge(row.dataset.edgeId);
+      if (event.detail === 0) document.querySelector("#inspector-panel").focus();
+    }
     return;
   }
   const action = button.dataset.edgeFeedback;
@@ -2744,10 +3332,14 @@ document.querySelector("#relation-list").addEventListener("keydown", (event) => 
 });
 document.querySelector("#source-list").addEventListener("click", (event) => {
   const row = event.target.closest(".source-row");
-  if (row) selectSource(row.dataset.sourceId);
+  if (row) {
+    selectSource(row.dataset.sourceId);
+    if (event.detail === 0) document.querySelector("#inspector-panel").focus();
+  }
 });
 document.querySelector("#source-list").addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
+  if (event.target.closest("button")) return;
   const row = event.target.closest(".source-row");
   if (!row) return;
   event.preventDefault();
@@ -2759,7 +3351,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     const kind = feedbackButton.dataset.nodeId ? "node" : "edge";
     const id = feedbackButton.dataset.nodeId || feedbackButton.dataset.edgeId;
     if (persistFeedbackDecision(kind, id, feedbackButton.dataset.inspectorFeedback)) {
-      document.querySelector("#ingest-status").textContent = "Review decision saved and added to reusable learning memory.";
+  document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage("Review decision saved and added to reusable learning memory.");
     }
     return;
   }
@@ -2767,15 +3359,56 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
   if (edgeButton) selectGraphEdge(edgeButton.dataset.selectEdge);
   const sourceButton = event.target.closest("[data-select-source]");
   if (sourceButton) selectSource(sourceButton.dataset.selectSource);
+  const reviewSourceButton = event.target.closest("[data-review-source]");
+  if (reviewSourceButton) {
+    const currentGraph = graphStore.read();
+    const result = markSourceReviewed(currentGraph, reviewSourceButton.dataset.reviewSource);
+    if (!result.changed) {
+      if (result.alreadyReviewed) {
+        document.querySelector("#ingest-status").textContent = "Source was already marked reviewed today.";
+        return;
+      }
+      document.querySelector("#ingest-status").textContent = mutationLimitMessage(
+        result,
+        result.ambiguous
+          ? "This source ID is ambiguous in the imported graph; repair the duplicate source IDs before reviewing it."
+          : "This source could not be marked reviewed."
+      );
+      return;
+    }
+    if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
+      document.querySelector("#ingest-status").textContent = graphWriteFailureMessage(
+        "The source review could not be saved.",
+        "The graph changed in another tab. The source review was not written; reload and try again."
+      );
+      return;
+    }
+    renderWorkbench();
+    selectSource(reviewSourceButton.dataset.reviewSource);
+    document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage("Source marked reviewed today. Undo is available.");
+    return;
+  }
   const replaceSourceButton = event.target.closest("[data-replace-source]");
   if (replaceSourceButton) {
     const sourceId = replaceSourceButton.dataset.replaceSource;
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.accept = ".txt,.md,text/plain,text/markdown";
+    let filePickerSettled = false;
+    const cleanupFilePicker = () => {
+      if (filePickerSettled) return;
+      filePickerSettled = true;
+      fileInput.remove();
+      window.removeEventListener("focus", handleFilePickerFocus);
+    };
+    const handleFilePickerFocus = () => {
+      setTimeout(() => {
+        if (!fileInput.files?.length) cleanupFilePicker();
+      }, 0);
+    };
     fileInput.addEventListener("change", async () => {
       const file = fileInput.files?.[0];
-      fileInput.remove();
+      cleanupFilePicker();
       if (!file) return;
       const status = document.querySelector("#ingest-status");
       sourceReplacementInFlight = true;
@@ -2789,15 +3422,19 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         if (!text) throw new Error("The replacement file is empty.");
         if (text.length > MAX_DOCUMENT_CHARS) throw new Error(`That file is larger than the ${Math.round(MAX_DOCUMENT_CHARS / 1000)}k character limit.`);
         const fileTitle = file.name.replace(/\.[^/.]+$/, "").trim() || "Untitled document";
-        if (fileTitle.length > 200) throw new Error("Replacement document titles must be no longer than 200 characters.");
+        if (fileTitle.length > MAX_DOCUMENT_TITLE_CHARS) throw new Error(`Replacement document titles must be no longer than ${MAX_DOCUMENT_TITLE_CHARS} characters.`);
         const currentGraph = graphStore.read();
         const endpoint = extractorEndpointInput.value.trim();
         let extraction;
         const usingRemoteExtractor = Boolean(endpoint);
+        if (usingRemoteExtractor && browserIsOffline()) {
+          status.textContent = "Remote extraction is unavailable offline. Reconnect or clear the endpoint to use local extraction.";
+          return;
+        }
         if (usingRemoteExtractor) cancelExtractionButton.disabled = false;
         try {
           if (endpoint) {
-            const validatedEndpoint = validateExtractorEndpoint(endpoint);
+            const validatedEndpoint = absoluteExtractorEndpoint(endpoint);
             extraction = await runRemoteExtraction(
               createRemoteExtractor({ endpoint: validatedEndpoint }),
               { title: fileTitle, text },
@@ -2809,7 +3446,9 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         } finally {
           if (usingRemoteExtractor) cancelExtractionButton.disabled = true;
         }
-        const result = replaceSource(currentGraph, sourceId, extraction);
+        const result = replaceSource(currentGraph, sourceId, extraction, {
+          revisionExtractor: usingRemoteExtractor ? "remote" : "local"
+        });
         if (result.duplicate) {
           status.textContent = "That document is already represented by another source; the current source was kept.";
           return;
@@ -2832,11 +3471,11 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         }
         selectedGraphItem = null;
         renderWorkbench();
-        status.textContent = `Source replaced · ${result.removedNodes} unsupported concept${result.removedNodes === 1 ? "" : "s"} and ${result.removedEdges} relation${result.removedEdges === 1 ? "" : "s"} pruned. Undo is available.`;
+        status.textContent = graphWriteSuccessMessage(`Source replaced · ${result.removedNodes} unsupported concept${result.removedNodes === 1 ? "" : "s"} and ${result.removedEdges} relation${result.removedEdges === 1 ? "" : "s"} pruned. Undo is available.`);
       } catch (error) {
         status.textContent = error?.name === "AbortError" || error?.code === "CANCELED"
           ? "Source replacement canceled; the current source was kept."
-          : error instanceof Error ? error.message : "The source could not be replaced.";
+          : boundedOperationDiagnostic(error, "The source could not be replaced.");
       } finally {
         sourceReplacementInFlight = false;
         cancelExtractionButton.disabled = true;
@@ -2848,6 +3487,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         syncWorkbenchBusy();
       }
     }, { once: true });
+    window.addEventListener("focus", handleFilePickerFocus, { once: true });
     document.body.append(fileInput);
     fileInput.click();
     return;
@@ -2858,9 +3498,10 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     const currentGraph = graphStore.read();
     const result = removeSource(currentGraph, removeSourceButton.dataset.removeSource);
     if (!result.removed) {
-      document.querySelector("#ingest-status").textContent = result.ambiguous
-        ? "This source ID is ambiguous in the imported graph; repair the duplicate source IDs before removing it."
-        : "The source could not be removed.";
+      document.querySelector("#ingest-status").textContent = mutationLimitMessage(result,
+        result.ambiguous
+          ? "This source ID is ambiguous in the imported graph; repair the duplicate source IDs before removing it."
+          : "The source could not be removed.");
       return;
     }
     if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
@@ -2872,7 +3513,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     }
     selectedGraphItem = null;
     renderWorkbench();
-    document.querySelector("#ingest-status").textContent = `Source removed · ${result.removedNodes} concepts and ${result.removedEdges} relations pruned. Undo is available.`;
+    document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage(`Source removed · ${result.removedNodes} concepts and ${result.removedEdges} relations pruned. Undo is available.`);
   }
   const nodeButton = event.target.closest("[data-select-node]");
   if (nodeButton) selectGraphNode(nodeButton.dataset.selectNode);
@@ -2883,9 +3524,10 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     const currentGraph = graphStore.read();
     const result = mergeConcepts(currentGraph, mergeButton.dataset.mergeNode, targetId);
     if (!result.changed) {
-      document.querySelector("#ingest-status").textContent = result.limited === "version"
-        ? "This graph has reached its revision limit. Export a backup before merging concepts."
-        : "Those concepts could not be merged.";
+      document.querySelector("#ingest-status").textContent = mutationLimitMessage(result,
+        result.limited === "version"
+          ? "This graph has reached its revision limit. Export a backup before merging concepts."
+          : "Those concepts could not be merged.");
       return;
     }
     if (!graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
@@ -2897,7 +3539,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     }
     selectedGraphItem = { kind: "node", id: result.mergedId };
     renderWorkbench();
-    document.querySelector("#ingest-status").textContent = "Concepts merged · evidence, aliases, and relations combined. Undo is available.";
+    document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage("Concepts merged · evidence, aliases, and relations combined. Undo is available.");
     return;
   }
   const nodeEdit = event.target.closest("[data-edit-node]");
@@ -2949,7 +3591,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     const uriInput = document.querySelector("#inspector-source-uri");
     const nextQuality = qualityInput?.value || "unknown";
     const reviewedDate = reviewedInput?.value.trim() || "";
-    const reviewedTimestamp = reviewedDate ? Date.parse(`${reviewedDate}T00:00:00.000Z`) : NaN;
+    const reviewedTimestamp = reviewedDate ? parseTimestamp(reviewedDate) : NaN;
     if (reviewedDate && Number.isNaN(reviewedTimestamp)) {
       document.querySelector("#ingest-status").textContent = "Use a valid review date.";
       return;
@@ -2981,6 +3623,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     version: graph.version,
     timestamp: graph.updatedAt,
     reason: nodeEdit ? `Renamed concept to ${nextLabel}` : edgeEdit ? `Renamed relation to ${nextLabel}` : `Updated source ${nextLabel} metadata`,
+    operation: "manual",
     nodes: graph.nodes.length,
     edges: graph.edges.length
   });
@@ -2993,7 +3636,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     return;
   }
   renderWorkbench();
-  document.querySelector("#ingest-status").textContent = "Graph edit saved and added to revision history.";
+  document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage("Graph edit saved and added to revision history.");
 });
 document.querySelector("#download-markdown").addEventListener("click", () => {
   try {
@@ -3002,7 +3645,7 @@ document.querySelector("#download-markdown").addEventListener("click", () => {
     downloadFile("knowledge-graph.md", buildMarkdown(graph), "text/markdown");
     document.querySelector("#projection-status").textContent = "Markdown projection downloaded.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The Markdown projection could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The Markdown projection could not be exported.");
   }
 });
 document.querySelector("#download-redacted-markdown").addEventListener("click", () => {
@@ -3011,30 +3654,28 @@ document.querySelector("#download-redacted-markdown").addEventListener("click", 
     downloadFile("knowledge-graph-redacted.md", markdown, "text/markdown");
     document.querySelector("#projection-status").textContent = "Redacted Markdown projection downloaded · source text, evidence, and URIs removed.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted Markdown projection could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted Markdown projection could not be exported.");
   }
 });
 document.querySelector("#copy-markdown").addEventListener("click", async () => {
   try {
-    if (!navigator.clipboard) throw new Error("Copy is unavailable in this browser; use Download .md instead.");
     const graph = graphStore.read();
     assertGraphTextExportBudget([graph]);
     const markdown = buildMarkdown(graph);
     if (textEncoder.encode(markdown).byteLength > MAX_EXPORT_BYTES) throw new Error("This projection exceeds the 50 MB safety limit; use a bounded graph or export a redacted view.");
-    await navigator.clipboard.writeText(markdown);
+    await copyText(markdown);
     document.querySelector("#projection-status").textContent = "Markdown projection copied to the clipboard.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The Markdown projection could not be copied.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The Markdown projection could not be copied.");
   }
 });
 document.querySelector("#copy-redacted-markdown").addEventListener("click", async () => {
   try {
-    if (!navigator.clipboard) throw new Error("Copy is unavailable in this browser; use Download redacted Markdown instead.");
     const markdown = buildRedactedMarkdownProjection();
-    await navigator.clipboard.writeText(markdown);
+    await copyText(markdown);
     document.querySelector("#projection-status").textContent = "Redacted Markdown copied; source text, evidence, and URIs were removed.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted Markdown projection could not be copied.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted Markdown projection could not be copied.");
   }
 });
 document.querySelector("#share-redacted-markdown").addEventListener("click", async () => {
@@ -3064,73 +3705,80 @@ document.querySelector("#share-redacted-markdown").addEventListener("click", asy
         if (error?.name === "AbortError") return;
       }
     }
-    if (navigator.clipboard) {
-      try {
-        await navigator.clipboard.writeText(markdown);
-        document.querySelector("#projection-status").textContent = "File sharing is unavailable; redacted Markdown copied instead.";
-        return;
-      } catch {
-        // Fall through to a download when clipboard permissions are unavailable.
-      }
+    try {
+      await copyText(markdown);
+      document.querySelector("#projection-status").textContent = "File sharing is unavailable; redacted Markdown copied instead.";
+      return;
+    } catch {
+      // Fall through to a download when copy permissions are unavailable.
     }
     downloadFile("knowledge-graph-redacted.md", markdown, "text/markdown");
     document.querySelector("#projection-status").textContent = "File sharing is unavailable; redacted Markdown downloaded instead.";
   } catch (error) {
     if (error?.name === "AbortError") return;
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted graph could not be shared.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted graph could not be shared.");
   }
 });
 document.querySelector("#download-vault").addEventListener("click", async () => {
-  try {
-    const graph = graphStore.read();
-    const graphFiles = buildVaultFiles(graph);
-    const learning = await buildLearningVaultFiles({ estimatedArchiveBytes: graphFiles.estimatedArchiveBytes });
-    const files = [...graphFiles, ...learning.files];
-    downloadBytes("llm-field-notes-vault.zip", zipStore(files), "application/zip");
-    document.querySelector("#projection-status").textContent = `Obsidian vault downloaded · ${files.length} files${learning.failures.length ? ` · ${learning.failures.length} learning note${learning.failures.length === 1 ? "" : "s"} unavailable` : ""}.`;
-  } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The Obsidian vault could not be exported.";
-  }
+  await withVaultExport(async () => {
+    try {
+      const graph = graphStore.read();
+      const graphFingerprint = fingerprintBackup(graph);
+      const graphFiles = buildVaultFiles(graph, { appVersion: releaseInfo.version });
+      const learning = await buildLearningVaultFiles({ estimatedArchiveBytes: graphFiles.estimatedArchiveBytes });
+      assertVaultGraphUnchanged(graphFingerprint);
+      const files = [...graphFiles, ...learning.files];
+      downloadBytes("llm-field-notes-vault.zip", zipStore(files), "application/zip");
+      document.querySelector("#projection-status").textContent = `Obsidian vault downloaded · ${files.length} files${learning.failures.length ? ` · ${learning.failures.length} learning note${learning.failures.length === 1 ? "" : "s"} unavailable` : ""}.`;
+    } catch (error) {
+      document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The Obsidian vault could not be exported.");
+    }
+  });
 });
 document.querySelector("#download-redacted-vault").addEventListener("click", async () => {
-  try {
-    const graphFiles = buildVaultFiles(redactGraph(graphStore.read()));
-    const learning = await buildLearningVaultFiles({ estimatedArchiveBytes: graphFiles.estimatedArchiveBytes });
-    const files = [...graphFiles, ...learning.files];
-    downloadBytes("llm-field-notes-redacted-vault.zip", zipStore(files), "application/zip");
-    document.querySelector("#projection-status").textContent = `Redacted Obsidian vault downloaded · ${files.length} files; source text, evidence, and URIs removed${learning.failures.length ? ` · ${learning.failures.length} learning note${learning.failures.length === 1 ? "" : "s"} unavailable` : ""}.`;
-  } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted Obsidian vault could not be exported.";
-  }
+  await withVaultExport(async () => {
+    try {
+      const graph = graphStore.read();
+      const graphFingerprint = fingerprintBackup(graph);
+      const graphFiles = buildVaultFiles(redactGraph(graph), { appVersion: releaseInfo.version });
+      const learning = await buildLearningVaultFiles({ estimatedArchiveBytes: graphFiles.estimatedArchiveBytes });
+      assertVaultGraphUnchanged(graphFingerprint);
+      const files = [...graphFiles, ...learning.files];
+      downloadBytes("llm-field-notes-redacted-vault.zip", zipStore(files), "application/zip");
+      document.querySelector("#projection-status").textContent = `Redacted Obsidian vault downloaded · ${files.length} files; source text, evidence, and URIs removed${learning.failures.length ? ` · ${learning.failures.length} learning note${learning.failures.length === 1 ? "" : "s"} unavailable` : ""}.`;
+    } catch (error) {
+      document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted Obsidian vault could not be exported.");
+    }
+  });
 });
 document.querySelector("#download-json").addEventListener("click", () => {
   try {
     const graph = canonicalizeGraphForExport(graphStore.read());
     assertGraphTextExportBudget([graph]);
-    downloadFile("knowledge-graph.json", JSON.stringify({ ...graph, graphFingerprint: fingerprintBackup(graph) }, null, 2), "application/json");
+    downloadFile("knowledge-graph.json", JSON.stringify(buildGraphExport(graph, { appVersion: releaseInfo.version }), null, 2), "application/json");
     document.querySelector("#projection-status").textContent = "Internal representation exported as JSON.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The graph JSON could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The graph JSON could not be exported.");
   }
 });
 document.querySelector("#download-jsonld").addEventListener("click", () => {
   try {
     const graph = graphStore.read();
     assertGraphTextExportBudget([graph]);
-    downloadFile("knowledge-graph.jsonld", JSON.stringify(buildJsonLd(graph), null, 2), "application/ld+json");
+    downloadFile("knowledge-graph.jsonld", JSON.stringify(buildJsonLd(graph, { appVersion: releaseInfo.version }), null, 2), "application/ld+json");
     document.querySelector("#projection-status").textContent = "Internal representation exported as JSON-LD.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The JSON-LD projection could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The JSON-LD projection could not be exported.");
   }
 });
 document.querySelector("#download-redacted-jsonld").addEventListener("click", () => {
   try {
     const graph = redactGraph(graphStore.read());
     assertGraphTextExportBudget([graph]);
-    downloadFile("knowledge-graph-redacted.jsonld", JSON.stringify(buildJsonLd(graph), null, 2), "application/ld+json");
+    downloadFile("knowledge-graph-redacted.jsonld", JSON.stringify(buildJsonLd(graph, { appVersion: releaseInfo.version }), null, 2), "application/ld+json");
     document.querySelector("#projection-status").textContent = "Redacted JSON-LD exported · source text, evidence, and URIs removed.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted JSON-LD projection could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted JSON-LD projection could not be exported.");
   }
 });
 document.querySelector("#download-health").addEventListener("click", () => {
@@ -3140,17 +3788,17 @@ document.querySelector("#download-health").addEventListener("click", () => {
     downloadFile("llm-field-notes-health.json", JSON.stringify(report, null, 2), "application/json");
     document.querySelector("#projection-status").textContent = "Privacy-safe graph health report downloaded.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The graph health report could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The graph health report could not be exported.");
   }
 });
 document.querySelector("#download-redacted").addEventListener("click", () => {
   try {
     const graph = canonicalizeGraphForExport(redactGraph(graphStore.read()));
     assertGraphTextExportBudget([graph]);
-    downloadFile("llm-field-notes-redacted-graph.json", JSON.stringify({ ...graph, graphFingerprint: fingerprintBackup(graph) }, null, 2), "application/json");
+    downloadFile("llm-field-notes-redacted-graph.json", JSON.stringify(buildGraphExport(graph, { appVersion: releaseInfo.version }), null, 2), "application/json");
     document.querySelector("#projection-status").textContent = "Redacted graph downloaded · source text, evidence, and URIs removed.";
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The redacted graph could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted graph could not be exported.");
   }
 });
 document.querySelector("#download-backup").addEventListener("click", () => {
@@ -3158,7 +3806,7 @@ document.querySelector("#download-backup").addEventListener("click", () => {
     const backup = exportBackupSnapshot();
     document.querySelector("#projection-status").textContent = `Full backup downloaded · ${backup.history.length} undo snapshot${backup.history.length === 1 ? "" : "s"}.`;
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The full backup could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The full backup could not be exported.");
   }
 });
 document.querySelector("#download-feedback").addEventListener("click", () => {
@@ -3169,7 +3817,7 @@ document.querySelector("#download-feedback").addEventListener("click", () => {
     downloadFile("llm-field-notes-feedback.json", JSON.stringify(dataset, null, 2), "application/json");
     document.querySelector("#projection-status").textContent = `Feedback dataset downloaded · ${dataset.examples.length} reviewed example${dataset.examples.length === 1 ? "" : "s"}${dataset.truncatedExamples ? ` · ${dataset.truncatedExamples} omitted at the export limit` : ""}.`;
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The feedback dataset could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The feedback dataset could not be exported.");
   }
 });
 document.querySelector("#download-compact-feedback").addEventListener("click", () => {
@@ -3180,7 +3828,7 @@ document.querySelector("#download-compact-feedback").addEventListener("click", (
     downloadFile("llm-field-notes-compact-feedback.json", JSON.stringify(dataset, null, 2), "application/json");
     document.querySelector("#projection-status").textContent = `Compact feedback downloaded · ${dataset.examples.length} reviewed example${dataset.examples.length === 1 ? "" : "s"} with source material removed${dataset.truncatedExamples ? ` · ${dataset.truncatedExamples} omitted at the export limit` : ""}.`;
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The compact feedback dataset could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The compact feedback dataset could not be exported.");
   }
 });
 document.querySelector("#download-diff").addEventListener("click", () => {
@@ -3193,17 +3841,22 @@ document.querySelector("#download-diff").addEventListener("click", () => {
     downloadFile("llm-field-notes-diff.json", JSON.stringify(diff, null, 2), "application/json");
     document.querySelector("#projection-status").textContent = `Revision diff downloaded · ${diff.summary.added} added, ${diff.summary.changed} changed, ${diff.summary.removed} removed.`;
   } catch (error) {
-    document.querySelector("#projection-status").textContent = error instanceof Error ? error.message : "The revision diff could not be exported.";
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The revision diff could not be exported.");
   }
 });
 document.querySelector("#reload-app").addEventListener("click", () => window.location.reload());
 const updatePanel = document.querySelector("#app-update");
 const updateButton = document.querySelector("#reload-update");
+const updateMessage = updatePanel?.querySelector("span");
+const DEFAULT_UPDATE_MESSAGE = "The saved graph is safe. Reload when you are ready to use the updated workbench.";
+const SERVICE_WORKER_UPDATE_TIMEOUT_MS = 5000;
 let waitingServiceWorkerRegistration = null;
 let serviceWorkerReloading = false;
+let serviceWorkerReloadTimer = null;
 const showServiceWorkerUpdate = (registration) => {
   if (!registration.waiting || !navigator.serviceWorker.controller) return;
   waitingServiceWorkerRegistration = registration;
+  if (updateMessage) updateMessage.textContent = DEFAULT_UPDATE_MESSAGE;
   if (updatePanel) updatePanel.hidden = false;
 };
 updateButton?.addEventListener("click", () => {
@@ -3214,22 +3867,52 @@ updateButton?.addEventListener("click", () => {
   }
   serviceWorkerReloading = true;
   updateButton.disabled = true;
-  const reloadOnControllerChange = () => window.location.reload();
+  let reloadOnControllerChange;
+  const clearUpdateAttempt = () => {
+    if (serviceWorkerReloadTimer) clearTimeout(serviceWorkerReloadTimer);
+    serviceWorkerReloadTimer = null;
+    navigator.serviceWorker.removeEventListener("controllerchange", reloadOnControllerChange);
+  };
+  const recoverServiceWorkerUpdate = () => {
+    if (!serviceWorkerReloading) return;
+    clearUpdateAttempt();
+    serviceWorkerReloading = false;
+    updateButton.disabled = false;
+    if (updateMessage) updateMessage.textContent = "The update did not activate yet. Try again when the connection is stable.";
+  };
+  reloadOnControllerChange = () => {
+    clearUpdateAttempt();
+    window.location.reload();
+  };
   navigator.serviceWorker.addEventListener("controllerchange", reloadOnControllerChange, { once: true });
-  waiting.postMessage({ type: "SKIP_WAITING" });
+  serviceWorkerReloadTimer = setTimeout(recoverServiceWorkerUpdate, SERVICE_WORKER_UPDATE_TIMEOUT_MS);
+  try {
+    waiting.postMessage({ type: "SKIP_WAITING" });
+  } catch {
+    recoverServiceWorkerUpdate();
+  }
 });
 const reportRuntimeError = (error) => {
   const panel = document.querySelector("#app-error");
   if (!panel) return;
   panel.hidden = false;
-  document.querySelector("#app-error-message").textContent = error instanceof Error ? error.message : "The saved graph was preserved, but this view could not render.";
+  document.querySelector("#app-error-message").textContent = boundedOperationDiagnostic(error, "The saved graph was preserved, but this view could not render.");
 };
 window.addEventListener("error", (event) => reportRuntimeError(event.error || new Error("Unexpected application error.")));
 window.addEventListener("unhandledrejection", (event) => reportRuntimeError(event.reason || new Error("Unexpected asynchronous error.")));
 renderWorkbench();
 
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" })
+let serviceWorkerManager = null;
+try {
+  serviceWorkerManager = navigator.serviceWorker;
+} catch {
+  // Service-worker support is optional; a restricted getter must not break
+  // the local-first workbench.
+}
+if (location.protocol !== "file:"
+  && typeof serviceWorkerManager?.register === "function"
+  && typeof serviceWorkerManager?.addEventListener === "function") {
+  serviceWorkerManager.register("./sw.js", { updateViaCache: "none" })
     .then((registration) => {
       const observedWorkers = new WeakSet();
       const completedWorkers = new WeakSet();

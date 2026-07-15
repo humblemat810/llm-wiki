@@ -4,13 +4,15 @@
   "title": "LLM Field Notes graph diff",
   "description": "Bounded, inspectable changes between two normalized graph revisions.",
   "type": "object",
-  "required": ["format", "graphSchema", "exportedAt", "fromVersion", "toVersion", "documents", "nodes", "edges", "learning", "integrity", "redaction", "summary", "changed"],
+  "required": ["format", "graphSchema", "exportedAt", "fromVersion", "toVersion", "fromFingerprint", "toFingerprint", "documents", "nodes", "edges", "learning", "integrity", "redaction", "summary", "changed"],
   "properties": {
     "format": { "const": "llm-field-notes/diff@1" },
     "graphSchema": { "const": "llm-field-notes/graph@1" },
     "exportedAt": { "type": "string", "format": "date-time" },
     "fromVersion": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "toVersion": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "fromFingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$", "maxLength": 128 },
+    "toFingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$", "maxLength": 128 },
     "changed": { "type": "boolean" },
     "summary": {
       "type": "object",
@@ -115,10 +117,12 @@
         "edges": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "revisions": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "learningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "documentTitle": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "documentText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "evidenceText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "evidenceItems": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "sourceReferences": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        "sourceReferences": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "aliases": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
       },
       "additionalProperties": false
     },

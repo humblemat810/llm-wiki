@@ -18,6 +18,7 @@ observing.
 | [Teach, don't just prompt](finetuning.md) | When should I change the weights? |
 | [Tools make a system](agents.md) | How does a model take action? |
 | [Ship the boring parts](production.md) | What survives contact with users? |
+| [A graph is a hypothesis](knowledge-graphs.md) | How does a document become a representation you can improve? |
 
 The browser workbench is the executable companion: ingest a document, inspect
 the graph, correct it, and export the internal representation.

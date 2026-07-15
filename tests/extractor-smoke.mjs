@@ -3,12 +3,23 @@ import { createRemoteExtractor, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_MS, Ext
 import { extractGraph, MAX_EVIDENCE_CHARS, MAX_EVIDENCE_RECORDS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_SOURCE_REFERENCES, normalizeExtractionForDocument } from "../graph-core.js";
 
 const boundedJsonHeaders = { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "64" : null };
-const jsonResponse = (payload, headers = boundedJsonHeaders) => {
+const jsonResponse = (payload, headers = null) => {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  const responseHeaders = headers || { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? String(bytes.byteLength) : null };
   return {
     ok: true,
     status: 200,
-    headers,
+    headers: responseHeaders,
+    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  };
+};
+const rawJsonResponse = (text, headers = null) => {
+  const bytes = new TextEncoder().encode(text);
+  const responseHeaders = headers || { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? String(bytes.byteLength) : null };
+  return {
+    ok: true,
+    status: 200,
+    headers: responseHeaders,
     arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
   };
 };
@@ -33,7 +44,7 @@ const extractor = createRemoteExtractor({
 });
 const result = await extractor(
   { title: "Adapter test", uri: "https://example.org/adapter-test", text: "Attention uses context to make a useful knowledge representation." },
-  { feedback: Array.from({ length: 500 }, (_, index) => ({ kind: "concept", id: `feedback-${index}`, label: `Feedback ${index}`, status: "accepted", evidence: [{ text: "private" }] })) }
+  { feedback: Array.from({ length: 500 }, (_, index) => ({ kind: "concept", id: `feedback-${index}`, label: `Feedback ${index}`, aliases: [`alias-${index}`], status: "accepted" })) }
 );
 assert.equal(result.source.title, "Adapter test");
 assert.equal(result.source.text, "Attention uses context to make a useful knowledge representation.", "remote extraction must preserve the submitted document text");
@@ -51,6 +62,35 @@ assert.equal(result.edges[0].source, "attention");
 assert.equal(result.edges[0].id, "attention--context--uses", "remote extraction must canonicalize provider relation IDs from endpoints and labels");
 assert.equal(result.edges[0].status, "inferred", "remote providers must not create human-rejected relation state");
 assert.equal(result.edges[0].feedback, 0, "remote providers must not create relation feedback counts");
+const rejectedConceptExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/rejected-concept",
+  fetchImpl: async () => jsonResponse({
+    nodes: [{ label: "Attention" }, { label: "Context" }],
+    edges: [{ source: "attention", target: "context", label: "uses" }]
+  })
+});
+const rejectedConceptResult = await rejectedConceptExtractor(
+  { title: "Rejected concept", text: "Attention uses context to make a useful knowledge representation." },
+  { feedback: [{ kind: "concept", id: "context", label: "Context", status: "rejected" }] }
+);
+assert.deepEqual(rejectedConceptResult.nodes.map((node) => node.label), ["Attention"], "remote normalization must enforce rejected concept guidance even when a provider ignores it");
+assert.equal(rejectedConceptResult.edges.length, 0, "relations attached to a rejected concept must be removed at the shared extraction boundary");
+const rejectedRelationExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/rejected-relation",
+  fetchImpl: async () => jsonResponse({
+    nodes: [{ label: "Attention" }, { label: "Context" }],
+    edges: [
+      { source: "attention", target: "context", label: "uses" },
+      { source: "attention", target: "context", label: "supports" }
+    ]
+  })
+});
+const rejectedRelationResult = await rejectedRelationExtractor(
+  { title: "Rejected relation", text: "Attention uses context to make a useful knowledge representation." },
+  { feedback: [{ kind: "relation", id: "attention--context--uses", source: "attention", target: "context", sourceLabel: "Attention", targetLabel: "Context", label: "uses", status: "rejected" }] }
+);
+assert.equal(rejectedRelationResult.nodes.length, 2, "relation rejection must not remove its endpoint concepts");
+assert.deepEqual(rejectedRelationResult.edges.map((edge) => edge.label), ["supports"], "rejected relation guidance must match the relation label as well as its endpoints");
 const ambiguousProviderExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/ambiguous",
   fetchImpl: async () => jsonResponse({
@@ -60,6 +100,71 @@ const ambiguousProviderExtractor = createRemoteExtractor({
 });
 const ambiguousProviderResult = await ambiguousProviderExtractor({ title: "Ambiguous provider", text: "Attention uses context to make a useful knowledge representation." });
 assert.equal(ambiguousProviderResult.edges.length, 0, "ambiguous provider endpoint IDs should fail closed rather than attach relations arbitrarily");
+const duplicateKeyProviderExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/duplicate-key",
+  fetchImpl: async () => rawJsonResponse('{"extraction":{"nodes":[],"edges":[]},"extraction":{"nodes":[{"label":"Ambiguous"}],"edges":[]}}')
+});
+await assert.rejects(
+  () => duplicateKeyProviderExtractor({ title: "Duplicate provider payload", text: "Attention uses context to make a useful knowledge representation." }),
+  (error) => error instanceof ExtractorAdapterError
+    && error.code === "INVALID_RESPONSE"
+    && error.cause?.message.includes("duplicate object key"),
+  "remote extraction must reject provider responses with duplicate JSON keys before normalization"
+);
+const invalidChunkProviderExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/invalid-chunk",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: boundedJsonHeaders,
+    body: {
+      getReader: () => ({
+        read: async () => ({ done: false, value: {} }),
+        cancel: () => {},
+        releaseLock: () => {}
+      })
+    }
+  })
+});
+await assert.rejects(
+  () => invalidChunkProviderExtractor({ title: "Invalid provider chunk", text: "Attention uses context to make a useful knowledge representation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote extraction must reject provider stream chunks without a finite byte length"
+);
+const invalidStreamResultExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/invalid-stream-result",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: boundedJsonHeaders,
+    body: {
+      getReader: () => ({
+        read: async () => ({ done: "false", value: new Uint8Array([0x7b]) }),
+        cancel: () => {},
+        releaseLock: () => {}
+      })
+    }
+  })
+});
+await assert.rejects(
+  () => invalidStreamResultExtractor({ title: "Invalid provider stream result", text: "Attention uses context to make a useful knowledge representation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote extraction must reject stream results with a non-boolean done flag"
+);
+const invalidArrayBufferExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/invalid-array-buffer",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: boundedJsonHeaders,
+    arrayBuffer: async () => ({ byteLength: 64 })
+  })
+});
+await assert.rejects(
+  () => invalidArrayBufferExtractor({ title: "Invalid provider bytes", text: "Attention uses context to make a useful knowledge representation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote extraction must reject arrayBuffer results that are not byte data"
+);
 const boundedNodes = Array.from({ length: MAX_GRAPH_NODES + 1 }, (_, index) => ({
   id: `node-${index}`,
   label: `Node ${index}`
@@ -121,6 +226,84 @@ assert.throws(() => normalizeExtractionForDocument({
 }), /provenance-reference limit/, "provider normalization should fail closed instead of silently truncating item provenance");
 assert.throws(() => normalizeExtractionForDocument({
   nodes: [{
+    id: "oversized-aliases",
+    label: "Oversized aliases",
+    aliases: Array.from({ length: 21 }, (_, index) => `alias-${index}`)
+  }]
+}, {
+  title: "Bounded provider aliases",
+  text: "A bounded provider alias response still contains enough text to be normalized safely."
+}), /alias contract/, "provider normalization should fail closed instead of silently truncating aliases");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "duplicate-aliases",
+    label: "Duplicate aliases",
+    aliases: ["lookup", " lookup "]
+  }]
+}, {
+  title: "Duplicate provider aliases",
+  text: "A duplicate provider alias response still contains enough text to be normalized safely."
+}), /alias contract/, "provider normalization should reject canonical duplicate aliases");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "wrong-alias-shape",
+    label: "Wrong aliases",
+    aliases: "lookup"
+  }]
+}, {
+  title: "Malformed provider aliases",
+  text: "A malformed provider alias response still contains enough text to be normalized safely."
+}), /alias contract/, "provider normalization should reject malformed alias fields");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "wrong-source-shape",
+    label: "Wrong sources",
+    sources: "not-an-array"
+  }]
+}, {
+  title: "Malformed provider sources",
+  text: "A malformed provider provenance response still contains enough text to be normalized safely."
+}), /malformed provenance/, "provider normalization should reject malformed provenance fields");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "wrong-evidence-shape",
+    label: "Wrong evidence",
+    evidence: [{ text: "valid quote", sources: "not-an-array" }]
+  }]
+}, {
+  title: "Malformed provider evidence",
+  text: "A malformed provider evidence response still contains enough text to be normalized safely."
+}), /malformed evidence/, "provider normalization should reject malformed evidence provenance");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
+    id: "wrong-evidence-entry",
+    label: "Wrong evidence entry",
+    evidence: [42]
+  }]
+}, {
+  title: "Malformed provider evidence entry",
+  text: "A malformed provider evidence entry still contains enough text to be normalized safely."
+}), /malformed evidence/, "provider normalization should reject malformed evidence entries");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: "not-an-array"
+}, {
+  title: "Malformed provider node collection",
+  text: "A malformed provider concept collection still contains enough text to be normalized safely."
+}), /malformed concept collection/, "provider normalization should reject non-array concept collections");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [null]
+}, {
+  title: "Malformed provider node record",
+  text: "A malformed provider concept record still contains enough text to be normalized safely."
+}), /malformed concept record/, "provider normalization should reject null concept records");
+assert.throws(() => normalizeExtractionForDocument({
+  edges: [{ source: "attention", target: "context" }]
+}, {
+  title: "Malformed provider relation record",
+  text: "A malformed provider relation record still contains enough text to be normalized safely."
+}), /malformed relation record/, "provider normalization should reject incomplete relation records");
+assert.throws(() => normalizeExtractionForDocument({
+  nodes: [{
     id: "nested-evidence-sources",
     label: "Nested evidence sources",
     evidence: [{ text: "bounded evidence", sources: Array.from({ length: MAX_SOURCE_REFERENCES + 1 }, (_, index) => `source-${index}`) }]
@@ -142,6 +325,16 @@ await assert.rejects(
   (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_DOCUMENT"
 );
 assert.equal(calls.length, callsBeforeLongTitle, "invalid remote titles should be rejected before a provider request");
+await assert.rejects(
+  () => extractor({
+    title: "Unknown document field",
+    text: "This document is long enough to exercise unknown document field rejection.",
+    confidence: 1
+  }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_DOCUMENT",
+  "remote extraction should reject document fields outside the closed request contract"
+);
+assert.equal(calls.length, callsBeforeLongTitle, "unknown document fields should fail before a provider request");
 assert.equal(JSON.parse(calls[0].options.body).document.uri, "https://example.org/adapter-test", "remote source URIs should travel through the request contract");
 assert.equal(calls[0].options.method, "POST");
 assert.equal(calls[0].options.credentials, "same-origin", "browser extraction should carry same-origin gateway sessions without exposing tokens to the page");
@@ -152,6 +345,77 @@ assert.equal(JSON.parse(calls[0].options.body).operation, "extract-graph");
 assert.equal(JSON.parse(calls[0].options.body).feedbackFormat, "llm-field-notes/feedback@1");
 assert.equal(JSON.parse(calls[0].options.body).feedback.length, 500, "remote feedback context should be bounded");
 assert(JSON.parse(calls[0].options.body).feedback.every((item) => !Object.hasOwn(item, "evidence") && item.status === "accepted"), "remote feedback context should be compacted to the strict request contract");
+const callsBeforeInvalidFeedback = calls.length;
+await assert.rejects(
+  () => extractor({
+    title: "Invalid feedback",
+    text: "This document is long enough to exercise invalid feedback rejection."
+  }, {
+    feedback: [{ kind: "concept", id: "invalid", status: "inferred" }]
+  }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_FEEDBACK",
+  "remote extraction should reject malformed feedback instead of silently dropping guidance"
+);
+assert.equal(calls.length, callsBeforeInvalidFeedback, "invalid feedback should fail before a provider request");
+await assert.rejects(
+  () => extractor({
+    title: "Unknown feedback field",
+    text: "This document is long enough to exercise unknown feedback field rejection."
+  }, {
+    feedback: [{ kind: "concept", id: "unknown", label: "Unknown", status: "accepted", confidence: 1 }]
+  }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_FEEDBACK",
+  "remote extraction should reject feedback fields outside the closed request contract"
+);
+assert.equal(calls.length, callsBeforeInvalidFeedback, "unknown feedback fields should fail before a provider request");
+await assert.rejects(
+  () => extractor({
+    title: "Non-array feedback",
+    text: "This document is long enough to exercise non-array feedback rejection."
+  }, {
+    feedback: { kind: "concept", id: "wrong-shape", status: "accepted" }
+  }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_FEEDBACK",
+  "remote extraction should reject non-array feedback instead of treating it as empty"
+);
+assert.equal(calls.length, callsBeforeInvalidFeedback, "non-array feedback should fail before a provider request");
+await assert.rejects(
+  () => extractor({
+    title: "Null feedback",
+    text: "This document is long enough to exercise null feedback rejection."
+  }, { feedback: null }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_FEEDBACK",
+  "remote extraction should reject explicit null feedback instead of treating it as omitted"
+);
+assert.equal(calls.length, callsBeforeInvalidFeedback, "null feedback should fail before a provider request");
+let invalidResponseCalls = 0;
+const invalidResponseExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/invalid-response-object",
+  fetchImpl: async () => {
+    invalidResponseCalls += 1;
+    return null;
+  }
+});
+await assert.rejects(
+  () => invalidResponseExtractor({ title: "Invalid response", text: "This document is long enough to exercise invalid response object handling." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote extraction should normalize non-response fetch results into a bounded adapter error"
+);
+assert.equal(invalidResponseCalls, 1, "invalid response objects should not be retried");
+await assert.rejects(
+  () => extractor({
+    title: "Contradictory feedback",
+    text: "This document is long enough to exercise contradictory feedback rejection."
+  }, {
+    feedback: [
+      { kind: "concept", id: "same", label: "Same", status: "accepted" },
+      { kind: "concept", id: "same", label: "Same", status: "rejected" }
+    ]
+  }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "CONTRADICTORY_FEEDBACK",
+  "remote extraction should reject contradictory feedback before provider execution"
+);
+assert.equal(calls.length, callsBeforeInvalidFeedback, "contradictory feedback should fail before a provider request");
 const hugeFeedbackExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/huge-feedback",
   fetchImpl: async (url, options) => {
@@ -287,6 +551,25 @@ await assert.rejects(
   () => stubbornRequest,
   (error) => error instanceof ExtractorAdapterError && error.code === "CANCELED"
 );
+const neverSettlingController = new AbortController();
+const neverSettlingExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/never-settles",
+  timeoutMs: 120000,
+  fetchImpl: async () => new Promise(() => {})
+});
+const neverSettlingRequest = neverSettlingExtractor(
+  { title: "Never settles", text: "This document is long enough to exercise cancellation of a fetch that never settles." },
+  { signal: neverSettlingController.signal }
+);
+setTimeout(() => neverSettlingController.abort(), 10);
+await assert.rejects(
+  () => Promise.race([
+    neverSettlingRequest,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("cancellation test timed out")), 500))
+  ]),
+  (error) => error instanceof ExtractorAdapterError && error.code === "CANCELED",
+  "caller cancellation should settle even when fetch never resolves"
+);
 const ignoredTimeoutExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/ignored-timeout",
   timeoutMs: 100,
@@ -389,12 +672,18 @@ await assert.rejects(
 assert.equal(ignoredStreamCancelCalls, 1, "ignored stream reads should still request body cancellation");
 assert.equal(ignoredStreamReleaseCalls, 0, "a pending non-conforming read should not trigger an unsafe lock release");
 let permanentAttempts = 0;
+let permanentBodyCancelCalls = 0;
 const permanentExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/permanent",
   retryDelayMs: 0,
   fetchImpl: async () => {
     permanentAttempts += 1;
-    return { ok: false, status: 401, headers: { get: () => null } };
+    return {
+      ok: false,
+      status: 401,
+      headers: { get: () => null },
+      body: { cancel: () => { permanentBodyCancelCalls += 1; } }
+    };
   }
 });
 await assert.rejects(
@@ -402,6 +691,7 @@ await assert.rejects(
   (error) => error instanceof ExtractorAdapterError && error.code === "REMOTE_ERROR"
 );
 assert.equal(permanentAttempts, 1, "permanent HTTP failures should not be retried");
+assert.equal(permanentBodyCancelCalls, 1, "terminal HTTP failures should cancel unread response bodies");
 assert.throws(
   () => createRemoteExtractor({ endpoint: "https://extractor.example.test", maxRetries: 4 }),
   (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RETRIES"
@@ -459,12 +749,14 @@ await assert.rejects(
   () => nestedIncompatibleSchemaExtractor({ title: "Nested schema", text: "This document is long enough to exercise nested schema validation." }),
   (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE"
 );
+let mislabeledBodyCancelCalls = 0;
 const mislabeledResponseExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/mislabeled",
   fetchImpl: async () => ({
     ok: true,
     status: 200,
     headers: { get: (name) => name === "content-type" ? "text/html; charset=utf-8" : null },
+    body: { cancel: () => { mislabeledBodyCancelCalls += 1; } },
     json: async () => ({ nodes: [], edges: [] })
   })
 });
@@ -472,6 +764,7 @@ await assert.rejects(
   () => mislabeledResponseExtractor({ title: "Mislabeled", text: "This document is long enough to exercise content type validation." }),
   (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE"
 );
+assert.equal(mislabeledBodyCancelCalls, 1, "non-JSON responses should cancel unread response bodies");
 const jsonpResponseExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/jsonp",
   fetchImpl: async () => ({
@@ -528,6 +821,40 @@ await assert.rejects(
   (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE"
 );
 assert.equal(unboundedHeadersJsonCalled, false, "non-streaming responses without declared size should be rejected before JSON parsing");
+const mismatchedFallbackBytes = new TextEncoder().encode(JSON.stringify({ nodes: [], edges: [] }));
+const mismatchedFallbackExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/mismatched-fallback-length",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? String(mismatchedFallbackBytes.byteLength + 1) : null },
+    arrayBuffer: async () => mismatchedFallbackBytes.buffer.slice(mismatchedFallbackBytes.byteOffset, mismatchedFallbackBytes.byteOffset + mismatchedFallbackBytes.byteLength)
+  })
+});
+await assert.rejects(
+  () => mismatchedFallbackExtractor({ title: "Mismatched fallback length", text: "This document is long enough to exercise response framing validation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote non-streaming response readers should reject truncated bodies"
+);
+const mismatchedStreamExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/mismatched-stream-length",
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? String(mismatchedFallbackBytes.byteLength + 1) : null },
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(mismatchedFallbackBytes);
+        controller.close();
+      }
+    })
+  })
+});
+await assert.rejects(
+  () => mismatchedStreamExtractor({ title: "Mismatched stream length", text: "This document is long enough to exercise streamed response framing validation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
+  "remote streamed response readers should reject truncated bodies"
+);
 let malformedLengthJsonCalled = false;
 const malformedLengthExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/malformed-length",
@@ -625,6 +952,23 @@ await assert.rejects(
   () => timeoutExtractor({ title: "Timeout", text: "This document is long enough to exercise timeout handling." }),
   (error) => error instanceof ExtractorAdapterError && error.code === "TIMEOUT"
 );
+let networkFailureAttempts = 0;
+const networkFailureExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/network-failure",
+  retryDelayMs: 0,
+  fetchImpl: async () => {
+    networkFailureAttempts += 1;
+    throw new Error("socket closed");
+  }
+});
+await assert.rejects(
+  () => networkFailureExtractor({ title: "Network failure", text: "This document is long enough to exercise network failure normalization." }),
+  (error) => error instanceof ExtractorAdapterError
+    && error.code === "NETWORK_ERROR"
+    && error.cause?.message === "socket closed",
+  "provider network exceptions should become stable adapter errors"
+);
+assert.equal(networkFailureAttempts, 2, "transient provider network exceptions should receive one bounded retry");
 const remoteErrorExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/error",
   fetchImpl: async () => ({

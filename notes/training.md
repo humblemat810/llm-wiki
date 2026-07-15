@@ -6,7 +6,7 @@ category: foundations
 
 # Loss is a compass
 
-> What does “learning” mean here?
+> What does 'learning' mean here?
 
 ## The short version
 

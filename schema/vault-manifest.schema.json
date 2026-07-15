@@ -10,6 +10,7 @@
     "graphSchema": { "const": "llm-field-notes/graph@1" },
     "graphVersion": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "graphFingerprint": { "type": "string", "maxLength": 128, "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$" },
+    "appVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
     "redacted": { "type": "boolean" },
     "generatedAt": { "type": "string", "format": "date-time", "maxLength": 128 }
   }

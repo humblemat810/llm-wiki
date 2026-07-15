@@ -1,4 +1,4 @@
-import { canonicalizeGraphForExport, fingerprintBackup } from "./graph-core.js";
+import { MAX_PRODUCER_VERSION_CHARS, canonicalizeGraphForExport, fingerprintBackup, sliceTextAtCodePointBoundary } from "./graph-core.js";
 
 export const JSONLD_FORMAT = "llm-field-notes/jsonld@1";
 export const MAX_JSONLD_CANONICAL_DEPTH = 64;
@@ -20,9 +20,12 @@ function canonicalize(value, depth = 0) {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key], depth + 1)]));
 }
 
-export function buildJsonLd(graph) {
+export function buildJsonLd(graph, { appVersion } = {}) {
   const normalizedGraph = canonicalizeGraphForExport(graph);
   const graphFingerprint = fingerprintBackup(normalizedGraph);
+  const normalizedAppVersion = typeof appVersion === "string" && appVersion.trim()
+    ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS)
+    : null;
   const graphId = `urn:llm-field-notes:graph:${graphFingerprint}`;
   const safeIdPart = (value) => String(value).replace(/[^a-zA-Z0-9._~-]/g, (character) => `%u${character.codePointAt(0).toString(16).padStart(4, "0")}`);
   const entityId = (kind, id) => `${graphId}/${kind}/${safeIdPart(id)}`;
@@ -85,6 +88,13 @@ export function buildJsonLd(graph) {
       "graphVersion": "lfn:graphVersion",
       "graphUpdatedAt": "lfn:graphUpdatedAt",
       "revisionCount": "lfn:revisionCount",
+      "version": "lfn:version",
+      "timestamp": "lfn:timestamp",
+      "reason": "lfn:reason",
+      "operation": "lfn:operation",
+      "extractor": "lfn:extractor",
+      "nodes": "lfn:nodes",
+      "edges": "lfn:edges",
       "learningExampleCount": "lfn:learningExampleCount",
       "redacted": "lfn:redacted",
       "integrity": "lfn:integrity",
@@ -102,6 +112,7 @@ export function buildJsonLd(graph) {
     revisionCount: normalizedGraph.revisions.length,
     learningExampleCount: normalizedGraph.learning.examples.length,
     fingerprint: graphFingerprint,
+    ...(normalizedAppVersion ? { appVersion: normalizedAppVersion } : {}),
     redacted: normalizedGraph.redacted === true,
     integrity,
     "@graph": [
@@ -146,6 +157,18 @@ export function buildJsonLd(graph) {
         "lfn:sources": edge.sources.map(sourceRef),
         evidence: normalizedGraph.redacted ? [] : evidence(edge.evidence)
       })),
+      ...normalizedGraph.revisions.map((revision) => ({
+        "@id": entityId("revision", revision.id),
+        "@type": "lfn:Revision",
+        name: revision.reason,
+        version: revision.version,
+        timestamp: revision.timestamp,
+        reason: revision.reason,
+        operation: revision.operation,
+        extractor: revision.extractor,
+        nodes: revision.nodes,
+        edges: revision.edges
+      })),
       ...normalizedGraph.learning.examples.map((example) => ({
         "@id": entityId("learning", `${example.kind}-${example.id}`),
         "@type": "lfn:LearningExample",
@@ -170,7 +193,8 @@ export function buildJsonLd(graph) {
 export function matchesJsonLdProjection(graph, projection) {
   if (!projection || typeof projection !== "object") return false;
   try {
-    return JSON.stringify(canonicalize(buildJsonLd(graph))) === JSON.stringify(canonicalize(projection));
+    const options = Object.hasOwn(projection, "appVersion") ? { appVersion: projection.appVersion } : {};
+    return JSON.stringify(canonicalize(buildJsonLd(graph, options))) === JSON.stringify(canonicalize(projection));
   } catch {
     return false;
   }

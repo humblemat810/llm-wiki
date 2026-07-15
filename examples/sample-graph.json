@@ -1,0 +1,135 @@
+{
+  "schema": "llm-field-notes/graph@1",
+  "version": 1,
+  "updatedAt": "2026-01-01T00:00:00.000Z",
+  "graphFingerprint": "fnv64-4d8c362569fbcce7-2627",
+  "documents": [
+    {
+      "id": "doc-sample-attention",
+      "title": "Attention sample notes",
+      "text": "Attention mixes information across tokens. Queries, keys, and values create a weighted lookup over context. Positional encoding gives the sequence an order.",
+      "fingerprint": "fnv64-5f52933626672424-156",
+      "uri": null,
+      "addedAt": "2026-01-01T00:00:00.000Z",
+      "quality": "primary",
+      "lastReviewedAt": null
+    }
+  ],
+  "nodes": [
+    {
+      "id": "attention",
+      "label": "Attention",
+      "aliases": [],
+      "type": "concept",
+      "confidence": 0.92,
+      "mentions": 3,
+      "feedback": 0,
+      "status": "inferred",
+      "sources": ["doc-sample-attention"],
+      "evidence": [
+        {
+          "text": "Attention mixes information across tokens.",
+          "sources": ["doc-sample-attention"]
+        }
+      ],
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "lastReviewedAt": null
+    },
+    {
+      "id": "weighted-lookup",
+      "label": "Weighted lookup",
+      "aliases": [],
+      "type": "concept",
+      "confidence": 0.88,
+      "mentions": 1,
+      "feedback": 0,
+      "status": "inferred",
+      "sources": ["doc-sample-attention"],
+      "evidence": [
+        {
+          "text": "Queries, keys, and values create a weighted lookup over context.",
+          "sources": ["doc-sample-attention"]
+        }
+      ],
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "lastReviewedAt": null
+    },
+    {
+      "id": "positional-encoding",
+      "label": "Positional encoding",
+      "aliases": [],
+      "type": "concept",
+      "confidence": 0.86,
+      "mentions": 1,
+      "feedback": 0,
+      "status": "inferred",
+      "sources": ["doc-sample-attention"],
+      "evidence": [
+        {
+          "text": "Positional encoding gives the sequence an order.",
+          "sources": ["doc-sample-attention"]
+        }
+      ],
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "lastReviewedAt": null
+    }
+  ],
+  "edges": [
+    {
+      "id": "attention--weighted-lookup--uses",
+      "source": "attention",
+      "target": "weighted-lookup",
+      "label": "uses",
+      "confidence": 0.84,
+      "feedback": 0,
+      "evidence": [
+        {
+          "text": "Queries, keys, and values create a weighted lookup over context.",
+          "sources": ["doc-sample-attention"]
+        }
+      ],
+      "sources": ["doc-sample-attention"],
+      "status": "inferred",
+      "lastReviewedAt": null
+    },
+    {
+      "id": "attention--positional-encoding--complements",
+      "source": "attention",
+      "target": "positional-encoding",
+      "label": "complements",
+      "confidence": 0.78,
+      "feedback": 0,
+      "evidence": [
+        {
+          "text": "Positional encoding gives the sequence an order.",
+          "sources": ["doc-sample-attention"]
+        }
+      ],
+      "sources": ["doc-sample-attention"],
+      "status": "inferred",
+      "lastReviewedAt": null
+    }
+  ],
+  "revisions": [
+    {
+      "id": "rev-1",
+      "version": 1,
+      "timestamp": "2026-01-01T00:00:00.000Z",
+      "reason": "Ingested Attention sample notes",
+      "operation": "ingest",
+      "extractor": "local",
+      "nodes": 3,
+      "edges": 2
+    }
+  ],
+  "learning": {
+    "examples": []
+  },
+  "integrity": {
+    "ambiguousSourceIds": [],
+    "ambiguousEdgeIds": []
+  }
+}

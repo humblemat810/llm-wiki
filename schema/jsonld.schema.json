@@ -17,11 +17,12 @@
     "revisionCount": { "type": "integer", "minimum": 0, "maximum": 20 },
     "learningExampleCount": { "type": "integer", "minimum": 0, "maximum": 500 },
     "fingerprint": { "type": "string", "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$", "maxLength": 128 },
+    "appVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
     "redacted": { "type": "boolean" },
     "integrity": { "$ref": "#/$defs/integrity" },
     "@graph": {
       "type": "array",
-      "maxItems": 16500,
+      "maxItems": 16520,
       "items": { "$ref": "#/$defs/member" }
     }
   },
@@ -76,10 +77,12 @@
         "edges": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "revisions": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "learningExamples": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "documentTitle": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "documentText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "evidenceText": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "evidenceItems": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "sourceReferences": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        "sourceReferences": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "aliases": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
       },
       "additionalProperties": false
     },
@@ -160,6 +163,25 @@
                 "lfn:lastReviewedAt": { "$ref": "#/$defs/timestamp" },
                 "lfn:sources": { "$ref": "#/$defs/sourceRef" },
                 "evidence": { "$ref": "#/$defs/evidence" }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/memberBase" },
+            {
+              "required": ["name", "version", "timestamp", "reason", "operation", "extractor", "nodes", "edges"],
+              "properties": {
+                "@type": { "const": "lfn:Revision" },
+                "name": { "type": "string", "maxLength": 200 },
+                "version": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+                "timestamp": { "$ref": "#/$defs/requiredTimestamp" },
+                "reason": { "type": "string", "maxLength": 200 },
+                "operation": { "enum": ["unknown", "migration", "ingest", "rebuild", "feedback", "learning", "manual", "projection", "source-removal"] },
+                "extractor": { "enum": ["unknown", "local", "remote"] },
+                "nodes": { "type": "integer", "minimum": 0, "maximum": 5000 },
+                "edges": { "type": "integer", "minimum": 0, "maximum": 10000 }
               }
             }
           ]

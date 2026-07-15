@@ -6,14 +6,20 @@
 backup schema uses a file-relative identifier and resolves the graph contract
 through the same-directory `graph.schema.json` reference, so bundled offline
 validators do not need network access.
-New backups carry a deterministic `graphFingerprint`; older backups without it
-remain readable through the browser compatibility path.
+New backups carry a deterministic `graphFingerprint` and bounded `appVersion`
+producer metadata; older backups without either optional field remain readable
+through the browser compatibility path.
+Persisted browser commits may also carry optional `committedAt` metadata. It is
+local synchronization metadata, not graph content: undo and restore use it to
+remain authoritative across delayed cross-tab events.
 
 `diff.schema.json` describes the compact revision-diff export. It reports
 stable identity additions, removals, and metadata changes without copying
 source text or evidence. It also carries bounded provenance-ambiguity and
 contradictory-review identity changes. Source records may retain bounded
-canonical URIs for traceability.
+canonical URIs for traceability. New diffs also carry deterministic normalized
+before/after graph fingerprints, allowing consumers to verify that the diff was
+computed against the representations they intended to compare.
 
 `extractor-request.schema.json` describes the optional model-extraction HTTP
 request envelope.
@@ -36,7 +42,8 @@ requires explicit confirmation in the workbench.
 reports carry a deterministic fingerprint of the normalized graph plus bounded
 diagnostic counts and percentages, never source text or evidence. Health
 reports include stale reusable-learning counts and bounded-import truncation
-counts, and automation can gate them with `--max-stale-learning-examples`,
+counts, including clipped aliases, and automation can gate them with
+`--max-stale-learning-examples`,
 `--max-withheld-guidance`, `--max-unanchored-evidence`,
 `--max-review-queue-truncated`, `--max-evidence-grounding-truncated`,
 `--max-feedback-context-truncated`, `--max-truncated-items`, and
@@ -78,11 +85,12 @@ not fail health validation merely because their provenance is richly grounded.
 
 `vault-manifest.schema.json` describes the identity envelope included in
 Obsidian vault exports. It binds the projection to a graph version and
-deterministic fingerprint while preserving whether the vault is redacted.
+deterministic fingerprint, bounded producer version, and redaction state while
+remaining compatible with older manifests that lack producer metadata.
 
 `jsonld.schema.json` describes the versioned semantic-web projection emitted
 by the browser and `project-jsonld.mjs`. It retains the graph fingerprint,
-redaction marker, source fingerprints, and review metadata so downstream
+optional bounded producer version, redaction marker, source fingerprints, and review metadata so downstream
 consumers can validate the projection boundary without losing the learning
 audit trail. Its graph-member definitions distinguish source, concept, and
 relation records and bound their evidence, provenance, confidence, and review
@@ -97,29 +105,47 @@ external projections can reconstruct review chronology.
 The root also reports graph update/revision counts, and bounded
 `lfn:LearningExample` members preserve reusable accepted/rejected decisions so
 the self-improvement loop remains inspectable outside the browser.
+Bounded `lfn:Revision` members also preserve revision version, timestamp, reason,
+operation, extractor lane, and graph cardinalities, keeping JSON-LD audit
+history aligned with the Markdown and Obsidian projections.
+
+`learning-loop.schema.json` describes the deterministic artifact emitted by
+`experiments/learning-loop.mjs`. It compares an unguided baseline with a
+review-guided follow-up and requires the explicit concept-count delta and
+suppression proof to remain machine-checkable.
 
 The browser normalizer is intentionally more forgiving than the schema: it
 accepts legacy fields, repairs missing metadata, and records migrations. New
 extractors and external projections should emit the schema shape directly.
-Direct graph JSON exports may include an optional `graphFingerprint`; consumers
-should verify it against the normalized graph when present, while accepting
-older graph files that do not carry the field.
+Revision records optionally carry a bounded `operation` tag (`ingest`,
+`rebuild`, `feedback`, `learning`, `manual`, `projection`, `migration`, or
+`source-removal`). This keeps the self-improvement timeline auditable without
+embedding provider credentials, prompts, or source text; older records normalize
+to `unknown`. Extraction and rebuild revisions may additionally identify the
+bounded extractor lane (`local` or `remote`); no endpoint, model name, prompt,
+or credential is persisted in the graph.
+Direct graph JSON exports may include optional `graphFingerprint` and bounded
+`appVersion` producer metadata; consumers should verify the fingerprint against
+the normalized graph and treat the producer version as provenance only, while
+accepting older graph files that do not carry either field.
 
 When a graph import exceeds a bounded collection, the normalizer retains the
 partial graph but records the omitted counts in `integrity.truncated`; health
 projections repeat those counts so operators can restore the original export
 before editing.
-The same diagnostic also records how many document-text and evidence-text
-records were clipped to the normalized size limits, plus evidence records and
-provenance references omitted by nested safety limits, so content loss cannot
-hide behind an otherwise complete collection count.
+The same diagnostic also records how many document titles, document-text, and
+evidence-text records were clipped to the normalized size limits, plus evidence
+records and provenance references omitted by nested safety limits, so content
+loss cannot hide behind an otherwise complete collection count.
 If duplicate concept or relation records disagree on review status, their
 canonical IDs are retained in bounded conflict diagnostics and repeated in
 health output for manual inspection.
 
-The contract is deliberately forward-compatible (`additionalProperties` is
-allowed). Consumers should ignore fields they do not understand and preserve
-fields when round-tripping data.
+The graph and JSON-LD contracts permit explicitly marked extension fields for
+forward compatibility; closed companion contracts such as backups, diffs,
+evaluations, and learning-loop artifacts reject unknown fields intentionally.
+Consumers should ignore and preserve unknown fields only where the relevant
+schema permits them, and must fail closed at the stricter contract boundaries.
 Graph items retain at most eight evidence records. The normalizer reports
 additional imported evidence records through `integrity.truncated.evidenceItems`
 and corresponding health diagnostics.

@@ -2,9 +2,12 @@ import { redactGraph } from "../graph-core.js";
 import { buildJsonLd } from "../jsonld-projection.js";
 import { readGraphInput } from "./graph-input.mjs";
 const [inputPath, ...options] = process.argv.slice(2);
+const usage = "Usage: node experiments/project-jsonld.mjs <graph-or-backup.json> [--redacted]";
 
-if (!inputPath || options.some((option) => option !== "--redacted")) {
-  console.error("Usage: node experiments/project-jsonld.mjs <graph-or-backup.json> [--redacted]");
+if (process.argv.includes("--help")) {
+  console.log(usage);
+} else if (!inputPath || options.some((option) => option !== "--redacted")) {
+  console.error(usage);
   process.exitCode = 1;
 } else {
   try {

@@ -1,10 +1,11 @@
 import { readFile } from "node:fs/promises";
-import { buildHealthReport, HEALTH_GATE_LIMITS, validateHealthReport } from "../graph-core.js";
+import { buildHealthReport, HEALTH_GATE_LIMITS, parseJsonWithUniqueKeys, validateHealthReport } from "../graph-core.js";
 import { readGraphInput } from "./graph-input.mjs";
 
-const APP_VERSION = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
+const APP_VERSION = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json").version;
 const [inputPath, ...argumentsList] = process.argv.slice(2);
 const thresholdMaximums = HEALTH_GATE_LIMITS;
+const usage = "Usage: node experiments/inspect-graph.mjs <graph-or-backup.json> [--min-provenance 95] [--min-fresh-source-review 90] [--max-orphaned 0] [--max-ambiguous 0] [--max-conflicting-items 0] [--max-unsupported-nodes 0] [--max-unsupported-edges 0] [--max-review-candidates 0] [--max-review-queue-truncated 0] [--max-evidence-grounding-truncated 0] [--max-feedback-context-truncated 0] [--max-stale-review-candidates 0] [--max-stale-learning-examples 0] [--max-withheld-guidance 0] [--max-unanchored-evidence 0] [--max-truncated-items 0] [--max-dropped-items 0]";
 
 function parseThresholds(values) {
   const thresholds = { minProvenance: null, minFreshSourceReview: null, maxOrphaned: null, maxAmbiguous: null, maxUnsupportedNodes: null, maxUnsupportedEdges: null, maxReviewCandidates: null, maxReviewQueueTruncated: null, maxEvidenceGroundingTruncated: null, maxFeedbackContextTruncated: null, maxStaleReviewCandidates: null, maxStaleLearningExamples: null, maxWithheldGuidance: null, maxUnanchoredEvidence: null, maxConflictingItems: null, maxTruncatedItems: null, maxDroppedItems: null };
@@ -114,8 +115,10 @@ function runGate(health, thresholds) {
   return { passed: violations.length === 0, violations, thresholds };
 }
 
-if (!inputPath) {
-  console.error("Usage: node experiments/inspect-graph.mjs <graph-or-backup.json> [--min-provenance 95] [--min-fresh-source-review 90] [--max-orphaned 0] [--max-ambiguous 0] [--max-conflicting-items 0] [--max-unsupported-nodes 0] [--max-unsupported-edges 0] [--max-review-candidates 0] [--max-review-queue-truncated 0] [--max-evidence-grounding-truncated 0] [--max-feedback-context-truncated 0] [--max-stale-review-candidates 0] [--max-stale-learning-examples 0] [--max-withheld-guidance 0] [--max-unanchored-evidence 0] [--max-truncated-items 0] [--max-dropped-items 0]");
+if (process.argv.includes("--help")) {
+  console.log(usage);
+} else if (!inputPath) {
+  console.error(usage);
   process.exitCode = 1;
 } else {
   try {

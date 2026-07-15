@@ -1,0 +1,58 @@
+name: Share an artifact
+description: Submit a runnable experiment, graph, benchmark, visualization, or learning note.
+title: "[artifact] "
+labels:
+  - artifact
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for making the wiki more useful. Keep this narrow, runnable, and honest about limitations.
+  - type: input
+    id: artifact_name
+    attributes:
+      label: Artifact name
+      description: Give the artifact a short, specific title.
+      placeholder: "A tiny KV-cache benchmark"
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: What question does it answer?
+      description: State the question or claim in one sentence.
+      placeholder: "When does caching change decode latency enough to matter?"
+    validations:
+      required: true
+  - type: textarea
+    id: try_it
+    attributes:
+      label: How can someone try it?
+      description: Include a command, URL, file path, or minimal reproduction.
+      placeholder: |
+        ```bash
+        node experiments/example.mjs
+        ```
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What does it show?
+      description: Summarize the useful result and include measurements where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: limits
+    attributes:
+      label: Limitations and failure modes
+      description: Say what this artifact does not prove, including version/date context when relevant.
+    validations:
+      required: true
+  - type: input
+    id: links
+    attributes:
+      label: Source links
+      description: Link the note, graph export, pull request, paper, or code.
+    validations:
+      required: true

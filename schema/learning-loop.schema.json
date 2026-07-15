@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/learning-loop@1",
+  "title": "LLM Field Notes learning-loop artifact",
+  "description": "A bounded, deterministic comparison of unguided and reviewed-guided extraction.",
+  "type": "object",
+  "required": ["format", "stages", "proof"],
+  "properties": {
+    "format": { "const": "llm-field-notes/learning-loop@1" },
+    "stages": {
+      "type": "object",
+      "required": ["initial", "reviewed", "improved", "comparison"],
+      "properties": {
+        "initial": { "$ref": "#/$defs/extractionStage" },
+        "reviewed": {
+          "type": "object",
+          "required": ["accepted", "rejected", "guidanceExamples"],
+          "properties": {
+            "accepted": { "$ref": "#/$defs/reviewedItem" },
+            "rejected": { "$ref": "#/$defs/reviewedItem" },
+            "guidanceExamples": { "type": "integer", "minimum": 0, "maximum": 500 }
+          },
+          "additionalProperties": false
+        },
+        "improved": { "$ref": "#/$defs/extractionStage" },
+        "comparison": {
+          "type": "object",
+          "required": [
+            "baselineConcepts",
+            "guidedConcepts",
+            "conceptsRemovedByGuidance",
+            "rejectedConceptPresentWithoutGuidance",
+            "rejectedConceptPresentWithGuidance"
+          ],
+          "properties": {
+            "baselineConcepts": { "type": "integer", "minimum": 0, "maximum": 5000 },
+            "guidedConcepts": { "type": "integer", "minimum": 0, "maximum": 5000 },
+            "conceptsRemovedByGuidance": { "type": "integer", "minimum": 0, "maximum": 5000 },
+            "rejectedConceptPresentWithoutGuidance": { "type": "boolean" },
+            "rejectedConceptPresentWithGuidance": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "proof": {
+      "type": "object",
+      "required": ["acceptedConceptRetained", "rejectedConceptSuppressed", "reviewedGuidanceIsPortable"],
+      "properties": {
+        "acceptedConceptRetained": { "type": "boolean" },
+        "rejectedConceptSuppressed": { "type": "boolean" },
+        "reviewedGuidanceIsPortable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "extractionStage": {
+      "type": "object",
+      "required": ["concepts", "labels"],
+      "properties": {
+        "concepts": { "type": "integer", "minimum": 0, "maximum": 5000 },
+        "labels": {
+          "type": "array",
+          "maxItems": 5000,
+          "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+        },
+        "relations": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      },
+      "additionalProperties": false
+    },
+    "reviewedItem": {
+      "type": "object",
+      "required": ["id", "label", "status"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "status": { "enum": ["accepted", "rejected"] }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

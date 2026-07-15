@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { resolve, relative, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, PUBLIC_ASSETS } from "./public-assets.mjs";
-import { normalizePublicOrigin } from "./public-origin.mjs";
-import { buildLearningNotePage, MAX_NOTE_SUMMARY_CHARS } from "./note-page.mjs";
+import { MAX_DOCUMENT_TITLE_CHARS, parseJsonWithUniqueKeys } from "../graph-core.js";
+import { MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, PUBLIC_ASSETS, PUBLIC_SITEMAP_ASSETS } from "./public-assets.mjs";
+import { requirePublicOrigin } from "./public-origin.mjs";
+import { buildLearningNotePage, MAX_NOTE_SUMMARY_CHARS, sliceTextAtCodePointBoundary } from "./note-page.mjs";
+import { computeServiceWorkerCacheRevision, renderDeploymentServiceWorker } from "./service-worker-cache.mjs";
+await import("./check-artifacts.mjs");
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = resolve(root, process.argv[2] || "dist");
@@ -15,13 +18,14 @@ if (!outputRelativePath || outputRelativePath.startsWith("..") || outputRelative
 }
 
 const PUBLIC_FILES = PUBLIC_ASSETS;
+const ASSET_MANIFEST = "asset-manifest.json";
 const learningNoteAssetCount = PUBLIC_FILES.filter((asset) => asset.startsWith("notes/") && asset.endsWith(".md")).length;
 if (learningNoteAssetCount > MAX_LEARNING_NOTE_ASSETS) throw new Error(`The Pages manifest contains more than ${MAX_LEARNING_NOTE_ASSETS} learning notes.`);
 const MAX_BUILD_CONCURRENCY = 16;
 const lexicalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 
 const rootRealPath = await realpath(root);
-const publicOrigin = normalizePublicOrigin(process.env.PUBLIC_ORIGIN);
+const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN);
 
 async function readBoundedUtf8(filePath, maxBytes) {
   const byteLimit = Math.max(1, Math.floor(maxBytes));
@@ -51,6 +55,7 @@ const overlappingAsset = PUBLIC_FILES.find((asset) => {
 if (overlappingAsset) {
   throw new Error(`Pages output overlaps a source asset and cannot be removed: ${overlappingAsset}`);
 }
+const buildOutput = await mkdtemp(resolve(root, ".llm-field-notes-pages-build-"));
 
 function isContained(candidate) {
   const relativePath = relative(rootRealPath, candidate);
@@ -59,12 +64,13 @@ function isContained(candidate) {
 
 async function copyPublicFile(asset) {
   const source = resolve(root, asset);
+  if ((await lstat(source)).isSymbolicLink()) throw new Error(`public asset must not be a symbolic link: ${asset}`);
   const sourceRealPath = await realpath(source);
   if (!isContained(sourceRealPath)) throw new Error(`public asset escapes repository root: ${asset}`);
   const metadata = await stat(sourceRealPath);
   if (!metadata.isFile() || metadata.size === 0) throw new Error(`public asset is missing or empty: ${asset}`);
   if (metadata.size > MAX_STATIC_ASSET_BYTES) throw new Error(`public asset exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit: ${asset}`);
-  const destination = resolve(output, asset);
+  const destination = resolve(buildOutput, asset);
   await mkdir(dirname(destination), { recursive: true });
   await cp(sourceRealPath, destination);
 }
@@ -73,6 +79,7 @@ async function preflightPublicAssetBudget() {
   let totalBytes = 0;
   for (const asset of PUBLIC_FILES) {
     const source = resolve(root, asset);
+    if ((await lstat(source)).isSymbolicLink()) throw new Error(`public asset must not be a symbolic link: ${asset}`);
     const sourceRealPath = await realpath(source);
     if (!isContained(sourceRealPath)) throw new Error(`public asset escapes repository root: ${asset}`);
     const metadata = await stat(sourceRealPath);
@@ -100,15 +107,35 @@ function renderOriginAwareIndex(content, origin) {
   if (!origin) return content;
   const rootUrl = `${origin}/`;
   const rendered = content
-    .replace('href="./" />', `href="${rootUrl}" />`)
-    .replace('href="feed.xml"', `href="${origin}/feed.xml"`)
-    .replace('content="./" />', `content="${rootUrl}" />`)
-    .replace('"url": "./"', `"url": "${rootUrl}"`)
-    .replace(/content="social-card\.svg"/g, `content="${origin}/social-card.svg"`);
+    .replace('href="./" />', () => `href="${rootUrl}" />`)
+    .replace('href="feed.xml"', () => `href="${origin}/feed.xml"`)
+    .replace('content="./" />', () => `content="${rootUrl}" />`)
+    .replace('"url": "./"', () => `"url": "${rootUrl}"`)
+    .replace(/content="social-card\.svg"/g, () => `content="${origin}/social-card.svg"`);
   const structuredDataMatch = rendered.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
   if (!structuredDataMatch) return rendered;
   const structuredDataCsp = `'sha256-${createHash("sha256").update(structuredDataMatch[1]).digest("base64")}'`;
   return rendered.replace(/'sha256-[^']+'/g, structuredDataCsp);
+}
+
+function renderOriginAwareArtifactPage(content, origin) {
+  if (!origin) return content;
+  return content
+    .replace('href="./"', () => `href="${origin}/"`)
+    .replace('content="./artifacts.html"', () => `content="${origin}/artifacts.html"`)
+    .replace('content="social-card.svg"', () => `content="${origin}/social-card.svg"`)
+    .replace('href="./artifacts.html"', () => `href="${origin}/artifacts.html"`)
+    .replace('"@id":"./artifacts.html"', () => `"@id":"${origin}/artifacts.html"`)
+    .replace('"url":"./artifacts.html"', () => `"url":"${origin}/artifacts.html"`)
+    .replace(/"url":"(experiments\/[^"]+)"/g, (_, asset) => `"url":"${origin}/${asset}"`);
+}
+
+function renderNotFoundPage(content, origin = "") {
+  const base = origin ? `${origin}/` : "/";
+  return content.toString("utf8")
+    .replaceAll('href="./styles.css"', `href="${base}styles.css"`)
+    .replaceAll('href="./"', `href="${base}"`)
+    .replaceAll('href="./artifacts.html"', `href="${base}artifacts.html"`);
 }
 
 function fallbackNoteTitle(asset) {
@@ -116,7 +143,7 @@ function fallbackNoteTitle(asset) {
 }
 
 function deriveNoteSummary(content, title) {
-  const boundedContent = content.slice(0, MAX_NOTE_SUMMARY_CHARS);
+  const boundedContent = sliceTextAtCodePointBoundary(content, MAX_NOTE_SUMMARY_CHARS);
   const question = boundedContent.match(/^>\s*(.+)$/m)?.[1]?.trim() || "";
   const withoutFrontmatter = boundedContent.replace(/^---[\s\S]*?---\s*/m, "");
   const paragraphs = withoutFrontmatter.replace(/^#+\s+.+$/gm, "").split(/\n\s*\n/).map((paragraph) => paragraph
@@ -126,7 +153,7 @@ function deriveNoteSummary(content, title) {
     .replace(/\s+/g, " ")
     .trim())
     .filter((paragraph) => paragraph && paragraph !== title && paragraph !== question);
-  return ([question, paragraphs[0] || title].filter(Boolean).join(" ")).slice(0, 280);
+  return sliceTextAtCodePointBoundary([question, paragraphs[0] || title].filter(Boolean).join(" "), 280);
 }
 
 async function readLearningNotes() {
@@ -140,7 +167,7 @@ async function readLearningNotes() {
     notes.push({
       asset,
       id: asset.slice("notes/".length, -".md".length),
-      title: title.slice(0, 200),
+      title: sliceTextAtCodePointBoundary(title, MAX_DOCUMENT_TITLE_CHARS),
       description: deriveNoteSummary(content, title),
       content
     });
@@ -162,8 +189,19 @@ async function mapWithConcurrency(items, worker, limit = MAX_BUILD_CONCURRENCY) 
   return results;
 }
 
+async function collectFiles(directory, prefix = "") {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const asset = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) files.push(...await collectFiles(resolve(directory, entry.name), asset));
+    else files.push(asset);
+  }
+  return files;
+}
+
 async function buildStaticFeed(origin = "") {
-  const release = JSON.parse(await readFile(resolve(root, "version.json"), "utf8"));
+  const release = parseJsonWithUniqueKeys(await readFile(resolve(root, "version.json"), "utf8"), "version.json");
   const updated = /^\d{4}-\d{2}-\d{2}$/.test(release.date)
     ? `${release.date}T00:00:00.000Z`
     : "1970-01-01T00:00:00.000Z";
@@ -200,6 +238,7 @@ async function buildStaticSitemap(origin) {
   const base = `${origin}/`;
   const urls = [
     new URL("./", base).toString(),
+    ...PUBLIC_SITEMAP_ASSETS.map((asset) => new URL(`./${asset}`, base).toString()),
     ...notes.flatMap(({ asset, id }) => [
       new URL(`./${asset}`, base).toString(),
       new URL(`./notes/${encodeURIComponent(id)}.html`, base).toString()
@@ -214,13 +253,13 @@ async function buildStaticSitemap(origin) {
   ].join("\n");
 }
 
-await preflightPublicAssetBudget();
-await rm(output, { recursive: true, force: true });
-await mkdir(output, { recursive: true });
-await mapWithConcurrency(PUBLIC_FILES, copyPublicFile);
-const learningNotes = await readLearningNotes();
-const generatedNotePages = learningNotes.map((note) => `notes/${note.id}.html`);
-await mapWithConcurrency(learningNotes, async (note) => {
+async function buildPages() {
+  await preflightPublicAssetBudget();
+  await mkdir(buildOutput, { recursive: true });
+  await mapWithConcurrency(PUBLIC_FILES, copyPublicFile);
+  const learningNotes = await readLearningNotes();
+  const generatedNotePages = learningNotes.map((note) => `notes/${note.id}.html`);
+  await mapWithConcurrency(learningNotes, async (note) => {
   const page = buildLearningNotePage({
     id: note.id,
     title: note.title,
@@ -231,62 +270,130 @@ await mapWithConcurrency(learningNotes, async (note) => {
   if (Buffer.byteLength(page) > MAX_STATIC_ASSET_BYTES) {
     throw new Error(`Generated learning note page exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit: ${note.id}`);
   }
-  await writeFile(
-    resolve(output, `notes/${note.id}.html`),
-    page,
-    "utf8"
+    await writeFile(
+      resolve(buildOutput, `notes/${note.id}.html`),
+      page,
+      "utf8"
+    );
+  });
+  const serviceWorkerPath = resolve(buildOutput, "sw.js");
+  let serviceWorker = await readFile(serviceWorkerPath, "utf8");
+  const generatedShellAssets = [`./${ASSET_MANIFEST}`, ...generatedNotePages.map((asset) => `./${asset}`)];
+  if (generatedShellAssets.length) {
+    const generatedShellLiteral = generatedShellAssets.map((asset) => JSON.stringify(asset)).join(", ");
+    const shellMarker = "const APP_SHELL = [";
+    if (!serviceWorker.includes(shellMarker)) throw new Error("Pages service worker is missing its APP_SHELL declaration.");
+    serviceWorker = serviceWorker.replace(shellMarker, `${shellMarker}${generatedShellLiteral}, `);
+    if (!serviceWorker.includes(generatedShellLiteral)) throw new Error("Pages note pages could not be added to the service-worker shell.");
+  }
+  const cacheMarker = "const CACHE = \"llm-field-notes-v";
+  if (!serviceWorker.includes(cacheMarker)) throw new Error("Pages service worker is missing its release cache marker.");
+  await writeFile(resolve(buildOutput, ".nojekyll"), "", "utf8");
+  if (publicOrigin) {
+    const indexPath = resolve(buildOutput, "index.html");
+    const index = await readFile(indexPath, "utf8");
+    const renderedIndex = renderOriginAwareIndex(index, publicOrigin);
+    if (Buffer.byteLength(renderedIndex) > MAX_STATIC_ASSET_BYTES) {
+      throw new Error(`origin-aware index exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit`);
+    }
+    await writeFile(indexPath, renderedIndex, "utf8");
+    const artifactPath = resolve(buildOutput, "artifacts.html");
+    const artifact = await readFile(artifactPath, "utf8");
+    const renderedArtifact = renderOriginAwareArtifactPage(artifact, publicOrigin);
+    if (Buffer.byteLength(renderedArtifact) > MAX_STATIC_ASSET_BYTES) {
+      throw new Error(`origin-aware artifact gallery exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit`);
+    }
+    await writeFile(artifactPath, renderedArtifact, "utf8");
+  }
+  const notFoundPath = resolve(buildOutput, "404.html");
+  const notFound = await readFile(notFoundPath, "utf8");
+  const renderedNotFound = renderNotFoundPage(notFound, publicOrigin);
+  if (Buffer.byteLength(renderedNotFound) > MAX_STATIC_ASSET_BYTES) {
+    throw new Error("origin-aware 404 page exceeds the 10 MB safety limit");
+  }
+  await writeFile(notFoundPath, renderedNotFound, "utf8");
+  const feed = await buildStaticFeed(publicOrigin);
+  if (Buffer.byteLength(feed) > MAX_CRAWLER_RESPONSE_BYTES) throw new Error("Generated feed exceeds the 2 MB crawler response limit.");
+  await writeFile(resolve(buildOutput, "feed.xml"), feed, "utf8");
+  if (publicOrigin) {
+    const sitemap = await buildStaticSitemap(publicOrigin);
+    if (Buffer.byteLength(sitemap) > MAX_CRAWLER_RESPONSE_BYTES) throw new Error("Generated sitemap exceeds the 2 MB crawler response limit.");
+    await writeFile(resolve(buildOutput, "sitemap.xml"), sitemap, "utf8");
+    await writeFile(resolve(buildOutput, "robots.txt"), `User-agent: *\nAllow: /\nSitemap: ${publicOrigin}/sitemap.xml\n`, "utf8");
+  }
+
+  const cacheRevisionEntries = await collectFiles(buildOutput);
+  const cacheRevision = computeServiceWorkerCacheRevision(
+    serviceWorker,
+    await Promise.all(cacheRevisionEntries.map(async (entry) => ({
+      path: entry,
+      content: await readFile(resolve(buildOutput, entry))
+    })))
   );
-});
-const serviceWorkerPath = resolve(output, "sw.js");
-const serviceWorker = await readFile(serviceWorkerPath, "utf8");
-const generatedShellAssets = generatedNotePages.map((asset) => `./${asset}`);
-if (generatedShellAssets.length) {
-  const generatedShellLiteral = generatedShellAssets.map((asset) => JSON.stringify(asset)).join(", ");
-  const shellMarker = "const APP_SHELL = [";
-  if (!serviceWorker.includes(shellMarker)) throw new Error("Pages service worker is missing its APP_SHELL declaration.");
-  const renderedServiceWorker = serviceWorker.replace(shellMarker, `${shellMarker}${generatedShellLiteral}, `);
-  if (renderedServiceWorker === serviceWorker) throw new Error("Pages note pages could not be added to the service-worker shell.");
-  await writeFile(serviceWorkerPath, renderedServiceWorker, "utf8");
-}
-await writeFile(resolve(output, ".nojekyll"), "", "utf8");
-if (publicOrigin) {
-  const indexPath = resolve(output, "index.html");
-  const index = await readFile(indexPath, "utf8");
-  const renderedIndex = renderOriginAwareIndex(index, publicOrigin);
-  if (Buffer.byteLength(renderedIndex) > MAX_STATIC_ASSET_BYTES) {
-    throw new Error(`origin-aware index exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit`);
+  const renderedCache = renderDeploymentServiceWorker(serviceWorker, cacheRevision);
+  if (renderedCache === serviceWorker) throw new Error("Pages service worker cache identity could not be deployment-scoped.");
+  await writeFile(serviceWorkerPath, renderedCache, "utf8");
+
+  const outputEntries = await collectFiles(buildOutput);
+  const manifestEntries = (await mapWithConcurrency(
+    outputEntries.filter((entry) => entry !== ".nojekyll" && entry !== ASSET_MANIFEST).sort(),
+    async (entry) => {
+      const content = await readFile(resolve(buildOutput, entry));
+      return {
+        path: entry,
+        bytes: content.byteLength,
+        sha256: createHash("sha256").update(content).digest("hex")
+      };
+    }
+  ));
+  const release = parseJsonWithUniqueKeys(await readFile(resolve(root, "version.json"), "utf8"), "version.json");
+  const assetManifest = {
+    format: "llm-field-notes/assets@1",
+    version: release.version,
+    files: manifestEntries
+  };
+  await writeFile(resolve(buildOutput, ASSET_MANIFEST), `${JSON.stringify(assetManifest, null, 2)}\n`, "utf8");
+  const finalOutputEntries = await collectFiles(buildOutput);
+  const expected = new Set([...PUBLIC_FILES, ...generatedNotePages, ".nojekyll", "feed.xml", ASSET_MANIFEST, ...(publicOrigin ? ["sitemap.xml"] : [])]);
+  for (const entry of finalOutputEntries) {
+    if (!expected.has(entry)) throw new Error(`unexpected file in Pages bundle: ${entry}`);
   }
-  await writeFile(indexPath, renderedIndex, "utf8");
-}
-const feed = await buildStaticFeed(publicOrigin);
-if (Buffer.byteLength(feed) > MAX_CRAWLER_RESPONSE_BYTES) throw new Error("Generated feed exceeds the 2 MB crawler response limit.");
-await writeFile(resolve(output, "feed.xml"), feed, "utf8");
-if (publicOrigin) {
-  const sitemap = await buildStaticSitemap(publicOrigin);
-  if (Buffer.byteLength(sitemap) > MAX_CRAWLER_RESPONSE_BYTES) throw new Error("Generated sitemap exceeds the 2 MB crawler response limit.");
-  await writeFile(resolve(output, "sitemap.xml"), sitemap, "utf8");
-  await writeFile(resolve(output, "robots.txt"), `User-agent: *\nAllow: /\nSitemap: ${publicOrigin}/sitemap.xml\n`, "utf8");
+  const outputSizes = await mapWithConcurrency(finalOutputEntries, async (entry) => (await stat(resolve(buildOutput, entry))).size);
+  const totalOutputBytes = outputSizes.reduce((total, size) => total + size, 0);
+  if (totalOutputBytes > MAX_PUBLIC_ASSET_BYTES) {
+    throw new Error(`Pages bundle exceeds the ${MAX_PUBLIC_ASSET_BYTES / (1024 * 1024)} MB aggregate asset limit.`);
+  }
+  return { generatedNotePages, fileCount: PUBLIC_FILES.length + generatedNotePages.length + 3 + (publicOrigin ? 1 : 0) };
 }
 
-async function collectFiles(directory, prefix = "") {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    const asset = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) files.push(...await collectFiles(resolve(directory, entry.name), asset));
-    else files.push(asset);
+async function publishPages() {
+  const previous = `${output}.previous-${process.pid}-${Date.now()}`;
+  let movedPrevious = false;
+  let published = false;
+  try {
+    try {
+      await stat(output);
+      await rm(previous, { recursive: true, force: true });
+      await rename(output, previous);
+      movedPrevious = true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await rename(buildOutput, output);
+    published = true;
+    if (movedPrevious) await rm(previous, { recursive: true, force: true });
+  } catch (error) {
+    if (published) await rm(output, { recursive: true, force: true }).catch(() => {});
+    if (movedPrevious) await rename(previous, output).catch(() => {});
+    throw error;
   }
-  return files;
 }
 
-const outputEntries = await collectFiles(output);
-const expected = new Set([...PUBLIC_FILES, ...generatedNotePages, ".nojekyll", "feed.xml", ...(publicOrigin ? ["sitemap.xml"] : [])]);
-for (const entry of outputEntries) {
-  if (!expected.has(entry)) throw new Error(`unexpected file in Pages bundle: ${entry}`);
+try {
+  const result = await buildPages();
+  await publishPages();
+  console.log(`Pages bundle ready: ${output} (${result.fileCount} files)`);
+} catch (error) {
+  await rm(buildOutput, { recursive: true, force: true }).catch(() => {});
+  throw error;
 }
-const outputSizes = await mapWithConcurrency(outputEntries, async (entry) => (await stat(resolve(output, entry))).size);
-const totalOutputBytes = outputSizes.reduce((total, size) => total + size, 0);
-if (totalOutputBytes > MAX_PUBLIC_ASSET_BYTES) {
-  throw new Error(`Pages bundle exceeds the ${MAX_PUBLIC_ASSET_BYTES / (1024 * 1024)} MB aggregate asset limit.`);
-}
-console.log(`Pages bundle ready: ${output} (${PUBLIC_FILES.length + generatedNotePages.length + 2 + (publicOrigin ? 1 : 0)} files)`);

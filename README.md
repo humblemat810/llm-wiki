@@ -12,6 +12,21 @@ The goal is not to hide behind a generated summary. It is to preserve the
 concepts, relations, confidence, source evidence, and revision history so a
 curious person can challenge the representation and improve it over time.
 
+Browse the [community artifacts](artifacts.html) for runnable starting points,
+or submit a small experiment, graph, benchmark, or failed attempt using the
+[artifact template](ARTIFACT_SUBMISSION.md).
+Each public artifact card includes a copy-paste command to try or inspect it
+from the repository root.
+The [sample graph export](examples/sample-graph.json) is a small, deterministic
+internal representation with a whole-graph integrity fingerprint; inspect,
+diff, health-check, or project it into JSON-LD without opening the browser
+first. The release smoke suite verifies its fingerprint, provenance, evidence
+grounding, and no-loss health gate before publication.
+
+The self-improvement walkthrough is also available as `npm run learning:loop`.
+The [knowledge-graph note](notes/knowledge-graphs.md) explains the same loop
+from document to reviewed, reusable representation.
+
 ## Try it in 60 seconds
 
 The fastest path to the useful loop is:
@@ -27,13 +42,17 @@ path stays local in the browser; no provider or API key is required.
 
 ## Current workbench
 
-The browser prototype supports:
+The browser workbench supports:
 
 - Pasting a document or loading a local `.txt` / `.md` file.
 - Building the graph from the document editor with `Ctrl+Enter` or
   `Cmd+Enter`.
 - Trying a one-click local sample graph from the landing page so the full
   ingest, inspect, and projection loop is visible immediately.
+- Asking before adding that sample to a non-empty workspace, while keeping
+  first-run onboarding one-click and the existing graph undoable.
+- Asking before the in-workbench sample control replaces an unbuilt document
+  draft or queued files, so exploratory notes are not silently discarded.
 - Launching that sample walkthrough directly from an installed app shortcut.
 - Loading and ingesting a batch of local text/Markdown documents in one undoable
   mutation.
@@ -65,6 +84,37 @@ The browser prototype supports:
   ignoring numeric-only tokens to reduce low-value graph noise.
 - Making offline shell fallback query-tolerant so cache-busted static assets
   still resolve to the installed application shell.
+- Preserving online 4xx navigation responses so a deployed branded 404 page is
+  not replaced by the cached workbench shell.
+- Rejecting truncated or unreadable service-worker shell responses before they
+  can poison the offline cache.
+- Showing an explicit offline status so users know the local graph and cached
+  wiki remain usable while configured remote extraction is unavailable.
+- Exposing accessible semantics for the visual and interactive workbench
+  surfaces, so the learning map remains useful with assistive technology.
+- Failing configured remote extraction fast while offline, so users can
+  reconnect or clear the endpoint for the local extractor instead of waiting
+  through network retries.
+- Bounding browser operation diagnostics before they reach batch, vault, or
+  rebuild failure summaries.
+- Bounding diagnostics across export, recovery, and global runtime-error
+  surfaces so an unusually large provider or parser exception cannot flood
+  the workbench UI.
+- Warning before closing a tab when a populated graph is only tab-scoped or
+  storage durability has degraded, while leaving durable workspaces quiet.
+- Warning before closing a tab when a document title, source URI, or document
+  draft has not been successfully built yet, while clearing that warning after
+  the draft is committed.
+- Recovering a bounded unfinished editor draft from app-local storage after a
+  reload or browser eviction, restoring it only into an empty editor and
+  clearing the recovery copy after a successful build.
+- Warning before closing a tab when selected batch files remain queued in
+  memory, since browser `File` objects cannot be restored after reload.
+- Exposing an explicit process/retry action for batch files retained in the
+  in-memory queue.
+- Rejecting opaque or cross-origin final responses after shell fetch
+  redirects, so a service-worker cache cannot be poisoned by an external
+  redirect.
 - Coordinating service-worker upgrades with an explicit reload action so an
   open workbench is not mixed with assets from two application releases.
 - Optionally sending documents to a configured same-origin extraction endpoint
@@ -83,6 +133,9 @@ The browser prototype supports:
   labels in the reference extractor.
 - Canceling an in-flight remote extraction from the workbench without
   affecting local extraction or graph imports.
+- Recording client-aborted server extraction requests as privacy-safe
+  cancellation telemetry, so disconnects can be distinguished from provider
+  failures during operations.
 - Locking competing build, sample, and file-selection actions while a build is
   in flight, preventing duplicate extraction and stale queue replacement.
 - Canceling a multi-file build between extraction requests while preserving
@@ -93,6 +146,12 @@ The browser prototype supports:
   serialized bound, so providers never receive an undisclosed partial context.
 - Rejecting oversized browser document files before reading them, with a 10 MB
   JSON import safety limit and a 50 MB Obsidian ZIP limit.
+- Requiring Obsidian ZIP parsers to receive actual byte buffers or views before
+  applying archive limits, preventing array-like coercion from allocating first.
+- Requiring binary browser downloads to receive actual byte buffers or views
+  before applying export limits.
+- Rejecting generated ZIP filenames that cannot fit the archive format's
+  16-bit filename header instead of emitting a corrupt vault.
 - Bounding batch ingestion to 100 files and 10 MB of aggregate text so a
   selection cannot overwhelm browser memory.
 - Merging new documents into the existing graph instead of replacing it.
@@ -103,9 +162,59 @@ The browser prototype supports:
 - Rejecting feedback imports above the published example bound instead of
   silently dropping the tail of a human decision dataset.
 - Re-ingesting later documents without silently overriding dismissed knowledge.
+- Rebuilding all saved sources through the current extractor and reviewed
+  feedback in one cancelable, conflict-checked operation, so new learning can
+  improve the existing representation instead of only future documents; the
+  action refuses redacted, incomplete, or ambiguous-source graphs before
+  sending source text to an extractor and snapshots fresh reviewed guidance
+  before replacing any source. Provider failure diagnostics are bounded and
+  normalized before they reach the status surface.
+- Surfacing an **apply learning to saved sources** action directly in graph
+  health whenever reusable feedback and saved documents coexist, so the
+  self-improvement loop does not depend on discovering a separate control.
+- Letting source review candidates be marked reviewed today from the source
+  inspector in one guarded, undoable revision, while leaving source quality
+  selection explicit; repeating the action on the same UTC day is idempotent.
 - Canceling a remote source replacement before it can mutate the graph, while
   preserving the existing source if extraction is interrupted.
 - Normalizing imported graph JSON so duplicate IDs cannot create ambiguous state.
+- Rejecting duplicate JSON object keys and excessively nested JSON before
+  request, persistence, browser-import, projection, or verification code
+  interprets the payload.
+- Applying that same duplicate-key and nesting policy to remote extractor
+  responses, so provider output cannot use parser ambiguity to change the
+  normalized graph.
+- Applying the same policy to durable pending-write metadata, so IndexedDB
+  hydration cannot interpret ambiguous local synchronization markers or
+  silently replace a newer synchronous mirror with stale durable state;
+  malformed marker entries also fail closed.
+- Capping graph and curriculum search queries before repeated browser scans,
+  keeping large pasted queries from turning normal filtering into avoidable
+  work.
+- Slicing local text, JSON, and Obsidian files to their bounded byte limit
+  before reading, so malformed file-like inputs cannot allocate oversized
+  browser buffers before validation.
+- Rejecting malformed streamed response results and array-buffer values before
+  they can bypass browser or remote extractor response limits, with the same
+  byte-data contract enforced in both readers.
+- Rejecting truncated browser and remote response bodies when their received
+  bytes do not match a declared `Content-Length`.
+- Rejecting malformed service-worker shell stream results before a broken
+  response can bypass its byte budget or stall offline-cache fallback, including
+  forged byte-length objects that are not actual byte views.
+- Building the static Pages bundle in a private staging directory and
+  publishing it with a final swap, so a late build or manifest failure cannot
+  leave `dist/` half-written.
+- Applying duplicate-key-safe JSON parsing to release, Pages, artifact, and
+  graph-health command boundaries, keeping standalone verification consistent
+  with the browser and server contracts.
+- Rejecting opaque or cross-origin redirect responses for release metadata and
+  learning-note exports, so a static asset gateway cannot inject remote content
+  into the workbench or an Obsidian projection.
+- Checking the graph fingerprint again after asynchronous learning-note
+  collection, so Obsidian vault downloads cannot mix revisions.
+- Bounding total learning-note collection time for vault exports, while
+  retaining per-note failure diagnostics for partial but explicit results.
 - Collapsing duplicate imported and extractor records deterministically so
   reordering equivalent payloads cannot change graph fingerprints or learning
   identity.
@@ -116,6 +225,8 @@ The browser prototype supports:
   disclosing older source records omitted by that bound.
 - Reporting document-text and evidence-text clipping separately from
   collection overflow, so bounded imports cannot hide lost source material.
+- Reporting clipped document titles separately, so malformed graph metadata
+  cannot be mistaken for an untouched source projection.
 - Disclosing contradictory review statuses when duplicate imported concept or
   relation records are merged, instead of presenting the result as a clean
   duplicate.
@@ -124,6 +235,8 @@ The browser prototype supports:
 - Explaining text-level import clipping directly in the live health strip so
   recovery actions are understandable without opening a health export.
 - Enforcing document-size limits inside the extractor, not only in the browser UI.
+- Rejecting malformed or truncated HTTP extraction bodies when their declared
+  `Content-Length` does not match the bytes received.
 - Canonicalizing labels and titles so external text cannot break projections.
 - Bounding graph collections to keep imports and model responses within a
   predictable browser resource envelope.
@@ -169,6 +282,8 @@ The browser prototype supports:
 - Undoing the last three local graph mutations with bounded snapshot history.
 - Preserving malformed local graph data as a downloadable recovery snapshot
   instead of silently discarding it.
+- Offering recovery downloads directly from the runtime error panel, so a
+  rendering failure can be backed up before the user reloads the workbench.
 - Preserving malformed undo-history data as a separate downloadable recovery
   snapshot instead of silently losing prior revisions.
 - Preserving over-capacity undo-history data in that recovery snapshot before
@@ -195,6 +310,8 @@ The browser prototype supports:
 - Surfacing asynchronous durable-storage failures in the privacy note and graph
   health strip so users know when to export a backup, with a direct backup
   action available from the warning.
+- Providing the same direct backup action when browser storage is entirely
+  unavailable and the graph exists only for the current tab.
 - Optimistic version and content-fingerprint checks for asynchronous batches,
   graph imports, backup restores, and Obsidian feedback so another browser tab
   cannot silently overwrite a divergent same-version graph.
@@ -205,6 +322,9 @@ The browser prototype supports:
   accidentally disable the storage bound.
 - Persisted graph JSON is bounded by both character count and UTF-8 byte size,
   so Unicode-heavy state cannot bypass the storage safety budget.
+- The browser storage adapter applies the same UTF-8 byte ceiling during
+  IndexedDB/localStorage hydration and cross-tab synchronization, before a
+  large Unicode value can enter the in-memory mirror.
 - Refreshing the workbench when another tab changes the saved graph, with a
   visible synchronization notice.
 - Repairing stale cross-tab graph events through the same version and content
@@ -213,6 +333,11 @@ The browser prototype supports:
 - Preserving the latest graph when undo-history storage fills first, with a
   safe degraded write that discards only history.
 - Showing a health warning when a save succeeds with reduced undo history.
+- Including the reduced-undo-history warning in the immediate mutation status,
+  so a successful graph write cannot look fully recoverable until the next
+  health-strip render.
+- Providing the same direct backup action for reduced undo history that is
+  available for durable-storage failures.
 - Restoring a full backup even when its history cannot fit, while preserving
   the restored graph and reporting the reduced history mode; browser backup
   restores also retain the pre-restore graph as the newest undo snapshot.
@@ -297,7 +422,7 @@ The browser prototype supports:
   from new extraction guidance until a human reviews it again.
 - Reporting active extractor guidance counts separately from stale learning
   memory, so health metrics describe what the next extraction can actually use.
-- Applying the same fresh-only guidance rule to stale accepted or rejected
+- Applying the same fresh-only guidance and context-stats rule by default to stale accepted or rejected
   concepts and relations, not only to detached learning examples.
 - Requiring a valid review timestamp before any reusable memory or reviewed
   graph item can steer new extraction.
@@ -469,6 +594,11 @@ tie-break rather than file or dataset order.
   for offline reading.
 - Sharing the public wiki entry point through the native share sheet or a
   clipboard fallback; local graph data is never placed in the shared URL.
+- Keeping note links, Markdown projections, and contribution templates
+  copyable when Clipboard API permissions are unavailable by using a bounded
+  temporary-textarea fallback.
+- Keeping source-bearing export controls associated with a persistent privacy
+  warning, while redacted actions remain the recommended public-sharing path.
 - Copying a direct deep link for each learning note from its map card.
 - Publishing a dedicated 1200×630 share card for richer link previews on social
   platforms and team chat.
@@ -496,11 +626,14 @@ tie-break rather than file or dataset order.
   individual exported notes retain the same projection identity. Concept,
   relation, and source metadata notes round-trip through ZIP imports; malformed
   exported notes fail the import closed rather than being silently skipped.
+- Smoke tests parse generated editable concept and relation notes through the
+  same importer used for user feedback, keeping projection and import contracts
+  coupled.
 - Confirming destructive graph and full-backup replacement imports while
   retaining the previous graph through the undo path.
 - Rejecting oversized Obsidian feedback notes before frontmatter parsing.
 
-The extractor is deliberately transparent and provider-agnostic. A future
+The extractor is deliberately transparent and provider-agnostic. A
 model-backed extractor can replace the heuristic while keeping the graph
 schema, feedback loop, and projections stable.
 
@@ -525,11 +658,15 @@ historical evaluation for analysis.
 To compare two graph exports or full backups outside the browser:
 
 ```bash
+node experiments/verify-graph.mjs graph.json
 node experiments/diff-graphs.mjs before.json after.json
+node experiments/verify-diff.mjs before.json after.json diff.json
 ```
 
-The same comparison is available as `npm run diff -- before.json after.json`;
-graph and backup inputs must declare compatible versioned contracts.
+The verifier checks the normalized graph fingerprint before downstream tools
+consume an export. The same comparison is available as
+`npm run diff -- before.json after.json`; graph and backup inputs must declare
+compatible versioned contracts.
 Fingerprint-protected backups are verified before either graph tool consumes
 them.
 
@@ -584,8 +721,12 @@ existing artifact against the normalized graph and exits non-zero if its
 content, fingerprint, or redaction state diverges.
 
 Before publishing a release, run `npm run release:check` to verify that the
-package version, public release manifest, changelog heading, and every shared
-public/offline asset agree and are non-empty.
+package version, non-future public release date, changelog heading, every
+shared public/offline asset, and the public artifact gallery agree and are
+non-empty. The shorter `npm run artifacts:check` command validates only the
+gallery cards, structured discovery metadata, and downloadable targets.
+`npm run build:pages` runs the same artifact gate before generating a
+publishable static bundle.
 
 Model-backed adapters should call `normalizeExtraction()` before merge; this is
 the stable boundary for partial or provider-specific extraction responses.
@@ -646,15 +787,26 @@ falls back to `127.0.0.1`, while a non-empty host is passed to Node for
 normal hostname validation. The reference endpoint requires JSON, validates
 the feedback format,
 sets no-store response behavior, and emits baseline security headers.
+Batch ingestion keeps files that fail with transient remote network, upstream,
+or timeout errors in the queue so they can be retried after the provider or
+connection recovers; deterministic validation failures are reported without
+being retried indefinitely.
 Provider concurrency is bounded to 8 in-flight extractions by default; configure
 `EXTRACTOR_CONCURRENCY` to a value from 1 to 1,024 when provider capacity
 requires a different ceiling. Excess work receives HTTP 503 with
 `Retry-After: 1`.
+Transient provider failures return HTTP 502 with `Retry-After: 1`, while
+provider timeouts return HTTP 504 with `Retry-After: 5`. Malformed, oversized,
+or schema-incompatible provider output fails closed without a retry hint;
+repeating a deterministic contract violation will not repair it.
 Set `EXTRACTOR_AUTH_TOKEN` to require a bearer token for extraction requests.
 Loopback development keeps extraction open when it is unset; non-loopback
 server hosts fail extraction closed with HTTP 503 until a token is configured.
 The token is compared constant-time and is never logged. Public deployments
 should still use TLS, gateway authentication, and a shared rate limiter.
+The browser endpoint setting accepts a same-origin path or URL without
+credentials, query strings, or fragments; keep authentication in the server
+boundary rather than in the endpoint URL.
 Browser deployments that use a gateway session can rely on same-origin cookies;
 the app never stores or exposes provider credentials.
 Set `METRICS_AUTH_TOKEN` independently when `/metrics` should require a bearer
@@ -670,17 +822,26 @@ HTTP development remains free of browser-persistent HSTS state.
 When configured, the server also emits absolute canonical, feed, and social
 image URLs in the HTML shell so shared links remain previewable outside the
 deployment origin.
+Every application response carries a bounded request ID, and structured
+application-error logs reuse that ID without recording document text, evidence,
+or credentials, making deployment incidents correlatable without leaking graph
+content.
 Feed entries use the learning-note headings rather than opaque filenames, while
 enforcing the same static-root containment boundary as public file serving.
 These dynamic distribution assets use ETags and conditional `304` responses;
 they also serve standards-compliant `HEAD` responses. The feature remains
 disabled when no trusted public origin is configured.
-It exposes `/healthz` for process liveness and `/readyz` for app readiness
+If `PUBLIC_ORIGIN` is set, it must be an absolute credential-free `http://` or
+`https://` origin with no query string or fragment. The Node server and Pages
+builder fail closed on invalid values instead of silently publishing incomplete
+canonical or crawler metadata.
+It exposes `/healthz` for process liveness and `/readyz` for app readiness;
+both include the package version and sanitized source revision
 (both support `GET` and bodyless `HEAD` probes);
 the latter verifies that the static shell is available and returns 503 while
 the process is draining after shutdown begins, so orchestrators stop routing
 new traffic before the server exits. Both health endpoints report the package
-version, and `/metrics` exposes a version-labelled build-info gauge alongside
+version, and `/metrics` exposes version- and revision-labelled build-info gauges alongside
 privacy-safe Prometheus text counters for total requests, extraction outcomes,
 authentication failures, rate-limited and concurrency-limited requests, and
 in-flight provider work, and the configured extractor concurrency ceiling
@@ -702,8 +863,11 @@ Standalone shutdown treats that timed-out drain as an unsuccessful exit so
 orchestrators can distinguish a clean stop from forced provider abandonment.
 Every server response includes an `X-Request-ID` UUID for operational
 correlation; the browser adapter preserves extraction IDs in remote errors.
-The standalone server logs structured extraction request ID, status, duration,
-route, document character count, and feedback count without document content.
+The standalone server logs a structured startup event with the serving version
+and port, plus structured extraction request ID, status, duration, route,
+document character count, and feedback count without document content. Shutdown
+also emits structured draining, stopped, and forced-stop-timeout events so
+orchestrators can distinguish a clean provider drain from an abandoned one.
 
 Quick contract smoke test:
 
@@ -722,18 +886,22 @@ at most 500 feedback objects, and a 500,000-character serialized feedback
 context limit; stale client windows are removed and the limiter has a
 10,000-key cap. Use a shared proxy limiter for multi-instance deployments.
 Static assets include ETags and return conditional `304` responses when
-unchanged.
+unchanged; the Node server caches those hashes per allowed asset using file
+metadata and transformation inputs, with a bounded cache that invalidates on
+deployment or asset changes.
 Invalid environment or embedded-server values fall back to the 60/minute
 default. Declared request bodies over 2 MB are rejected before buffering.
-The HTTP server also bounds header, request, and keep-alive lifetimes, and
-stops buffering immediately when an uploading client disconnects.
+The HTTP server also bounds header, request, and keep-alive lifetimes, stops
+buffering immediately when an uploading client disconnects, and answers
+malformed HTTP parser input with a bounded generic `400 Bad Request` response
+while logging only a sanitized protocol diagnostic.
 Obsidian vault imports validate ZIP paths, duplicate entries, local/central
 filename agreement, and file checksums before applying feedback.
 
 The reference server can also run in a container:
 
 ```bash
-docker build -t llm-field-notes .
+docker build --build-arg VCS_REF="$(git rev-parse HEAD)" -t llm-field-notes .
 docker run --rm --read-only --tmpfs /tmp --cap-drop=ALL \
   --security-opt=no-new-privileges -p 8000:8000 llm-field-notes
 ```
@@ -754,14 +922,18 @@ requests during SIGINT/SIGTERM shutdown. Programmatic hosts can call the
 idempotent `server.beginDrain()` before `server.close()` and await
 `server.waitForIdle()` (or pass a bounded `timeoutMs`) to use the same
 lifecycle behavior.
-The base image is digest-pinned for reproducible builds.
+The base image is digest-pinned for reproducible builds, and the image carries
+standard OCI title, description, version, source-revision, and license labels
+for registry and incident-response tooling. CI passes its exact commit SHA as
+the source revision, and the runtime exposes the same sanitized identity in
+startup logs and Prometheus build metadata.
 The server does not require a writable application filesystem, so production
 containers should use a read-only root filesystem, a bounded temporary
 filesystem, dropped Linux capabilities, and `no-new-privileges` as shown above.
 The Docker context excludes environment files, local exports, development
-tests and experiment modules, build/release-only scripts, common
-backup/database artifacts, and private-key material; it retains only the
-runtime public-asset contract needed by the server.
+tests, build/release-only scripts, common backup/database artifacts, and
+private-key material; it retains the dependency-free experiment sources that
+are part of the runtime public-asset contract.
 
 Run the dependency-free smoke checks with:
 
@@ -775,7 +947,8 @@ CI also builds the Docker image to catch deployment drift.
 CI starts that image, probes `/readyz`, and waits for Docker’s health status to
 become `healthy` so the runtime and its own health check agree. Superseded
 verification runs are canceled and each matrix job has a 20-minute timeout, so
-stalled builds cannot consume CI capacity indefinitely.
+stalled builds cannot consume CI capacity indefinitely. The standalone startup
+smoke also asserts the structured ready, draining, and stopped lifecycle events.
 GitHub Actions in the verification and Pages workflows are pinned to immutable
 commit references; Dependabot tracks workflow, npm, and Docker base-image
 updates without making releases
@@ -798,10 +971,12 @@ those files as feedback updates rather than new source documents.
 - `index.html` — the public-facing wiki and knowledge workbench
 - `styles.css` — responsive visual system and graph workspace
 - `app.js` — browser UI, selection, feedback loop, search, filters, and exports
+- `curriculum.js` — shared lesson metadata and note detail prompts
 - `graph-core.js` — pure graph schema, extraction, migration, merge, and provenance logic
 - `graph-store.js` — transactional local persistence, history, undo, and restore
 - `CHANGELOG.md` — user-visible release history and production hardening notes
 - `extractor-adapter.js` — provider-neutral remote extraction boundary
+- `rebuild-adapter.js` — bounded, cancelable saved-source rebuild orchestration
 - `projection-adapter.js` — Obsidian feedback parser and graph update boundary
 - `storage-adapter.js` — durable IndexedDB/localStorage boundary with an in-memory fallback
 - `notes/` — versioned Markdown learning pages and curriculum index
@@ -826,6 +1001,7 @@ those files as feedback updates rather than new source documents.
 - `schema/health.schema.json` — versioned privacy-safe graph health report
 - `schema/vault-manifest.schema.json` — versioned Obsidian projection identity
 - `schema/jsonld.schema.json` — versioned JSON-LD projection contract
+- `schema/learning-loop.schema.json` — versioned learning-loop artifact output
 - `jsonld-projection.js` — reusable full and redacted JSON-LD projection
 - `SECURITY.md` — data boundary and vulnerability-reporting guidance
 - `CODE_OF_CONDUCT.md` — community participation expectations
@@ -885,17 +1061,27 @@ those files as feedback updates rather than new source documents.
 
 This is a static site: GitHub Pages, Cloudflare Pages, Netlify, or any static
 file host can serve it. HTTPS is recommended so the service worker and browser
-file APIs behave consistently. The app is useful without a backend; a future
-backend is optional, and the included same-origin server can be replaced with
+file APIs behave consistently. The app is useful without a backend; a backend
+is optional, and the included same-origin server can be replaced with
 a model-backed extraction implementation behind the same graph contract.
 - GitHub Pages deployment is ready through `.github/workflows/pages.yml`. It
   publishes the generated `dist/` bundle rather than the repository root, so
   server code, tests, container files, and local project metadata stay out of
   the public artifact.
+- The published bundle includes a script-free branded `404.html` recovery page
+  so stale shared links lead back to the workbench and artifact gallery; when
+  `PUBLIC_ORIGIN` is configured, its links are rewritten for nested project
+  Pages paths.
 - To inspect the exact Pages artifact locally, run `npm run build:pages` and
   serve `dist/` over HTTP.
 - Or run `npm run serve:pages` to rebuild and serve that exact artifact on
   `http://localhost:8000`.
+- Every Pages build includes `asset-manifest.json`, a versioned inventory of
+  published files with byte lengths and SHA-256 digests for mirrors and release
+  checks.
+- Verify an existing bundle independently with `npm run verify:pages -- dist`;
+  verification also proves that the service-worker cache revision matches the
+  complete published bundle, including generated feeds and note pages.
 - The Pages artifact also generates `feed.xml` from the published learning
   notes. Set the build environment variable `PUBLIC_ORIGIN` to the final
   HTTPS origin to additionally generate absolute `sitemap.xml` URLs and a
@@ -931,7 +1117,6 @@ a model-backed extraction implementation behind the same graph contract.
 ## Roadmap
 
 - Add notebooks for the experiments in the 30-day path.
-- Add a small gallery of community-built artifacts.
 - Add translations without creating separate knowledge silos.
 
 ## License

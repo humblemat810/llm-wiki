@@ -1,4 +1,4 @@
-import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_FEEDBACK_LABEL_CHARS, MAX_ID_CHARS, normalizeExtractionForDocument, normalizeSourceUri } from "./graph-core.js";
+import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_ALIASES, MAX_DOCUMENT_CHARS, MAX_DOCUMENT_TITLE_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_FEEDBACK_LABEL_CHARS, MAX_ID_CHARS, normalizeExtractionForDocument, normalizeSourceUri, parseJsonWithUniqueKeys, relationSemanticKey, slugify } from "./graph-core.js";
 
 export const MAX_FEEDBACK_CHARS = 500000;
 export const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -6,6 +6,18 @@ export const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_MAX_RETRIES = 1;
 export const DEFAULT_RETRY_DELAY_MS = 250;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const FEEDBACK_HINT_KEYS = new Set([
+  "kind",
+  "id",
+  "label",
+  "aliases",
+  "source",
+  "sourceLabel",
+  "target",
+  "targetLabel",
+  "status"
+]);
+const DOCUMENT_KEYS = new Set(["title", "uri", "text"]);
 
 export class ExtractorAdapterError extends Error {
   constructor(message, { code = "EXTRACTOR_ERROR", cause } = {}) {
@@ -17,6 +29,7 @@ export class ExtractorAdapterError extends Error {
 
 function compactFeedbackHint(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (Object.keys(value).some((key) => !FEEDBACK_HINT_KEYS.has(key))) return null;
   if (!["concept", "relation"].includes(value.kind) || !["accepted", "rejected"].includes(value.status)) return null;
   if (typeof value.id !== "string" || !value.id.trim() || value.id.length > MAX_ID_CHARS) return null;
   for (const key of ["label", "sourceLabel", "targetLabel"]) {
@@ -27,7 +40,7 @@ function compactFeedbackHint(value) {
   }
   if (value.aliases !== undefined && (
     !Array.isArray(value.aliases)
-    || value.aliases.length > 20
+    || value.aliases.length > MAX_ALIASES
     || new Set(value.aliases).size !== value.aliases.length
     || value.aliases.some((alias) => typeof alias !== "string" || alias.length > MAX_FEEDBACK_LABEL_CHARS)
   )) return null;
@@ -44,15 +57,35 @@ function compactFeedbackHint(value) {
 }
 
 function boundFeedback(value) {
-  if (!Array.isArray(value)) return [];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new ExtractorAdapterError("Reviewed feedback must be an array.", { code: "INVALID_FEEDBACK" });
+  }
   if (value.length > MAX_FEEDBACK_EXAMPLES) {
     throw new ExtractorAdapterError(`Reviewed feedback exceeds the ${MAX_FEEDBACK_EXAMPLES} example limit.`, { code: "FEEDBACK_TOO_LARGE" });
   }
   const output = [];
+  const statuses = new Map();
   let size = 2;
   for (const rawItem of value) {
     const item = compactFeedbackHint(rawItem);
-    if (!item) continue;
+    if (!item) {
+      throw new ExtractorAdapterError("Reviewed feedback contains an invalid hint.", { code: "INVALID_FEEDBACK" });
+    }
+    const keys = item.kind === "concept"
+      ? [`concept|${item.id}`]
+      : [
+        `relation-id|${item.id}`,
+        `relation-semantic|${relationSemanticKey(
+          slugify(item.sourceLabel || item.source),
+          slugify(item.targetLabel || item.target),
+          item.label
+        )}`
+      ];
+    if (keys.some((key) => statuses.has(key) && statuses.get(key) !== item.status)) {
+      throw new ExtractorAdapterError("Reviewed feedback contains contradictory decisions for the same concept or relation.", { code: "CONTRADICTORY_FEEDBACK" });
+    }
+    keys.forEach((key) => statuses.set(key, item.status));
     let serialized;
     try {
       serialized = JSON.stringify(item);
@@ -87,6 +120,23 @@ function validateEndpoint(endpoint) {
 
 function responseTooLarge() {
   return new ExtractorAdapterError("Extractor response exceeds the 10 MB safety limit.", { code: "RESPONSE_TOO_LARGE" });
+}
+
+function responseLengthMismatch() {
+  return new ExtractorAdapterError("Extractor response byte length does not match Content-Length.", { code: "INVALID_RESPONSE" });
+}
+
+function asByteView(value) {
+  if (!ArrayBuffer.isView(value)
+    || !Number.isSafeInteger(value.byteLength)
+    || value.byteLength < 0
+    || !Number.isSafeInteger(value.byteOffset)
+    || value.byteOffset < 0) return null;
+  try {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  } catch {
+    return null;
+  }
 }
 
 function byteLength(value) {
@@ -163,13 +213,25 @@ async function readBoundedResponse(response, signal) {
         if (signal?.aborted) throw Object.assign(new Error("Extractor response reading was aborted."), { name: "AbortError" });
         const result = await readChunk();
         if (signal?.aborted) throw Object.assign(new Error("Extractor response reading was aborted."), { name: "AbortError" });
+        if (!result
+          || typeof result !== "object"
+          || typeof result.done !== "boolean"
+          || (result.done && result.value !== undefined)) {
+          cancelReader();
+          throw new ExtractorAdapterError("Extractor response contains an invalid stream result.", { code: "INVALID_RESPONSE" });
+        }
         if (result.done) break;
-        size += result.value.byteLength;
+        const chunk = asByteView(result.value);
+        if (!chunk) {
+          cancelReader();
+          throw new ExtractorAdapterError("Extractor response contains an invalid byte chunk.", { code: "INVALID_RESPONSE" });
+        }
+        size += chunk.byteLength;
         if (size > MAX_RESPONSE_BYTES) {
           cancelReader();
           throw responseTooLarge();
         }
-        chunks.push(result.value);
+        chunks.push(chunk);
       }
     } finally {
       signal?.removeEventListener?.("abort", abortReader);
@@ -184,7 +246,8 @@ async function readBoundedResponse(response, signal) {
       bytes.set(chunk, offset);
       offset += chunk.byteLength;
     });
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (Number.isFinite(declaredLength) && size !== declaredLength) throw responseLengthMismatch();
+    return parseJsonWithUniqueKeys(new TextDecoder("utf-8", { fatal: true }).decode(bytes), "Extractor response");
   }
   if (!Number.isFinite(declaredLength)) {
     throw responseTooLarge();
@@ -202,12 +265,21 @@ async function readBoundedResponse(response, signal) {
       })
       : null;
     try {
-      const rawBytes = abortPromise
+        const rawBytes = abortPromise
         ? await Promise.race([response.arrayBuffer(), abortPromise])
         : await response.arrayBuffer();
-      const bytes = new Uint8Array(rawBytes);
+      const bytes = rawBytes instanceof ArrayBuffer
+        ? new Uint8Array(rawBytes)
+        : asByteView(rawBytes);
+      if (!bytes) {
+        throw new ExtractorAdapterError("Extractor response does not contain byte data.", { code: "INVALID_RESPONSE" });
+      }
+      if (!Number.isSafeInteger(bytes.byteLength) || bytes.byteLength < 0) {
+        throw new ExtractorAdapterError("Extractor response contains an invalid byte length.", { code: "INVALID_RESPONSE" });
+      }
       if (bytes.byteLength > MAX_RESPONSE_BYTES) throw responseTooLarge();
-      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      if (Number.isFinite(declaredLength) && bytes.byteLength !== declaredLength) throw responseLengthMismatch();
+      return parseJsonWithUniqueKeys(new TextDecoder("utf-8", { fatal: true }).decode(bytes), "Extractor response");
     } finally {
       if (abortHandler) signal.removeEventListener("abort", abortHandler);
     }
@@ -240,9 +312,13 @@ export function createRemoteExtractor({
   const retryCount = Number(maxRetries);
   const retryDelay = Number(retryDelayMs);
   return async function extract(document, { feedback = [], signal } = {}) {
+    if (!document || typeof document !== "object" || Array.isArray(document)
+      || Object.keys(document).some((key) => !DOCUMENT_KEYS.has(key))) {
+      throw new ExtractorAdapterError("Document contains fields outside the closed request contract.", { code: "INVALID_DOCUMENT" });
+    }
     const rawTitle = document?.title;
-    if (rawTitle !== undefined && rawTitle !== null && (typeof rawTitle !== "string" || rawTitle.trim().length > 200)) {
-      throw new ExtractorAdapterError("Document title must be a string no longer than 200 characters.", { code: "INVALID_DOCUMENT" });
+    if (rawTitle !== undefined && rawTitle !== null && (typeof rawTitle !== "string" || rawTitle.trim().length > MAX_DOCUMENT_TITLE_CHARS)) {
+      throw new ExtractorAdapterError(`Document title must be a string no longer than ${MAX_DOCUMENT_TITLE_CHARS} characters.`, { code: "INVALID_DOCUMENT" });
     }
     const title = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle.trim() : "Untitled document";
     const text = typeof document?.text === "string" ? document.text.trim() : "";
@@ -256,8 +332,18 @@ export function createRemoteExtractor({
     if (text.length > MAX_DOCUMENT_CHARS) throw new ExtractorAdapterError("Document exceeds the local extraction size limit.", { code: "DOCUMENT_TOO_LARGE" });
     if (signal?.aborted) throw new ExtractorAdapterError("Extractor request was canceled.", { code: "CANCELED" });
     const controller = new AbortController();
-    const abortExternal = () => controller.abort();
+    let rejectExternalAbort;
+    const externalAbortPromise = signal
+      ? new Promise((_, reject) => {
+        rejectExternalAbort = reject;
+      })
+      : null;
+    const abortExternal = () => {
+      controller.abort();
+      rejectExternalAbort?.(new ExtractorAdapterError("Extractor request was canceled.", { code: "CANCELED" }));
+    };
     signal?.addEventListener?.("abort", abortExternal, { once: true });
+    if (signal?.aborted) abortExternal();
     let timeout;
     const timeoutPromise = new Promise((_, reject) => {
       timeout = setTimeout(() => {
@@ -308,18 +394,27 @@ export function createRemoteExtractor({
       let attempt = 0;
       while (true) {
         try {
-          response = await Promise.race([
-            fetchImpl(url, {
+          const fetchAttempt = Promise.resolve().then(() => fetchImpl(url, {
               method: "POST",
               credentials: "same-origin",
               headers: { ...headers, "content-type": "application/json", accept: "application/json" },
               body: requestBody,
               signal: controller.signal
-            }),
-            timeoutPromise
+            })).then((candidate) => {
+              if (!candidate || typeof candidate !== "object" || typeof candidate.ok !== "boolean"
+                || !Number.isInteger(Number(candidate.status)) || Number(candidate.status) < 100 || Number(candidate.status) > 599) {
+                throw new ExtractorAdapterError("Extractor returned an invalid response object.", { code: "INVALID_RESPONSE" });
+              }
+              if (controller.signal.aborted) void cancelResponseBody(candidate);
+              return candidate;
+            });
+          response = await Promise.race([
+            fetchAttempt,
+            timeoutPromise,
+            ...(externalAbortPromise ? [externalAbortPromise] : [])
           ]);
         } catch (error) {
-          if (signal?.aborted || controller.signal.aborted || attempt >= retryCount) throw error;
+          if (signal?.aborted || controller.signal.aborted || attempt >= retryCount || error?.code === "INVALID_RESPONSE") throw error;
           attempt += 1;
           await waitBeforeRetry();
           continue;
@@ -338,12 +433,14 @@ export function createRemoteExtractor({
         throw new ExtractorAdapterError("Extractor request timed out.", { code: "TIMEOUT" });
       }
       if (!response.ok) {
+        await cancelResponseBody(response);
         const requestId = response.headers?.get?.("x-request-id");
         throw new ExtractorAdapterError(`Extractor returned HTTP ${response.status}.${requestId ? ` Request ID: ${requestId}.` : ""}`, { code: "REMOTE_ERROR" });
       }
       const responseContentType = response.headers?.get?.("content-type");
       const responseMediaType = responseContentType?.split(";", 1)[0].trim().toLowerCase();
       if (responseMediaType !== "application/json") {
+        await cancelResponseBody(response);
         throw new ExtractorAdapterError("Extractor returned a non-JSON response.", { code: "INVALID_RESPONSE" });
       }
       let payload;
@@ -382,11 +479,15 @@ export function createRemoteExtractor({
         throw new ExtractorAdapterError("Extractor returned an incompatible extraction graph schema.", { code: "INVALID_RESPONSE" });
       }
       try {
-        return normalizeExtractionForDocument(extraction, { title, text, uri });
+        return normalizeExtractionForDocument(extraction, { title, text, uri, feedback });
       } catch (cause) {
         if ([
           "EXTRACTION_NODES_TOO_LARGE",
           "EXTRACTION_EDGES_TOO_LARGE",
+          "EXTRACTION_NODES_SHAPE",
+          "EXTRACTION_EDGES_SHAPE",
+          "EXTRACTION_ALIASES_TOO_LARGE",
+          "EXTRACTION_PROVENANCE_SHAPE",
           "EXTRACTION_EVIDENCE_TOO_LARGE",
           "EXTRACTION_SOURCES_TOO_LARGE",
           "EXTRACTION_EVIDENCE_TEXT_TOO_LARGE",

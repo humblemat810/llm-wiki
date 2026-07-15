@@ -37,3 +37,8 @@ request ID, latency, safe error, and human escape hatch.
 
 Ask a real person to use the system without narration. Every question they ask
 is a missing product surface.
+
+For the reference server, monitor
+`llm_field_notes_extraction_client_aborts_total` alongside provider failures.
+A spike can indicate browser navigation, gateway timeouts, or client
+cancellation pressure rather than a model outage.

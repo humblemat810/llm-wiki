@@ -1,4 +1,4 @@
-import { GRAPH_SCHEMA } from "../graph-core.js";
+import { GRAPH_SCHEMA, parseJsonWithUniqueKeys } from "../graph-core.js";
 import { EVALUATION_SCHEMA, MAX_EVALUATION_EXAMPLES, validateEvaluationReport } from "../evaluation.js";
 import { readBoundedTextFile } from "./bounded-file.mjs";
 import { pathToFileURL } from "node:url";
@@ -23,10 +23,10 @@ const OPTIONAL_METRICS = [
 ];
 
 async function readEvaluation(path) {
-  const value = JSON.parse(await readBoundedTextFile(path, MAX_INPUT_BYTES, {
+  const value = parseJsonWithUniqueKeys(await readBoundedTextFile(path, MAX_INPUT_BYTES, {
     label: "Evaluation input",
     tooLargeMessage: `Evaluation input exceeds the ${MAX_INPUT_BYTES / (1024 * 1024)} MB safety limit: ${path}`
-  }));
+  }), `Evaluation input ${path}`);
   validateEvaluationReport(value, { label: `Evaluation input ${path}` });
   if (value.feedback.conflicts > 0) throw new Error(`Evaluation input contains ${value.feedback.conflicts} contradictory reviewed decisions: ${path}`);
   return value;
@@ -127,8 +127,11 @@ export function compareEvaluations(baseline, candidate, { tolerance = 0, maxUntr
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [baselinePath, candidatePath, ...options] = process.argv.slice(2);
-  if (!baselinePath || !candidatePath) {
-    console.error("Usage: node experiments/compare-evaluations.mjs <baseline.json> <candidate.json> [--max-regression <0..1>] [--max-untrusted-feedback <integer>]");
+  const usage = "Usage: node experiments/compare-evaluations.mjs <baseline.json> <candidate.json> [--max-regression <0..1>] [--max-untrusted-feedback <integer>]";
+  if (process.argv.includes("--help")) {
+    console.log(usage);
+  } else if (!baselinePath || !candidatePath) {
+    console.error(usage);
     process.exitCode = 1;
   } else {
     try {

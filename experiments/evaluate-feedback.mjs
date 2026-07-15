@@ -1,4 +1,4 @@
-import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_FEEDBACK_EXPORT_OMITTED, matchesFeedbackFingerprint, matchesGraphFingerprint } from "../graph-core.js";
+import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_FEEDBACK_EXPORT_OMITTED, matchesFeedbackFingerprint, matchesGraphFingerprint, parseJsonWithUniqueKeys } from "../graph-core.js";
 import { evaluateExtraction, MAX_EVALUATION_EXAMPLES } from "../evaluation.js";
 import { readBoundedTextFile } from "./bounded-file.mjs";
 
@@ -6,6 +6,7 @@ const MAX_INPUT_BYTES = 10 * 1024 * 1024;
 const args = process.argv.slice(2);
 const feedbackPath = args.shift();
 const extractionPath = args.shift();
+const usage = "Usage: node experiments/evaluate-feedback.mjs <feedback.json> <extraction-or-graph.json> [--max-untrusted-feedback <integer>]";
 
 function parseOptions(values) {
   let maxUntrustedFeedback = null;
@@ -24,14 +25,16 @@ function parseOptions(values) {
 }
 
 async function readJsonFile(path) {
-  return JSON.parse(await readBoundedTextFile(path, MAX_INPUT_BYTES, {
+  return parseJsonWithUniqueKeys(await readBoundedTextFile(path, MAX_INPUT_BYTES, {
     label: "Evaluation input",
     tooLargeMessage: `Evaluation input exceeds the ${MAX_INPUT_BYTES / (1024 * 1024)} MB safety limit: ${path}`
-  }));
+  }), `Evaluation input ${path}`);
 }
 
-if (!feedbackPath || !extractionPath) {
-  console.error("Usage: node experiments/evaluate-feedback.mjs <feedback.json> <extraction-or-graph.json> [--max-untrusted-feedback <integer>]");
+if (process.argv.includes("--help")) {
+  console.log(usage);
+} else if (!feedbackPath || !extractionPath) {
+  console.error(usage);
   process.exitCode = 1;
 } else {
   try {

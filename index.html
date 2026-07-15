@@ -60,7 +60,7 @@
     <a class="skip-link" href="#workbench">Skip to workbench</a>
     <div class="noise" aria-hidden="true"></div>
     <header class="site-header">
-      <a class="brand" href="#" aria-label="LLM Field Notes home">
+      <a class="brand" href="./" aria-label="LLM Field Notes home">
         <span class="brand-mark">⌁</span>
         <span>
           <strong>LLM FIELD NOTES</strong>
@@ -70,6 +70,7 @@
       <nav class="top-nav" aria-label="Main navigation">
         <a href="#workbench">Workbench</a>
         <a href="#map">Learning map</a>
+        <a href="artifacts.html">Artifacts</a>
         <a href="#principles">Principles</a>
         <a class="nav-cta" href="#contribute">Improve it <span>↗</span></a>
       </nav>
@@ -77,12 +78,18 @@
     <div class="app-error section-shell" id="app-error" role="alert" hidden>
       <strong>The workbench needs a refresh.</strong>
       <span id="app-error-message">Your saved graph was preserved, but this view could not render.</span>
+      <button id="download-error-backup" type="button">Download recovery</button>
       <button id="reload-app" type="button">Reload ↻</button>
     </div>
     <div class="app-update section-shell" id="app-update" role="status" aria-live="polite" hidden>
       <strong>New version available.</strong>
       <span>The saved graph is safe. Reload when you are ready to use the updated workbench.</span>
       <button id="reload-update" type="button">Update ↻</button>
+    </div>
+    <div class="connection-status section-shell" id="connection-status" role="status" aria-live="polite" hidden>
+      <strong>Offline mode.</strong>
+      <span>The local graph and cached wiki remain available; remote extraction will resume when you reconnect.</span>
+      <button id="retry-queued-files" type="button" hidden>Retry queued files ↻</button>
     </div>
 
     <main>
@@ -109,7 +116,7 @@
             <span><strong id="hero-source-count">0</strong> source docs</span>
           </div>
         </div>
-        <div class="hero-art" aria-label="A visual representation of tokens becoming a useful product">
+        <div class="hero-art" role="img" aria-label="A visual representation of tokens becoming a useful product">
           <div class="orbit orbit-one"></div>
           <div class="orbit orbit-two"></div>
           <div class="signal signal-one">token</div>
@@ -139,15 +146,16 @@
               <h2>Give it a document.<br /><em>Keep the structure.</em></h2>
             </div>
             <p class="section-aside">
-              Everything runs in this browser for now. The graph is yours,
-              the evidence stays attached, and every pass becomes a revision
-              you can inspect or export.
+              By default, extraction runs in this browser. If you configure a
+              same-origin model endpoint, the graph is still yours, the
+              evidence stays attached, and every pass becomes a revision you
+              can inspect or export.
             </p>
           </div>
 
           <div class="workbench-grid">
             <aside class="ingest-panel">
-              <div class="panel-topline"><span>01 / INGEST</span><span class="live-label"><i></i> LOCAL</span></div>
+              <div class="panel-topline"><span>01 / INGEST</span><span class="live-label"><i></i> <span id="extractor-mode">LOCAL</span></span></div>
               <label for="document-title">Document title</label>
               <input id="document-title" type="text" maxlength="200" placeholder="e.g. Attention Is All You Need" />
               <label for="document-uri">Source URI (optional)</label>
@@ -167,18 +175,20 @@
                 <button class="button button-primary" id="ingest-document" type="button" aria-busy="false" aria-keyshortcuts="Control+Enter Meta+Enter">Build graph <span>↗</span></button>
                 <small class="shortcut-hint">Ctrl/Cmd + Enter</small>
                 <button class="text-button inverse" id="load-sample" type="button">Load sample</button>
+                <button class="text-button inverse" id="rebuild-sources" type="button" aria-busy="false">Rebuild saved sources</button>
                 <button class="text-button inverse" id="cancel-extraction" type="button" disabled>Cancel extraction</button>
               </div>
               <button class="clear-graph" id="clear-graph" type="button">Clear local graph</button>
               <button class="undo-graph" id="undo-graph" type="button" disabled>Undo last change ↶</button>
               <p class="privacy-note" id="privacy-note">No document extraction call while the extractor endpoint is blank. The graph stays in browser storage; the app may request persistent storage to reduce eviction risk.</p>
+              <span class="sr-only" id="privacy-live" role="status" aria-live="polite"></span>
               <div class="ingest-status" id="ingest-status" role="status" aria-live="polite"></div>
             </aside>
 
             <section class="graph-panel" aria-label="Knowledge graph viewer">
               <div class="panel-topline"><span>02 / INTERNAL REPRESENTATION</span><span id="graph-version">REV 000</span></div>
               <div class="graph-toolbar">
-                <div class="graph-toolbar-left"><span id="graph-summary">No concepts yet — ingest a document to begin.</span><label class="sr-only" for="graph-search">Filter graph</label><input id="graph-search" class="graph-search" type="search" placeholder="Filter concepts, evidence, sources…" autocomplete="off" /></div>
+                <div class="graph-toolbar-left"><span id="graph-summary">No concepts yet — ingest a document to begin.</span><label class="sr-only" for="graph-search">Filter graph</label><input id="graph-search" class="graph-search" type="search" maxlength="256" placeholder="Filter concepts, evidence, sources…" autocomplete="off" /></div>
                 <div>
                   <button class="mini-button active" type="button" data-view="graph" aria-pressed="true" aria-controls="graph-canvas-wrap node-list relation-list source-list">Graph</button>
                   <button class="mini-button" type="button" data-view="list" aria-pressed="false" aria-controls="graph-canvas-wrap node-list relation-list source-list">List</button>
@@ -230,21 +240,25 @@
                   backlinks, relation lists, and source evidence. Open it in
                   Obsidian, edit it, and bring corrections back as feedback.
                 </p>
+                <p class="projection-privacy-note" id="projection-privacy-note">
+                  Full exports include source text, evidence quotes, and source
+                  URIs. Use the redacted actions for public sharing.
+                </p>
                 <div class="projection-actions">
-                  <button class="button button-light" id="download-markdown" type="button">Download .md <span>↓</span></button>
-                  <button class="button button-light" id="copy-markdown" type="button">Copy Markdown <span>↗</span></button>
+                  <button class="button button-light" id="download-markdown" type="button" aria-describedby="projection-privacy-note">Download .md <span>↓</span></button>
+                  <button class="button button-light" id="copy-markdown" type="button" aria-describedby="projection-privacy-note">Copy Markdown <span>↗</span></button>
                   <button class="button button-quiet" id="copy-redacted-markdown" type="button" title="Removes source text, evidence quotes, and URIs">Copy redacted Markdown <span>↗</span></button>
                   <button class="button button-quiet" id="share-redacted-markdown" type="button" title="Shares a Markdown file with source text, evidence quotes, and URIs removed">Share redacted graph <span>↗</span></button>
                   <button class="button button-quiet" id="download-redacted-markdown" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted Markdown <span>↓</span></button>
-                  <button class="button button-light" id="download-vault" type="button">Download Obsidian vault <span>↓</span></button>
+                  <button class="button button-light" id="download-vault" type="button" aria-describedby="projection-privacy-note">Download Obsidian vault <span>↓</span></button>
                   <button class="button button-quiet" id="download-redacted-vault" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted vault <span>↓</span></button>
-                  <button class="button button-quiet" id="download-json" type="button">Export graph JSON <span>↓</span></button>
-                  <button class="button button-quiet" id="download-jsonld" type="button">Export JSON-LD <span>↓</span></button>
+                  <button class="button button-quiet" id="download-json" type="button" aria-describedby="projection-privacy-note">Export graph JSON <span>↓</span></button>
+                  <button class="button button-quiet" id="download-jsonld" type="button" aria-describedby="projection-privacy-note">Export JSON-LD <span>↓</span></button>
                   <button class="button button-quiet" id="download-redacted-jsonld" type="button" title="Removes source text, evidence quotes, and URIs">Export redacted JSON-LD <span>↓</span></button>
                   <button class="button button-quiet" id="download-health" type="button">Export health report <span>↓</span></button>
                   <button class="button button-quiet" id="download-redacted" type="button">Export redacted graph <span>↓</span></button>
-                  <button class="button button-quiet" id="download-backup" type="button">Download full backup <span>↓</span></button>
-                  <button class="button button-quiet" id="download-feedback" type="button" title="Includes evidence and source references">Export feedback dataset <span>↓</span></button>
+                  <button class="button button-quiet" id="download-backup" type="button" aria-describedby="projection-privacy-note">Download full backup <span>↓</span></button>
+                  <button class="button button-quiet" id="download-feedback" type="button" title="Includes evidence and source references" aria-describedby="projection-privacy-note">Export feedback dataset <span>↓</span></button>
                   <button class="button button-quiet" id="download-compact-feedback" type="button" title="Removes evidence and source references">Export compact feedback <span>↓</span></button>
                   <button class="button button-quiet" id="download-diff" type="button">Export latest revision diff <span>↓</span></button>
                 </div>
@@ -300,14 +314,14 @@
             <div class="search-wrap">
               <span class="search-icon">⌕</span>
               <label class="sr-only" for="search">Search notes</label>
-              <input id="search" type="search" placeholder="Search notes, topics, questions…" autocomplete="off" />
+              <input id="search" type="search" maxlength="256" placeholder="Search notes, topics, questions…" autocomplete="off" />
               <kbd>/</kbd>
             </div>
             <div class="filters" role="group" aria-label="Filter notes">
-              <button class="filter active" type="button" data-filter="all" aria-pressed="true">All <span>12</span></button>
+              <button class="filter active" type="button" data-filter="all" aria-pressed="true">All <span>13</span></button>
               <button class="filter" type="button" data-filter="foundations" aria-pressed="false">Foundations <span>4</span></button>
               <button class="filter" type="button" data-filter="systems" aria-pressed="false">Systems <span>4</span></button>
-              <button class="filter" type="button" data-filter="shipping" aria-pressed="false">Shipping <span>4</span></button>
+              <button class="filter" type="button" data-filter="shipping" aria-pressed="false">Shipping <span>5</span></button>
             </div>
           </div>
           <div class="notes-grid" id="notes-grid"></div>
@@ -327,6 +341,7 @@
               <li><a href="./notes/finetuning.html"><strong>Teach, don't just prompt</strong></a> — Use examples to shape repeatable behavior.</li>
               <li><a href="./notes/agents.html"><strong>Tools make a system</strong></a> — Constrain actions with state, checks, and stop conditions.</li>
               <li><a href="./notes/production.html"><strong>Ship the boring parts</strong></a> — Latency, cost, observability, and fallbacks.</li>
+              <li><a href="./notes/knowledge-graphs.html"><strong>A graph is a hypothesis</strong></a> — Review the representation so the next pass improves.</li>
             </ul>
           </noscript>
           <p class="empty-state" id="empty-state" hidden>No notes match that search. Try a broader question.</p>
@@ -410,6 +425,8 @@ for step in range(max_steps):
             </p>
             <div class="contribute-actions">
               <a class="button button-primary" href="CONTRIBUTING.md">Open a contribution <span>↗</span></a>
+              <a class="button button-quiet" href="artifacts.html">Browse artifacts <span>↗</span></a>
+              <a class="button button-quiet" href="artifacts.html#learning-loop">See the learning loop <span>↗</span></a>
               <a class="button button-quiet" href="ARCHITECTURE.md">Read the architecture <span>↗</span></a>
               <button class="button button-quiet" id="copy-prompt" type="button">Copy the page template <span>⧉</span></button>
             </div>
@@ -441,12 +458,12 @@ for step in range(max_steps):
     </dialog>
 
     <footer class="site-footer section-shell">
-      <a class="brand" href="#" aria-label="LLM Field Notes home">
+      <a class="brand" href="./" aria-label="LLM Field Notes home">
         <span class="brand-mark">⌁</span>
         <span><strong>LLM FIELD NOTES</strong><small>learn by building</small></span>
       </a>
       <p>Open knowledge for a moving target.</p>
-      <div class="footer-links"><a href="#map">Map</a><a href="#path">Path</a><a href="#contribute">Contribute</a><a href="CHANGELOG.md">Changelog</a><a href="LICENSE" rel="license">License</a><span id="release-version">release metadata unavailable</span></div>
+      <div class="footer-links"><a href="#map">Map</a><a href="#path">Path</a><a href="artifacts.html">Artifacts</a><a href="#contribute">Contribute</a><a href="CHANGELOG.md">Changelog</a><a href="LICENSE" rel="license">License</a><span id="release-version">release metadata unavailable</span></div>
     </footer>
     <script type="module" src="app.js"></script>
   </body>

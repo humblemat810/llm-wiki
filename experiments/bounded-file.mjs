@@ -1,4 +1,5 @@
 import { open, stat } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 
 export async function readBoundedTextFile(path, maxBytes, {
   label = "Input",
@@ -31,4 +32,9 @@ export async function readBoundedTextFile(path, maxBytes, {
   } finally {
     await handle.close();
   }
+}
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url && process.argv.includes("--help")) {
+  console.log("Usage: node experiments/bounded-file.mjs --help");
+  console.log("Library boundary: import readBoundedTextFile(path, maxBytes) from this module for fatal UTF-8 reads.");
 }

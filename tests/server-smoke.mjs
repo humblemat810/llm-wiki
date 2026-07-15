@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Agent, request as httpRequest } from "node:http";
+import { connect as tcpConnect } from "node:net";
 import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,6 +15,19 @@ const server = createAppServer({ logger: (entry) => logs.push(entry) });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
 try {
+  const malformedResponse = await new Promise((resolve, reject) => {
+    const socket = tcpConnect(port, "127.0.0.1");
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nBad Header\r\n\r\n"));
+    socket.on("data", (chunk) => { response += chunk; });
+    socket.on("end", () => resolve(response));
+    socket.on("error", reject);
+  });
+  assert.match(malformedResponse, /^HTTP\/1\.1 400 Bad Request\r\n/, "malformed HTTP requests should receive a deterministic bounded response");
+  assert.match(malformedResponse, /Connection: close\r\n/);
+  assert(logs.some((entry) => entry.route === "client" && entry.error === "CLIENT_PROTOCOL_ERROR"), "malformed HTTP requests should emit a sanitized protocol diagnostic");
+
   const truncatedRequest = new EventEmitter();
   truncatedRequest.headers = {};
   truncatedRequest.aborted = false;
@@ -26,6 +40,20 @@ try {
     truncatedBody,
     (error) => error?.code === "REQUEST_ABORTED",
     "truncated request bodies should reject immediately when the client closes the stream"
+  );
+  const mismatchedLengthRequest = new EventEmitter();
+  mismatchedLengthRequest.headers = { "content-length": "5" };
+  mismatchedLengthRequest.aborted = false;
+  mismatchedLengthRequest.destroyed = false;
+  mismatchedLengthRequest.readableEnded = false;
+  mismatchedLengthRequest.complete = true;
+  const mismatchedLengthBody = readBody(mismatchedLengthRequest, {});
+  mismatchedLengthRequest.emit("data", Buffer.from("ok"));
+  mismatchedLengthRequest.emit("end");
+  await assert.rejects(
+    mismatchedLengthBody,
+    (error) => error?.statusCode === 400 && error?.code === "REQUEST_LENGTH_MISMATCH",
+    "HTTP request bodies should reject a Content-Length mismatch even when the stream emits end"
   );
   const invalidUtf8Request = new EventEmitter();
   invalidUtf8Request.headers = {};
@@ -73,6 +101,11 @@ try {
       `a${"€".repeat(19999)}`,
       "bounded UTF-8 reads should preserve valid multibyte characters across the byte window"
     );
+    const astralPrefixPath = join(boundedReadRoot, "astral.md");
+    await writeFile(astralPrefixPath, `a${"😀".repeat(10000)}`);
+    const boundedAstral = readBoundedUtf8(astralPrefixPath, 20000);
+    assert.equal(boundedAstral, `a${"😀".repeat(9999)}`, "bounded UTF-8 reads should not split astral characters at the UTF-16 safety boundary");
+    assert(!/[\uD800-\uDBFF]$/.test(boundedAstral), "bounded UTF-8 reads should never return a trailing high surrogate");
     const malformedUtf8Path = join(boundedReadRoot, "malformed.md");
     await writeFile(malformedUtf8Path, Buffer.from([0xff]));
     assert.throws(
@@ -95,6 +128,12 @@ try {
   assert.equal(Number(index.headers.get("content-length")), Buffer.byteLength(await (await fetch(`http://127.0.0.1:${port}/index.html`)).text()), "static responses should advertise their byte length");
   assert(index.headers.get("content-security-policy")?.includes("frame-ancestors 'none'"));
   assert.equal(index.headers.get("strict-transport-security"), null, "local HTTP servers should not advertise HSTS");
+  const readiness = await fetch(`http://127.0.0.1:${port}/readyz`);
+  const readinessHead = await fetch(`http://127.0.0.1:${port}/readyz`, { method: "HEAD" });
+  assert.equal(readiness.status, 200);
+  assert.equal(readinessHead.status, 200);
+  assert.equal(await readinessHead.text(), "", "HEAD readiness responses should not include a body");
+  assert.equal(Number(readinessHead.headers.get("content-length")), Number(readiness.headers.get("content-length")), "HEAD readiness should preserve the GET representation length");
   const indexEtag = index.headers.get("etag");
   assert.match(indexEtag || "", /^"[0-9a-f]{64}"$/);
   const notModified = await fetch(`http://127.0.0.1:${port}/`, { headers: { "if-none-match": indexEtag } });
@@ -102,6 +141,7 @@ try {
   assert.equal(notModified.headers.get("etag"), indexEtag);
   const serviceWorker = await fetch(`http://127.0.0.1:${port}/sw.js`);
   assert.equal(serviceWorker.headers.get("cache-control"), "no-cache", "service-worker scripts should update promptly");
+  assert.match(await serviceWorker.clone().text(), /const CACHE = "llm-field-notes-v0\.1\.0"/, "Node service workers should retain the checked-in release cache identity without a build revision");
   const release = await fetch(`http://127.0.0.1:${port}/version.json`);
   assert.equal(release.headers.get("cache-control"), "no-cache", "release metadata should update promptly");
   assert.equal((await release.json()).version, "0.1.0");
@@ -152,6 +192,14 @@ try {
   assert((await conduct.text()).includes("# Contributor Covenant Code of Conduct"), "community guidance should be served");
   const experiments = await fetch(`http://127.0.0.1:${port}/experiments/README.md`);
   assert.equal(experiments.status, 200);
+  const artifactGallery = await fetch(`http://127.0.0.1:${port}/artifacts.html`);
+  assert.equal(artifactGallery.status, 200);
+  assert((artifactGallery.headers.get("content-security-policy") || "").includes("script-src 'none'"), "script-free artifact pages should receive a response-level script prohibition");
+  assert((await artifactGallery.text()).includes("Small things"), "the Node host should serve the public artifact gallery");
+  const artifactSource = await fetch(`http://127.0.0.1:${port}/experiments/tiny-bpe.mjs`);
+  assert.equal(artifactSource.status, 200);
+  assert.equal(artifactSource.headers.get("content-type"), "text/javascript; charset=utf-8", "published runnable artifacts should use an explicit JavaScript MIME type");
+  assert((await artifactSource.text()).includes("export function trainBpe"), "published artifact source should remain inspectable");
   const architecture = await fetch(`http://127.0.0.1:${port}/ARCHITECTURE.md`);
   assert.equal(architecture.status, 200);
   assert((await architecture.text()).includes("# LLM Field Notes architecture"), "architecture guidance should be publicly deliverable");
@@ -166,7 +214,7 @@ try {
   assert.equal(weakNotModified.status, 304);
   const health = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0" });
+  assert.deepEqual(await health.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: "unknown" });
   assert.match(health.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/, "health responses should expose a request ID for operational correlation");
   assert.equal(health.headers.get("cache-control"), "no-store");
   const healthHead = await fetch(`http://127.0.0.1:${port}/healthz`, { method: "HEAD" });
@@ -185,8 +233,11 @@ try {
     && metricsText.includes("llm_field_notes_concurrency_limited_total 0")
     && metricsText.includes("llm_field_notes_extractions_in_flight 0")
     && metricsText.includes("llm_field_notes_extractor_concurrency_limit 8")
+    && metricsText.includes("llm_field_notes_extraction_client_aborts_total 0")
     && metricsText.includes("llm_field_notes_process_uptime_seconds ")
-    && metricsText.includes('llm_field_notes_build_info{version="0.1.0"} 1'), "metrics should expose privacy-safe request, latency, and build gauges");
+    && metricsText.includes('llm_field_notes_build_info{version="0.1.0"} 1')
+    && metricsText.includes('llm_field_notes_build_revision_info{revision="unknown"} 1'), "metrics should expose privacy-safe request, latency, version, and source-revision gauges");
+  assert.equal(server.getMetrics().buildRevision, "unknown", "programmatic metrics should expose the sanitized source revision");
   assert(Number(server.getMetrics().responsesByStatus["200"]) > 0, "programmatic metrics should expose successful HTTP response counts");
   const metricsHead = await fetch(`http://127.0.0.1:${port}/metrics`, { method: "HEAD" });
   assert.equal(metricsHead.status, 200, "metrics should support HEAD probes");
@@ -195,7 +246,7 @@ try {
   assert.equal(await metricsHead.text(), "", "metrics HEAD responses should not contain a body");
   const ready = await fetch(`http://127.0.0.1:${port}/readyz`);
   assert.equal(ready.status, 200);
-  assert.deepEqual(await ready.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", ready: true });
+  assert.deepEqual(await ready.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: "unknown", ready: true });
   const readyHead = await fetch(`http://127.0.0.1:${port}/readyz`, { method: "HEAD" });
   assert.equal(readyHead.status, 200, "readiness checks should support HEAD probes");
   assert.equal(await readyHead.text(), "", "readiness HEAD responses should not contain a body");
@@ -206,7 +257,7 @@ try {
   const drainingReady = await fetch(`http://127.0.0.1:${port}/readyz`);
   assert.equal(drainingReady.status, 503);
   assert.equal(drainingReady.headers.get("retry-after"), "5");
-  assert.deepEqual(await drainingReady.json(), { ok: false, schema: "llm-field-notes/graph@1", version: "0.1.0", ready: false, error: "Server is draining." });
+  assert.deepEqual(await drainingReady.json(), { ok: false, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: "unknown", ready: false, error: "Server is draining." });
   const drainingExtraction = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -313,20 +364,50 @@ try {
     request.end();
   });
   assert.equal(earlyRejectedOversized.status, 415, "early rejection should respond before draining a declared oversized upload");
-  const abortedUpload = httpRequest({
-    hostname: "127.0.0.1",
-    port,
-    path: "/api/extract-graph",
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "content-length": "100000"
+  let releaseAbortExtraction;
+  let abortExtractionStartedResolve;
+  const abortExtractionStarted = new Promise((resolve) => {
+    abortExtractionStartedResolve = resolve;
+  });
+  const abortExtraction = new Promise((resolve) => {
+    releaseAbortExtraction = resolve;
+  });
+  const abortLogs = [];
+  const abortServer = createAppServer({
+    logger: (entry) => abortLogs.push(entry),
+    extractor: async () => {
+      abortExtractionStartedResolve();
+      return abortExtraction;
     }
   });
-  abortedUpload.on("error", () => {});
-  abortedUpload.write("{\"operation\":\"extract-graph\"");
-  abortedUpload.destroy();
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await new Promise((resolve) => abortServer.listen(0, "127.0.0.1", resolve));
+  const abortRequest = httpRequest({
+    hostname: "127.0.0.1",
+    port: abortServer.address().port,
+    path: "/api/extract-graph",
+    method: "POST",
+    headers: { "content-type": "application/json" }
+  });
+  abortRequest.on("error", () => {});
+  abortRequest.end(JSON.stringify({
+    operation: "extract-graph",
+    schema: "llm-field-notes/graph@1",
+    feedbackFormat: "llm-field-notes/feedback@1",
+    feedback: [],
+    document: { title: "Aborted extraction", text: "Attention uses context to create a useful graph representation for review." }
+  }));
+  try {
+    await abortExtractionStarted;
+    abortRequest.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(abortServer.getMetrics().extractionClientAborts, 1, "programmatic metrics should count client-aborted extraction requests");
+    const abortLog = abortServer.getMetrics();
+    assert.equal(abortLog.extractionFailures, 1, "client-aborted extraction should count as a failed extraction without a response");
+    assert(abortLogs.some((entry) => entry.route === "extract-graph" && entry.status === 499 && entry.error === "REQUEST_ABORTED" && Number.isFinite(entry.durationMs)), "client-aborted extraction requests should emit bounded request-correlated cancellation telemetry");
+  } finally {
+    releaseAbortExtraction?.({ schema: "llm-field-notes/graph@1", concepts: [], relations: [] });
+    abortServer.close();
+  }
   assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
   let releaseStubbornExtraction;
   const stubbornExtraction = new Promise((resolve) => {
@@ -410,6 +491,11 @@ try {
   const invalidConcurrencyServer = createAppServer({ maxConcurrentExtractors: 0 });
   assert.equal(invalidConcurrencyServer.getMetrics().extractorConcurrencyLimit, 8, "invalid extractor concurrency configuration should fail safe to the default");
   invalidConcurrencyServer.close();
+  assert.throws(
+    () => createAppServer({ publicOrigin: "javascript:alert(1)" }),
+    /absolute credential-free HTTP\(S\) origin/,
+    "invalid public origins should fail closed instead of silently disabling deployment metadata"
+  );
   const loggerFailureServer = createAppServer({
     logger: () => {
       throw new Error("logger unavailable");
@@ -500,6 +586,26 @@ try {
     symlinkServer.close();
     await rm(symlinkRoot, { recursive: true, force: true });
   }
+  const internalSymlinkRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-internal-symlink-"));
+  await Promise.all(FIXED_PUBLIC_ASSETS.map(async (asset) => {
+    const target = join(internalSymlinkRoot, asset);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(join(process.cwd(), asset), target);
+  }));
+  await rm(join(internalSymlinkRoot, "app.js"));
+  await symlink("graph-core.js", join(internalSymlinkRoot, "app.js"));
+  const internalSymlinkServer = createAppServer({ staticRoot: internalSymlinkRoot });
+  await new Promise((resolve) => internalSymlinkServer.listen(0, "127.0.0.1", resolve));
+  const internalSymlinkPort = internalSymlinkServer.address().port;
+  try {
+    const internalSymlinkReady = await fetch(`http://127.0.0.1:${internalSymlinkPort}/readyz`);
+    assert.equal(internalSymlinkReady.status, 503, "readiness should reject symlinked assets even when the target remains inside the static root");
+    const internalSymlinkAsset = await fetch(`http://127.0.0.1:${internalSymlinkPort}/app.js`);
+    assert.equal(internalSymlinkAsset.status, 404, "runtime serving should not expose symlinked public assets");
+  } finally {
+    internalSymlinkServer.close();
+    await rm(internalSymlinkRoot, { recursive: true, force: true });
+  }
   const unavailableServer = createAppServer({ staticRoot: "/tmp/llm-field-notes-missing-root" });
   await new Promise((resolve) => unavailableServer.listen(0, "127.0.0.1", resolve));
   const unavailablePort = unavailableServer.address().port;
@@ -526,6 +632,62 @@ try {
   } finally {
     incompleteServer.close();
     await rm(incompleteRoot, { recursive: true, force: true });
+  }
+  const malformedAssetRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-malformed-asset-"));
+  await Promise.all(FIXED_PUBLIC_ASSETS.map(async (asset) => {
+    const target = join(malformedAssetRoot, asset);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(join(process.cwd(), asset), target);
+  }));
+  await writeFile(join(malformedAssetRoot, "app.js"), Buffer.from([0xff]));
+  const malformedAssetServer = createAppServer({ staticRoot: malformedAssetRoot });
+  await new Promise((resolve) => malformedAssetServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const malformedReady = await fetch(`http://127.0.0.1:${malformedAssetServer.address().port}/readyz`);
+    assert.equal(malformedReady.status, 503, "readiness should fail when a published text asset is not valid UTF-8");
+  } finally {
+    malformedAssetServer.close();
+    await rm(malformedAssetRoot, { recursive: true, force: true });
+  }
+  const staleReleaseRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-stale-release-"));
+  await Promise.all(FIXED_PUBLIC_ASSETS.map(async (asset) => {
+    const target = join(staleReleaseRoot, asset);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(join(process.cwd(), asset), target);
+  }));
+  await writeFile(join(staleReleaseRoot, "version.json"), JSON.stringify({
+    version: "9.9.9",
+    channel: "stable",
+    date: "2026-07-12"
+  }));
+  const staleReleaseServer = createAppServer({ staticRoot: staleReleaseRoot });
+  await new Promise((resolve) => staleReleaseServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const staleReleaseReady = await fetch(`http://127.0.0.1:${staleReleaseServer.address().port}/readyz`);
+    assert.equal(staleReleaseReady.status, 503, "readiness should fail when release metadata does not match the running package");
+  } finally {
+    staleReleaseServer.close();
+    await rm(staleReleaseRoot, { recursive: true, force: true });
+  }
+  const impossibleDateRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-impossible-release-date-"));
+  await Promise.all(FIXED_PUBLIC_ASSETS.map(async (asset) => {
+    const target = join(impossibleDateRoot, asset);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(join(process.cwd(), asset), target);
+  }));
+  await writeFile(join(impossibleDateRoot, "version.json"), JSON.stringify({
+    version: "0.1.0",
+    channel: "stable",
+    date: "2026-02-31"
+  }));
+  const impossibleDateServer = createAppServer({ staticRoot: impossibleDateRoot });
+  await new Promise((resolve) => impossibleDateServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const impossibleDateReady = await fetch(`http://127.0.0.1:${impossibleDateServer.address().port}/readyz`);
+    assert.equal(impossibleDateReady.status, 503, "readiness should reject impossible calendar dates instead of accepting Date.parse rollover");
+  } finally {
+    impossibleDateServer.close();
+    await rm(impossibleDateRoot, { recursive: true, force: true });
   }
   const incompleteLearningRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-learning-incomplete-"));
   const learningAssets = [
@@ -650,6 +812,13 @@ try {
   assert.match(extraction.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/);
   assert(logs.some((entry) => entry.route === "extract-graph" && entry.status === 200 && Number.isInteger(entry.durationMs) && entry.documentChars > 0 && entry.feedbackCount === 500));
   assert(!JSON.stringify(logs).includes("Attention uses context"), "structured logs must not contain document text");
+  const duplicateKeyRequest = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"operation":"extract-graph","operation":"extract-graph","schema":"llm-field-notes/graph@1","feedbackFormat":"llm-field-notes/feedback@1","feedback":[],"document":{"title":"Duplicate key","text":"Attention uses context to create a useful graph representation for review."}}'
+  });
+  assert.equal(duplicateKeyRequest.status, 400, "extraction requests with duplicate JSON keys should be rejected");
+  assert.match(await duplicateKeyRequest.text(), /duplicate object key/, "duplicate-key extraction failures should explain the contract violation");
   const unsafeUriResponse = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -723,6 +892,52 @@ try {
     })
   });
   assert.equal(duplicateAliasFeedback.status, 400, "the server should reject duplicate feedback aliases consistently with the browser adapter");
+  const contradictoryFeedback = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [
+        { kind: "concept", id: "attention", label: "Attention", status: "accepted" },
+        { kind: "concept", id: "attention", label: "Attention", status: "rejected" }
+      ],
+      document: { title: "Contradictory feedback", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(contradictoryFeedback.status, 400, "the server should reject contradictory concept guidance before provider execution");
+  assert.match((await contradictoryFeedback.json()).error, /contradictory decisions/);
+  const contradictoryRelationFeedback = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [
+        { kind: "relation", id: "attention-context", source: "attention", target: "context", label: "uses", status: "accepted" },
+        { kind: "relation", id: "attention-context", source: "attention", target: "context", label: "supports", status: "rejected" }
+      ],
+      document: { title: "Contradictory relation feedback", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(contradictoryRelationFeedback.status, 400, "the server should reject contradictory relation guidance even when details disagree");
+  const sameStatusDuplicateFeedback = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract-graph",
+      schema: "llm-field-notes/graph@1",
+      feedbackFormat: "llm-field-notes/feedback@1",
+      feedback: [
+        { kind: "concept", id: "attention", label: "Attention", status: "accepted" },
+        { kind: "concept", id: "attention", label: "Attention", status: "accepted" }
+      ],
+      document: { title: "Duplicate feedback", text: "Attention uses context to create a useful graph representation for review." }
+    })
+  });
+  assert.equal(sameStatusDuplicateFeedback.status, 200, "same-status duplicate guidance should remain compatible");
   const oversizedFeedbackArray = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -840,6 +1055,7 @@ try {
       })
     });
     assert.equal(oversizedResponse.status, 502);
+    assert.equal(oversizedResponse.headers.get("retry-after"), null, "oversized provider responses should not advertise a retry");
     assert.equal((await oversizedResponse.json()).error, "The extractor response exceeded the 10 MB safety limit.");
     const oversizedCollectionsResponse = await fetch(`http://127.0.0.1:${providerPort}/api/extract-graph`, {
       method: "POST",
@@ -853,6 +1069,7 @@ try {
       })
     });
     assert.equal(oversizedCollectionsResponse.status, 502);
+    assert.equal(oversizedCollectionsResponse.headers.get("retry-after"), null, "oversized provider collections should not advertise a retry");
     assert.equal((await oversizedCollectionsResponse.json()).error, "The configured extractor failed. Try again or inspect the provider logs.", "oversized provider collections should fail closed at the server boundary");
     assert(providerLogs.some((entry) => entry.error === "EXTRACTION_NODES_TOO_LARGE"), "oversized provider collections should remain diagnosable without exposing provider output");
     for (const title of ["Invalid response", "Invalid schema"]) {
@@ -868,6 +1085,7 @@ try {
         })
       });
       assert.equal(invalidProviderResponse.status, 502, `${title} should fail closed at the server provider boundary`);
+      assert.equal(invalidProviderResponse.headers.get("retry-after"), null, `${title} should not advertise a retry`);
     }
   } finally {
     providerServer.close();
@@ -895,6 +1113,7 @@ try {
       })
     });
     assert.equal(failureResponse.status, 502);
+    assert.equal(failureResponse.headers.get("retry-after"), "1", "transient extractor failures should advertise bounded retry guidance");
     assert.match(await failureResponse.text(), /configured extractor failed/);
   } finally {
     failingServer.close();
@@ -953,6 +1172,7 @@ try {
       })
     });
     assert.equal(timeoutResponse.status, 504);
+    assert.equal(timeoutResponse.headers.get("retry-after"), "5", "extractor timeouts should advertise a longer bounded retry delay");
     assert.match(await timeoutResponse.text(), /extractor timed out/);
     assert(timeoutLogs.some((entry) => entry.status === 504 && entry.error === "EXTRACTOR_TIMEOUT"));
   } finally {
@@ -1035,7 +1255,9 @@ try {
     assert.equal(drainServer.beginDrain(), true, "programmatic shutdown should enter draining mode once");
     assert.equal(drainServer.beginDrain(), false, "shutdown entry should be idempotent");
     const drainResponse = await drainRequest;
-    assert.equal(drainResponse.status, 502);
+    assert.equal(drainResponse.status, 503, "aborted in-flight work should report a retryable draining response");
+    assert.equal(drainResponse.headers.get("retry-after"), "5", "draining responses should advertise a bounded retry delay");
+    assert.deepEqual(await drainResponse.json(), { error: "Server is draining." });
     assert(drainAborted, "shutdown should abort active provider work");
     await drainServer.waitForIdle();
   } finally {
@@ -1122,6 +1344,11 @@ try {
   assert.equal(privateAsset.status, 404);
   assert.equal(privateAsset.headers.get("cache-control"), "no-store");
   assert.equal(privateAsset.headers.get("content-security-policy")?.includes("frame-ancestors 'none'"), true);
+  const privateAssetText = await privateAsset.text();
+  assert(privateAssetText.includes("That page is not in the graph.") && privateAssetText.includes('href="/styles.css"') && privateAssetText.includes('href="/artifacts.html"'), "unknown static routes should receive root-safe branded recovery links");
+  const privateAssetHead = await fetch(`http://127.0.0.1:${port}/package.json`, { method: "HEAD" });
+  assert.equal(privateAssetHead.status, 404);
+  assert.equal(await privateAssetHead.text(), "", "branded 404 HEAD responses should not include a body");
   const sourceAsset = await fetch(`http://127.0.0.1:${port}/server.mjs`);
   assert.equal(sourceAsset.status, 404);
   const oversized = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
@@ -1338,11 +1565,25 @@ try {
     assert.equal(seoIndexHead.status, 200);
     assert.equal(Number(seoIndexHead.headers.get("content-length")), Number(seoIndex.headers.get("content-length")), "origin-aware HTML HEAD should report the transformed body length");
     assert.equal(await seoIndexHead.text(), "", "origin-aware HTML HEAD should not contain a body");
+    const seoArtifacts = await fetch(`http://127.0.0.1:${seoPort}/artifacts.html`);
+    const seoArtifactsText = await seoArtifacts.text();
+    assert.equal(seoArtifacts.status, 200);
+    assert.equal(seoArtifacts.headers.get("cache-control"), "no-cache", "origin-aware artifact pages should revalidate transformed metadata");
+    assert(seoArtifactsText.includes('content="https://notes.example.test/social-card.svg"') && seoArtifactsText.includes('content="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('rel="canonical" href="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('"@type":"ItemList"') && seoArtifactsText.includes('"url":"https://notes.example.test/experiments/tiny-bpe.mjs"'), "configured public origins should emit absolute artifact-gallery social and structured metadata");
+    const literalOriginServer = createAppServer({ publicOrigin: "https://notes.example.test/$release" });
+    await new Promise((resolve) => literalOriginServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const literalArtifacts = await fetch(`http://127.0.0.1:${literalOriginServer.address().port}/artifacts.html`);
+      const literalArtifactsText = await literalArtifacts.text();
+      assert(literalArtifactsText.includes('content="https://notes.example.test/$release/social-card.svg"') && literalArtifactsText.includes('"url":"https://notes.example.test/$release/experiments/tiny-bpe.mjs"'), "origin metadata rewrites should preserve literal dollar signs in valid deployment paths");
+    } finally {
+      literalOriginServer.close();
+    }
     const sitemap = await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`);
     assert.equal(sitemap.status, 200, "configured public origins should expose a sitemap");
     assert.equal(sitemap.headers.get("content-type"), "application/xml; charset=utf-8");
     const sitemapText = await sitemap.text();
-    assert(sitemapText.includes("https://notes.example.test/notes/tokens.md") && sitemapText.includes("https://notes.example.test/notes/tokens.html"), "sitemap should include both source notes and canonical learning-note landing pages");
+    assert(sitemapText.includes("https://notes.example.test/artifacts.html") && sitemapText.includes("https://notes.example.test/experiments/README.md") && sitemapText.includes("https://notes.example.test/notes/tokens.md") && sitemapText.includes("https://notes.example.test/notes/tokens.html"), "sitemap should include public discovery pages, source notes, and canonical learning-note landing pages");
     assert(!(await (await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`)).text()).includes("https://notes.example.test/notes/README.md"), "sitemap should exclude the learning-map index README");
     const seoRobots = await fetch(`http://127.0.0.1:${seoPort}/robots.txt`);
     assert.equal(seoRobots.status, 200);
@@ -1383,7 +1624,7 @@ try {
       const subpathSitemap = await fetch(`http://127.0.0.1:${subpathPort}/sitemap.xml`);
       assert.equal(subpathSitemap.status, 200, "Node deployments should accept project-subpath public origins");
       const subpathSitemapText = await subpathSitemap.text();
-      assert(subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.html"), "project-subpath sitemaps should preserve the deployment prefix for source and landing pages");
+      assert(subpathSitemapText.includes("https://notes.example.test/field-notes/artifacts.html") && subpathSitemapText.includes("https://notes.example.test/field-notes/experiments/README.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.html"), "project-subpath sitemaps should preserve the deployment prefix for public discovery pages and learning notes");
     } finally {
       subpathServer.close();
     }

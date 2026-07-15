@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { HISTORY_LIMIT, MAX_PERSISTED_JSON_BYTES } from "../graph-store.js";
+import { MAX_BROADCAST_VALUE_BYTES } from "../storage-adapter.js";
 import {
   MAX_CONCEPT_LABEL_CHARS,
+  MAX_ALIASES,
   MAX_AMBIGUOUS_EDGE_IDS,
   MAX_AMBIGUOUS_SOURCE_IDS,
   MAX_CONFLICTING_ITEM_IDS,
   MAX_DOCUMENT_CHARS,
+  MAX_DOCUMENT_TITLE_CHARS,
   MAX_EVIDENCE_CHARS,
   MAX_EVIDENCE_RECORDS,
   MAX_FEEDBACK_COUNT,
@@ -24,107 +28,35 @@ import {
   MAX_REVIEW_QUEUE_ITEMS,
   MAX_SOURCE_REFERENCES,
   MAX_SOURCE_URI_CHARS,
+  MAX_PRODUCER_VERSION_CHARS,
   HEALTH_GATE_LIMITS,
   HEALTH_COUNT_LIMITS,
   HEALTH_PERCENTAGES,
   HEALTH_BOOLEANS,
   HEALTH_OBJECTS,
-  MAX_TIMESTAMP_CHARS
+  MAX_TIMESTAMP_CHARS,
+  REVISION_OPERATIONS,
+  REVISION_EXTRACTORS,
+  parseJsonWithUniqueKeys
 } from "../graph-core.js";
 
-function assertUniqueJsonObjectKeys(text, label) {
-  let index = 0;
-  const skipWhitespace = () => {
-    while (/\s/.test(text[index] || "")) index += 1;
-  };
-  const parseString = () => {
-    const start = index;
-    if (text[index] !== '"') throw new Error(`${label} contains malformed JSON at offset ${index}.`);
-    index += 1;
-    while (index < text.length) {
-      if (text[index] === "\\") {
-        index += 2;
-        continue;
-      }
-      if (text[index] === '"') {
-        const raw = text.slice(start, index + 1);
-        index += 1;
-        return JSON.parse(raw);
-      }
-      index += 1;
-    }
-    throw new Error(`${label} contains an unterminated JSON string.`);
-  };
-  const parseValue = () => {
-    skipWhitespace();
-    if (text[index] === "{") {
-      index += 1;
-      skipWhitespace();
-      const keys = new Set();
-      if (text[index] === "}") {
-        index += 1;
-        return;
-      }
-      while (index < text.length) {
-        skipWhitespace();
-        const key = parseString();
-        if (keys.has(key)) throw new Error(`${label} contains duplicate object key "${key}".`);
-        keys.add(key);
-        skipWhitespace();
-        if (text[index++] !== ":") throw new Error(`${label} contains malformed JSON at offset ${index}.`);
-        parseValue();
-        skipWhitespace();
-        if (text[index] === "}") {
-          index += 1;
-          return;
-        }
-        if (text[index++] !== ",") throw new Error(`${label} contains malformed JSON at offset ${index}.`);
-      }
-      throw new Error(`${label} contains an unterminated JSON object.`);
-    }
-    if (text[index] === "[") {
-      index += 1;
-      skipWhitespace();
-      if (text[index] === "]") {
-        index += 1;
-        return;
-      }
-      while (index < text.length) {
-        parseValue();
-        skipWhitespace();
-        if (text[index] === "]") {
-          index += 1;
-          return;
-        }
-        if (text[index++] !== ",") throw new Error(`${label} contains malformed JSON at offset ${index}.`);
-      }
-      throw new Error(`${label} contains an unterminated JSON array.`);
-    }
-    if (text[index] === '"') {
-      parseString();
-      return;
-    }
-    const start = index;
-    while (index < text.length && !/[,\]}]/.test(text[index])) index += 1;
-    if (!text.slice(start, index).trim()) throw new Error(`${label} contains malformed JSON at offset ${index}.`);
-  };
-  parseValue();
-  skipWhitespace();
-  if (index !== text.length) throw new Error(`${label} contains trailing data.`);
+if (MAX_BROADCAST_VALUE_BYTES !== MAX_PERSISTED_JSON_BYTES) {
+  throw new Error("Browser storage byte ceiling must match the graph-store persisted byte ceiling.");
 }
 
 const readSchema = (name) => {
   const text = fs.readFileSync(new URL(`../schema/${name}`, import.meta.url), "utf8");
-  assertUniqueJsonObjectKeys(text, name);
-  return JSON.parse(text);
+  return parseJsonWithUniqueKeys(text, name);
 };
 const graph = readSchema("graph.schema.json");
+const backup = readSchema("backup.schema.json");
 const feedback = readSchema("feedback.schema.json");
 const diff = readSchema("diff.schema.json");
 const jsonLd = readSchema("jsonld.schema.json");
 const health = readSchema("health.schema.json");
 const extractorRequest = readSchema("extractor-request.schema.json");
 const vaultManifest = readSchema("vault-manifest.schema.json");
+const learningLoop = readSchema("learning-loop.schema.json");
 const graphDefs = graph.$defs;
 const feedbackExample = feedback.properties.examples.items;
 const extractorDocument = extractorRequest.properties.document;
@@ -147,15 +79,19 @@ const checks = [
   [maxItems(graph, ["properties", "integrity", "properties", "conflictingEdgeIds"]), MAX_CONFLICTING_ITEM_IDS, "conflicting edge diagnostics"],
   [maxItems(graphDefs.evidence, ["properties", "sources"]), MAX_SOURCE_REFERENCES, "evidence sources"],
   [maxItems(graphDefs.node, ["properties", "evidence"]), MAX_EVIDENCE_RECORDS, "node evidence records"],
+  [maxItems(graphDefs.node, ["properties", "aliases"]), MAX_ALIASES, "node aliases"],
   [maxItems(graphDefs.edge, ["properties", "evidence"]), MAX_EVIDENCE_RECORDS, "edge evidence records"],
   [maxItems(jsonLd, ["$defs", "evidence"]), MAX_EVIDENCE_RECORDS, "JSON-LD evidence records"],
+  [maxItems(jsonLd, ["properties", "@graph"]), MAX_GRAPH_DOCUMENTS + MAX_GRAPH_NODES + MAX_GRAPH_EDGES + MAX_FEEDBACK_EXAMPLES + MAX_GRAPH_REVISIONS, "JSON-LD graph members"],
   [maximum(diff, ["$defs", "item", "properties", "evidenceCount"]), MAX_EVIDENCE_RECORDS, "diff evidence counts"],
   [maximum(health, ["properties", "reviewQueue", "items", "properties", "evidence"]), MAX_EVIDENCE_RECORDS, "health review evidence counts"],
   [maxLength(graphDefs.evidence, ["properties", "text"]), MAX_EVIDENCE_CHARS, "evidence text"],
   [maxLength(graphDefs.document, ["properties", "id"]), MAX_ID_CHARS, "document IDs"],
   [maxLength(graphDefs.document, ["properties", "text"]), MAX_DOCUMENT_CHARS, "document text"],
+  [maxLength(extractorDocument, ["properties", "title"]), MAX_DOCUMENT_TITLE_CHARS, "document titles"],
   [maxLength(graphDefs.document, ["properties", "uri"]), MAX_SOURCE_URI_CHARS, "document URIs"],
   [maxLength(graphDefs.document, ["properties", "addedAt"]), MAX_TIMESTAMP_CHARS, "document timestamps"],
+  [maxLength(graph, ["properties", "appVersion"]), MAX_PRODUCER_VERSION_CHARS, "graph producer versions"],
   [maxLength(graphDefs.node, ["properties", "id"]), MAX_ID_CHARS, "node IDs"],
   [maxLength(graphDefs.node, ["properties", "label"]), MAX_CONCEPT_LABEL_CHARS, "node labels"],
   [maxItems(graphDefs.node, ["properties", "sources"]), MAX_SOURCE_REFERENCES, "node sources"],
@@ -180,9 +116,14 @@ const checks = [
   [maximum(jsonLd, ["$defs", "diagnosticCounts", "properties", "sourceReferences"]), 4294967295, "JSON-LD source reference diagnostics"],
   [maximum(graph, ["properties", "version"]), MAX_GRAPH_VERSION, "graph versions"],
   [maximum(graph, ["properties", "integrity", "properties", "truncated", "properties", "evidenceItems"]), 4294967295, "evidence item truncation diagnostics"],
+  [maximum(graph, ["properties", "integrity", "properties", "truncated", "properties", "documentTitle"]), 4294967295, "document-title truncation diagnostics"],
   [maximum(graph, ["properties", "integrity", "properties", "truncated", "properties", "sourceReferences"]), 4294967295, "source reference truncation diagnostics"],
   [maximum(diff, ["$defs", "diagnosticCounts", "properties", "evidenceItems"]), 4294967295, "diff evidence item truncation diagnostics"],
+  [maximum(diff, ["$defs", "diagnosticCounts", "properties", "documentTitle"]), 4294967295, "diff document-title truncation diagnostics"],
   [maximum(diff, ["$defs", "diagnosticCounts", "properties", "sourceReferences"]), 4294967295, "diff source reference truncation diagnostics"],
+  [maximum(diff, ["$defs", "diagnosticCounts", "properties", "aliases"]), 4294967295, "diff alias truncation diagnostics"],
+  [maximum(jsonLd, ["$defs", "diagnosticCounts", "properties", "documentTitle"]), 4294967295, "JSON-LD document-title truncation diagnostics"],
+  [maximum(jsonLd, ["$defs", "diagnosticCounts", "properties", "aliases"]), 4294967295, "JSON-LD alias truncation diagnostics"],
   [maxItems(extractorRequest, ["properties", "feedback"]), MAX_FEEDBACK_EXAMPLES, "extractor feedback hints"],
   [maxLength(extractorDocument, ["properties", "uri"]), MAX_SOURCE_URI_CHARS, "extractor source URIs"],
   [maxLength(extractorFeedback, ["properties", "id"]), MAX_ID_CHARS, "extractor feedback IDs"],
@@ -191,9 +132,24 @@ const checks = [
   [maxLength(extractorFeedback, ["properties", "sourceLabel"]), MAX_FEEDBACK_LABEL_CHARS, "extractor source labels"],
   [maxLength(extractorFeedback, ["properties", "target"]), MAX_ID_CHARS, "extractor target IDs"],
   [maxLength(extractorFeedback, ["properties", "targetLabel"]), MAX_FEEDBACK_LABEL_CHARS, "extractor target labels"],
-  [maxItems(extractorFeedback, ["properties", "aliases"]), 20, "extractor feedback aliases"],
+  [maxItems(extractorFeedback, ["properties", "aliases"]), MAX_ALIASES, "extractor feedback aliases"],
   [maximum(vaultManifest, ["properties", "graphVersion"]), MAX_GRAPH_VERSION, "vault graph versions"],
-  [maxLength(vaultManifest, ["properties", "generatedAt"]), MAX_TIMESTAMP_CHARS, "vault manifest timestamps"]
+  [maxLength(vaultManifest, ["properties", "generatedAt"]), MAX_TIMESTAMP_CHARS, "vault manifest timestamps"],
+  [maxItems(backup, ["properties", "history"]), HISTORY_LIMIT, "backup history snapshots"],
+  [maxLength(vaultManifest, ["properties", "appVersion"]), MAX_PRODUCER_VERSION_CHARS, "vault producer versions"],
+  [maxLength(jsonLd, ["properties", "appVersion"]), MAX_PRODUCER_VERSION_CHARS, "JSON-LD producer versions"],
+  [maxLength(health, ["properties", "appVersion"]), MAX_PRODUCER_VERSION_CHARS, "health producer versions"],
+  [maxLength(backup, ["properties", "appVersion"]), MAX_PRODUCER_VERSION_CHARS, "backup producer versions"],
+  [maxItems(learningLoop, ["$defs", "extractionStage", "properties", "labels"]), MAX_GRAPH_NODES, "learning-loop stage labels"],
+  [maximum(learningLoop, ["$defs", "extractionStage", "properties", "concepts"]), MAX_GRAPH_NODES, "learning-loop stage concepts"],
+  [maximum(learningLoop, ["$defs", "extractionStage", "properties", "relations"]), MAX_GRAPH_EDGES, "learning-loop stage relations"],
+  [maxLength(learningLoop, ["$defs", "extractionStage", "properties", "labels", "items"]), MAX_CONCEPT_LABEL_CHARS, "learning-loop concept labels"],
+  [maxLength(learningLoop, ["$defs", "reviewedItem", "properties", "id"]), MAX_ID_CHARS, "learning-loop reviewed IDs"],
+  [maxLength(learningLoop, ["$defs", "reviewedItem", "properties", "label"]), MAX_CONCEPT_LABEL_CHARS, "learning-loop reviewed labels"],
+  [maximum(learningLoop, ["properties", "stages", "properties", "reviewed", "properties", "guidanceExamples"]), MAX_FEEDBACK_EXAMPLES, "learning-loop guidance examples"],
+  [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "baselineConcepts"]), MAX_GRAPH_NODES, "learning-loop baseline concepts"],
+  [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "guidedConcepts"]), MAX_GRAPH_NODES, "learning-loop guided concepts"],
+  [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "conceptsRemovedByGuidance"]), MAX_GRAPH_NODES, "learning-loop guidance delta"]
 ];
 
 for (const [key, expected] of Object.entries(HEALTH_GATE_LIMITS)) {
@@ -235,5 +191,7 @@ for (const key of HEALTH_OBJECTS) {
 for (const [actual, expected, label] of checks) {
   assert.equal(actual, expected, `${label} schema bound drifted: expected ${expected}, got ${actual}`);
 }
+assert.deepEqual(at(graphDefs.revision, ["properties", "operation", "enum"]), [...REVISION_OPERATIONS], "revision operation vocabulary drifted");
+assert.deepEqual(at(graphDefs.revision, ["properties", "extractor", "enum"]), [...REVISION_EXTRACTORS], "revision extractor vocabulary drifted");
 
 console.log(`contract check ok: ${checks.length} runtime/schema bounds`);

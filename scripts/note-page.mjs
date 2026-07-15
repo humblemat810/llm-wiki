@@ -1,4 +1,13 @@
+import { requirePublicOrigin } from "./public-origin.mjs";
+
 export const MAX_NOTE_SUMMARY_CHARS = 20000;
+export const sliceTextAtCodePointBoundary = (value, limit) => {
+  const bounded = String(value).slice(0, limit);
+  const lastCodeUnit = bounded.charCodeAt(bounded.length - 1);
+  return lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF
+    ? bounded.slice(0, -1)
+    : bounded;
+};
 
 const escapeHtml = (value) => String(value)
   .replace(/&/g, "&amp;")
@@ -128,16 +137,17 @@ export function buildLearningNotePage({
   content,
   origin = ""
 }) {
-  const base = origin ? `${origin}/` : "./";
-  const rootUrl = origin || "..";
-  const pageUrl = origin
+  const safeOrigin = requirePublicOrigin(origin);
+  const base = safeOrigin ? `${safeOrigin}/` : "./";
+  const rootUrl = safeOrigin || "..";
+  const pageUrl = safeOrigin
     ? new URL(`./notes/${encodeURIComponent(id)}.html`, base).toString()
     : `./notes/${encodeURIComponent(id)}.html`;
-  const markdownUrl = origin
+  const markdownUrl = safeOrigin
     ? new URL(`./notes/${encodeURIComponent(id)}.md`, base).toString()
     : `./${encodeURIComponent(id)}.md`;
-  const feedUrl = origin ? new URL("./feed.xml", base).toString() : "../feed.xml";
-  const appUrl = origin ? new URL("./#note=" + encodeURIComponent(id), base).toString() : `../#note=${encodeURIComponent(id)}`;
+  const feedUrl = safeOrigin ? new URL("./feed.xml", base).toString() : "../feed.xml";
+  const appUrl = safeOrigin ? new URL("./#note=" + encodeURIComponent(id), base).toString() : `../#note=${encodeURIComponent(id)}`;
   const safeTitle = escapeHtml(title);
   const safeDescription = escapeHtml(description);
   const renderedContent = renderLearningNoteMarkdown(content, title);
@@ -147,11 +157,11 @@ export function buildLearningNotePage({
     headline: String(title),
     description: String(description),
     url: pageUrl,
-    image: origin ? `${origin}/social-card.svg` : "../social-card.svg",
+    image: safeOrigin ? `${safeOrigin}/social-card.svg` : "../social-card.svg",
     isPartOf: {
       "@type": "WebSite",
       name: "LLM Field Notes",
-      url: origin || rootUrl
+      url: safeOrigin || rootUrl
     },
     mainEntityOfPage: {
       "@type": "WebPage",
@@ -172,7 +182,7 @@ export function buildLearningNotePage({
     <meta property="article:section" content="LLM education" />
     <meta property="og:site_name" content="LLM Field Notes" />
     <meta property="og:url" content="${escapeHtml(pageUrl)}" />
-    <meta property="og:image" content="${escapeHtml(origin ? `${origin}/social-card.svg` : "../social-card.svg")}" />
+    <meta property="og:image" content="${escapeHtml(safeOrigin ? `${safeOrigin}/social-card.svg` : "../social-card.svg")}" />
     <meta property="og:image:type" content="image/svg+xml" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
@@ -181,11 +191,11 @@ export function buildLearningNotePage({
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="${safeTitle} · LLM Field Notes" />
     <meta name="twitter:description" content="${safeDescription}" />
-    <meta name="twitter:image" content="${escapeHtml(origin ? `${origin}/social-card.svg` : "../social-card.svg")}" />
+    <meta name="twitter:image" content="${escapeHtml(safeOrigin ? `${safeOrigin}/social-card.svg` : "../social-card.svg")}" />
     <link rel="canonical" href="${escapeHtml(pageUrl)}" />
     <link rel="alternate" type="text/markdown" href="${escapeHtml(markdownUrl)}" title="${safeTitle} Markdown" />
     <link rel="alternate" type="application/atom+xml" href="${escapeHtml(feedUrl)}" title="LLM Field Notes feed" />
-    <link rel="stylesheet" href="${escapeHtml(origin ? `${origin}/styles.css` : "../styles.css")}" />
+    <link rel="stylesheet" href="${escapeHtml(safeOrigin ? `${safeOrigin}/styles.css` : "../styles.css")}" />
     <title>${safeTitle} · LLM Field Notes</title>
   </head>
   <body>

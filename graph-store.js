@@ -1,4 +1,4 @@
-import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_GRAPH_REVISIONS, defaultGraph, fingerprintBackup, normalizeGraph } from "./graph-core.js";
+import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_GRAPH_REVISIONS, defaultGraph, fingerprintBackup, normalizeGraph, parseJsonWithUniqueKeys } from "./graph-core.js";
 
 export const GRAPH_KEY = "llm-field-notes-knowledge-graph";
 export const HISTORY_KEY = "llm-field-notes-knowledge-graph-history";
@@ -49,8 +49,16 @@ export function createGraphStore(storage, {
     if (exceedsPersistedLimit(raw)) throw new Error("Graph history exceeds the persisted state safety limit.");
     return raw;
   };
-  const hasImportTruncation = (graph) => Object.values(graph?.integrity?.truncated || {})
-    .some((count) => Number.isSafeInteger(count) && count > 0);
+  const hasImportIntegrityLoss = (graph) => [
+    ...Object.values(graph?.integrity?.truncated || {}),
+    ...Object.values(graph?.integrity?.dropped || {})
+  ].some((count) => Number.isSafeInteger(count) && count > 0);
+  const commitTimestamp = () => new Date().toISOString();
+  const graphContentSerialization = (graph) => {
+    if (!graph || typeof graph !== "object") return JSON.stringify(graph);
+    const { committedAt, ...content } = graph;
+    return JSON.stringify(content);
+  };
   const trimHistory = (history) => historyCapacity === 0 ? [] : history.slice(-historyCapacity);
   const isGraphRecord = (value) => value
     && typeof value === "object"
@@ -74,7 +82,7 @@ export function createGraphStore(storage, {
     try {
       raw = storage.getItem(graphKey);
       if (typeof raw === "string" && exceedsPersistedLimit(raw)) throw new Error("Persisted graph exceeds the safety limit.");
-      const stored = JSON.parse(raw || "null");
+      const stored = parseJsonWithUniqueKeys(raw || "null", "Persisted graph");
       const normalized = normalizeGraph(stored);
       if (stored && typeof stored === "object" && (
         (stored.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(stored.schema))
@@ -128,7 +136,7 @@ export function createGraphStore(storage, {
         captureRaw(historyRecoveryKey, raw);
         return [];
       }
-      const stored = JSON.parse(raw || "[]");
+      const stored = parseJsonWithUniqueKeys(raw || "[]", "Persisted graph history");
       if (!Array.isArray(stored)) {
         captureRaw(historyRecoveryKey, raw);
         return [];
@@ -180,6 +188,9 @@ export function createGraphStore(storage, {
     read,
     readHistory,
     readRecovery,
+    captureRecoverySnapshot(raw) {
+      captureRecovery(raw);
+    },
     clearRecovery,
     readHistoryRecovery,
     clearHistoryRecovery,
@@ -212,15 +223,23 @@ export function createGraphStore(storage, {
           lastWriteMode = "conflict";
           return false;
         }
-        if (hasImportTruncation(current)
-          && hasImportTruncation(normalized)
+        if (hasImportIntegrityLoss(current)
+          && hasImportIntegrityLoss(normalized)
           && fingerprintBackup(current) !== fingerprintBackup(normalized)) {
           lastWriteMode = "integrity";
           return false;
         }
+        const graphChanged = graphContentSerialization(current) !== graphContentSerialization(normalized);
+        if (graphChanged) {
+          normalized.committedAt = commitTimestamp();
+          normalizedRaw = serializeGraph(normalized);
+        } else if (current.committedAt) {
+          normalized.committedAt = current.committedAt;
+          normalizedRaw = serializeGraph(normalized);
+        }
         if (recordHistory) {
           const history = readHistory();
-          if (current.version !== normalized.version || JSON.stringify(current) !== JSON.stringify(normalized)) {
+          if (graphChanged) {
             history.push(current);
             nextHistoryRaw = serializeHistory(trimHistory(history));
           }
@@ -281,6 +300,7 @@ export function createGraphStore(storage, {
           lastWriteMode = "none";
           return false;
         }
+        previous.committedAt = commitTimestamp();
         storage.setItem(graphKey, serializeGraph(previous));
         storage.setItem(historyKey, serializeHistory(history));
         lastWriteMode = "normal";
@@ -294,7 +314,21 @@ export function createGraphStore(storage, {
     restore(graph, history = [], { expectedVersion, expectedFingerprint, preserveCurrent = false } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
-      const normalizedGraph = normalizeGraph(graph);
+      const rawGraph = (() => {
+        try {
+          return JSON.stringify(graph);
+        } catch {
+          return null;
+        }
+      })();
+      let normalizedGraph;
+      try {
+        normalizedGraph = normalizeGraph(graph);
+      } catch {
+        lastWriteMode = "failed";
+        return false;
+      }
+      if (hasImportIntegrityLoss(normalizedGraph)) captureRaw(recoveryKey, rawGraph);
       const rawHistory = Array.isArray(history)
         ? (() => {
           try {
@@ -305,17 +339,28 @@ export function createGraphStore(storage, {
         })()
         : null;
       const validHistory = Array.isArray(history) ? history.filter(isGraphRecord) : [];
-      if (Array.isArray(history) && (validHistory.length !== history.length || validHistory.length > historyCapacity)) {
+      const boundedHistory = trimHistory(validHistory);
+      let normalizedHistory = boundedHistory.map(normalizeGraph);
+      let historyNormalizationChanged;
+      try {
+        historyNormalizationChanged = JSON.stringify(boundedHistory) !== JSON.stringify(normalizedHistory);
+      } catch {
+        lastWriteMode = "failed";
+        return false;
+      }
+      if (Array.isArray(history)
+        && (validHistory.length !== history.length
+          || validHistory.length > historyCapacity
+          || historyNormalizationChanged)) {
         captureRaw(historyRecoveryKey, rawHistory);
       }
-      let normalizedHistory = trimHistory(validHistory).map(normalizeGraph);
       if (preserveCurrent) {
         const current = read();
         const currentHasContent = current.nodes.length
           || current.edges.length
           || current.documents.length
           || current.learning?.examples?.length;
-        if (currentHasContent && JSON.stringify(current) !== JSON.stringify(normalizedGraph)) {
+        if (currentHasContent && graphContentSerialization(current) !== graphContentSerialization(normalizedGraph)) {
           const combinedHistory = [...normalizedHistory, current];
           if (combinedHistory.length > historyCapacity) {
             captureRaw(historyRecoveryKey, (() => {
@@ -351,6 +396,13 @@ export function createGraphStore(storage, {
           || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
           lastWriteMode = "conflict";
           return false;
+        }
+        if (graphContentSerialization(current) !== graphContentSerialization(normalizedGraph)) {
+          normalizedGraph.committedAt = commitTimestamp();
+          normalizedGraphRaw = serializeGraph(normalizedGraph);
+        } else if (current.committedAt) {
+          normalizedGraph.committedAt = current.committedAt;
+          normalizedGraphRaw = serializeGraph(normalizedGraph);
         }
         storage.setItem(graphKey, normalizedGraphRaw);
         storage.setItem(historyKey, normalizedHistoryRaw);

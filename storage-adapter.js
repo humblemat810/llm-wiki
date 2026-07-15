@@ -1,3 +1,5 @@
+import { parseJsonWithUniqueKeys } from "./graph-core.js";
+
 const STORAGE_PREFIX = "llm-field-notes-";
 const DATABASE_NAME = "llm-field-notes";
 const DATABASE_VERSION = 1;
@@ -8,8 +10,10 @@ export const IDB_OPERATION_TIMEOUT_MS = 5000;
 export const PENDING_WRITES_KEY = `${STORAGE_PREFIX}pending-writes`;
 export const MAX_STORAGE_KEY_CHARS = 256;
 export const MAX_BROADCAST_VALUE_CHARS = 50 * 1024 * 1024;
+export const MAX_BROADCAST_VALUE_BYTES = 50 * 1024 * 1024;
 const MAX_PENDING_WRITES = 100;
 let storageInstanceSequence = 0;
+const utf8Encoder = new TextEncoder();
 
 export function createMemoryStorage() {
   const values = new Map();
@@ -39,34 +43,69 @@ function readLocalValues(storage) {
 }
 
 function readPendingWrites(storage) {
-  if (!storage) return new Map();
+  const pending = new Map();
+  pending.invalid = false;
+  if (!storage) return pending;
   try {
-    const parsed = JSON.parse(storage.getItem(PENDING_WRITES_KEY) || "[]");
-    const pending = new Map();
+    const parsed = parseJsonWithUniqueKeys(storage.getItem(PENDING_WRITES_KEY) || "[]", "Pending durable writes");
     if (Array.isArray(parsed)) {
+      if (parsed.length > MAX_PENDING_WRITES || parsed.some((key) => !isValidStorageKey(key) || key === PENDING_WRITES_KEY)) {
+        pending.invalid = true;
+        return pending;
+      }
       parsed
-        .filter((key) => isValidStorageKey(key) && key !== PENDING_WRITES_KEY)
-        .slice(-MAX_PENDING_WRITES)
         .forEach((key) => pending.set(key, "legacy"));
       return pending;
     }
-    if (!parsed || typeof parsed !== "object") return pending;
-    Object.entries(parsed)
-      .filter(([key, token]) => isValidStorageKey(key) && key !== PENDING_WRITES_KEY && typeof token === "string" && token.length <= 128)
-      .slice(-MAX_PENDING_WRITES)
-      .forEach(([key, token]) => pending.set(key, token));
+    if (!parsed || typeof parsed !== "object") {
+      pending.invalid = true;
+      return pending;
+    }
+    const entries = Object.entries(parsed);
+    if (entries.length > MAX_PENDING_WRITES
+      || entries.some(([key, token]) => !isValidStorageKey(key)
+        || key === PENDING_WRITES_KEY
+        || typeof token !== "string"
+        || token.length > 128)) {
+      pending.invalid = true;
+      return pending;
+    }
+    entries.forEach(([key, token]) => pending.set(key, token));
     return pending;
   } catch {
-    return new Map();
+    pending.invalid = true;
+    return pending;
   }
 }
 
-function isValidBroadcastValue(value) {
-  return value === null || (typeof value === "string" && value.length <= MAX_BROADCAST_VALUE_CHARS);
+export function isValidStorageValue(value, {
+  maxChars = MAX_BROADCAST_VALUE_CHARS,
+  maxBytes = MAX_BROADCAST_VALUE_BYTES
+} = {}) {
+  if (value === null) return true;
+  if (typeof value !== "string" || value.length > maxChars || value.length > maxBytes) return false;
+  // A JavaScript string encodes to at most four UTF-8 bytes per code unit.
+  // Most graph values fit below this conservative threshold, avoiding a
+  // complete re-encode on every ordinary storage read.
+  if (value.length <= Math.floor(maxBytes / 4)) return true;
+  return utf8Encoder.encode(value).byteLength <= maxBytes;
 }
+
+export function isExternalStorageRemoval(event, key) {
+  return event?.external === true && event.key === key && event.newValue === null;
+}
+
+const isValidBroadcastValue = (value) => isValidStorageValue(value);
 
 function isValidStorageKey(key) {
   return typeof key === "string" && key.length <= MAX_STORAGE_KEY_CHARS && key.startsWith(STORAGE_PREFIX);
+}
+
+function assertStorageKey(key) {
+  if (!isValidStorageKey(key)) {
+    throw new Error(`Storage keys must use the "${STORAGE_PREFIX}" namespace and be no longer than ${MAX_STORAGE_KEY_CHARS} characters.`);
+  }
+  return key;
 }
 
 function openDatabase(indexedDB) {
@@ -191,9 +230,28 @@ function createDurableStorage(owner, localStorage) {
     }
   };
   const pendingWrites = readPendingWrites(fallbackStorage);
-  const persistPendingWrites = () => {
-    if (pendingWrites.size) fallbackWrite(PENDING_WRITES_KEY, JSON.stringify(Object.fromEntries([...pendingWrites].slice(-MAX_PENDING_WRITES))));
-    else fallbackWrite(PENDING_WRITES_KEY, null);
+  const replacePendingWrites = (nextPendingWrites) => {
+    pendingWrites.clear();
+    pendingWrites.invalid = false;
+    nextPendingWrites.forEach((token, key) => pendingWrites.set(key, token));
+    if (pendingWrites.size) {
+      fallbackWrite(PENDING_WRITES_KEY, JSON.stringify(Object.fromEntries([...pendingWrites].slice(-MAX_PENDING_WRITES))));
+    } else {
+      fallbackWrite(PENDING_WRITES_KEY, null);
+    }
+  };
+  const updatePendingWrite = (key, token, remove = false) => {
+    const latest = readPendingWrites(fallbackStorage);
+    if (remove) {
+      if (latest.get(key) !== token) {
+        pendingWrites.delete(key);
+        return;
+      }
+      latest.delete(key);
+    } else {
+      latest.set(key, token);
+    }
+    replacePendingWrites(latest);
   };
   let pendingSequence = 0;
   const instanceId = (() => {
@@ -209,14 +267,12 @@ function createDurableStorage(owner, localStorage) {
     if (!key || key === PENDING_WRITES_KEY) return null;
     pendingSequence += 1;
     const token = `${Date.now()}-${instanceId}-${pendingSequence}`;
-    pendingWrites.set(key, token);
-    persistPendingWrites();
+    updatePendingWrite(key, token);
     return token;
   };
   const clearPending = (key, token) => {
     if (pendingWrites.get(key) !== token) return;
-    pendingWrites.delete(key);
-    persistPendingWrites();
+    updatePendingWrite(key, token, true);
   };
   const enqueueDurableWrite = (key, token, operation, fallback) => {
     writeQueue = writeQueue.then(async () => {
@@ -232,12 +288,14 @@ function createDurableStorage(owner, localStorage) {
   };
   const storage = {
     getItem(key) {
+      if (!isValidStorageKey(key)) return null;
       if (hydrated) return values.has(key) ? values.get(key) : null;
       if (values.has(key)) return values.get(key);
       const fallbackValue = fallbackStorage.getItem(key);
       return isValidBroadcastValue(fallbackValue) ? fallbackValue : null;
     },
     setItem(key, value) {
+      assertStorageKey(key);
       const normalized = String(value);
       if (!isValidBroadcastValue(normalized)) {
         throw new Error("Storage value exceeds the safety limit.");
@@ -251,6 +309,7 @@ function createDurableStorage(owner, localStorage) {
       notify(key, normalized);
     },
     removeItem(key) {
+      if (!isValidStorageKey(key)) return;
       values.delete(key);
       if (!hydrated) dirtyBeforeReady.set(key, null);
       const pendingToken = owner.indexedDB ? markPending(key) : null;
@@ -326,6 +385,10 @@ function createDurableStorage(owner, localStorage) {
       const localValues = new Map(values);
       const pendingValues = new Map(dirtyBeforeReady);
       const pendingKeys = new Set([...pendingWrites.keys(), ...pendingValues.keys()]);
+      if (pendingWrites.invalid) {
+        localValues.forEach((_, key) => pendingKeys.add(key));
+        storageFailure = true;
+      }
       values.clear();
       storedValues.forEach((value, key) => values.set(key, value));
       localValues.forEach((value, key) => {
@@ -458,16 +521,19 @@ export function getBrowserStorage(owner = globalThis) {
     }
     const storage = {
       getItem: (key) => {
+        if (!isValidStorageKey(key)) return null;
         const value = localStorage.getItem(key);
         return isValidBroadcastValue(value) ? value : null;
       },
       setItem: (key, value) => {
+        assertStorageKey(key);
         const normalized = String(value);
         if (!isValidBroadcastValue(normalized)) throw new Error("Storage value exceeds the safety limit.");
         localStorage.setItem(key, normalized);
         publish(key, normalized);
       },
       removeItem: (key) => {
+        if (!isValidStorageKey(key)) return;
         localStorage.removeItem(key);
         publish(key, null);
       },

@@ -3,8 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { defaultGraph } from "../graph-core.js";
+import { MAX_CONCEPT_LABEL_CHARS, buildBackupEnvelope, buildGraphExport, defaultGraph, fingerprintBackup } from "../graph-core.js";
 import { scaledDotProductAttention, softmax } from "../experiments/tiny-attention.mjs";
+import { runLearningLoop, validateLearningLoopOutput } from "../experiments/learning-loop.mjs";
 
 const probabilities = softmax([1, 2, 3]);
 assert(Math.abs(probabilities.reduce((sum, value) => sum + value, 0) - 1) < 1e-9);
@@ -22,6 +23,109 @@ result.forEach((row, index) => {
 });
 const cliOutput = execFileSync(process.execPath, ["experiments/tiny-attention.mjs"], { encoding: "utf8" });
 assert(cliOutput.includes("row 0:"), "the attention experiment CLI should run successfully");
+const verifierRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-graph-verifier-"));
+try {
+  const graph = buildGraphExport({
+    ...defaultGraph(),
+    version: 3,
+    nodes: [{ id: "attention", label: "Attention" }]
+  }, { appVersion: "0.1.0" });
+  const graphPath = join(verifierRoot, "graph.json");
+  await writeFile(graphPath, JSON.stringify(graph));
+  const graphResult = JSON.parse(execFileSync(process.execPath, ["experiments/verify-graph.mjs", graphPath], { encoding: "utf8" }));
+  assert.equal(graphResult.verified, true, "graph verifier should accept a matching fingerprint");
+  assert.equal(graphResult.graphFingerprint, graph.graphFingerprint);
+  assert.equal(graphResult.appVersion, "0.1.0");
+  assert.equal(graphResult.complete, true, "graph verifier should distinguish a valid complete export");
+  assert.deepEqual(graphResult.integrity, { truncatedItems: 0, droppedItems: 0 }, "complete graph verification should report zero import loss");
+  const incompleteGraphPath = join(verifierRoot, "incomplete-graph.json");
+  const incompleteGraph = buildGraphExport({ ...defaultGraph(), documents: [null] }, { appVersion: "0.1.0" });
+  await writeFile(incompleteGraphPath, JSON.stringify(incompleteGraph));
+  const incompleteResult = JSON.parse(execFileSync(process.execPath, ["experiments/verify-graph.mjs", incompleteGraphPath], { encoding: "utf8" }));
+  assert.equal(incompleteResult.verified, true, "graph verifier should still verify the fingerprint of a lossy export");
+  assert.equal(incompleteResult.complete, false, "graph verifier should disclose a lossy export instead of implying completeness");
+  assert.deepEqual(incompleteResult.integrity, { truncatedItems: 0, droppedItems: 1 }, "graph verifier should report dropped import entries");
+  const backupPath = join(verifierRoot, "backup.json");
+  await writeFile(backupPath, JSON.stringify(buildBackupEnvelope(graph, [defaultGraph()], { appVersion: "0.1.0" })));
+  const backupResult = JSON.parse(execFileSync(process.execPath, ["experiments/verify-graph.mjs", backupPath], { encoding: "utf8" }));
+  assert.equal(backupResult.verified, true, "graph verifier should accept a matching backup fingerprint");
+  assert.equal(backupResult.format, "llm-field-notes/backup@1");
+  assert.equal(backupResult.complete, true, "graph verifier should report complete backup history");
+  const malformedBackupPath = join(verifierRoot, "malformed-backup.json");
+  await writeFile(malformedBackupPath, JSON.stringify({
+    ...buildBackupEnvelope(graph, [defaultGraph()], { appVersion: "0.1.0" }),
+    history: [{ schema: "not-a-graph" }],
+    graphFingerprint: fingerprintBackup(graph, [{ schema: "not-a-graph" }])
+  }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/verify-graph.mjs", malformedBackupPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    "graph verifier should reject malformed backup history even when its normalized fingerprint matches"
+  );
+  const tamperedPath = join(verifierRoot, "tampered.json");
+  await writeFile(tamperedPath, JSON.stringify({ ...graph, nodes: [{ id: "attention", label: "Tampered" }] }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/verify-graph.mjs", tamperedPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    "graph verifier should reject a tampered graph"
+  );
+} finally {
+  await rm(verifierRoot, { recursive: true, force: true });
+}
+const learningLoop = runLearningLoop();
+assert.equal(learningLoop.format, "llm-field-notes/learning-loop@1");
+assert.equal(learningLoop.proof.acceptedConceptRetained, true, "the learning loop should retain an accepted concept in follow-up extraction");
+assert.equal(learningLoop.proof.rejectedConceptSuppressed, true, "the learning loop should suppress a rejected concept in follow-up extraction");
+assert.equal(learningLoop.proof.reviewedGuidanceIsPortable, true, "the learning loop should export portable reviewed guidance");
+assert(learningLoop.stages.reviewed.guidanceExamples <= 500, "the learning loop should keep guidance within the published bound");
+assert.equal(learningLoop.stages.comparison.rejectedConceptPresentWithoutGuidance, true, "the learning loop baseline should contain the rejected concept");
+assert.equal(learningLoop.stages.comparison.rejectedConceptPresentWithGuidance, false, "the guided follow-up should suppress the rejected concept");
+assert(learningLoop.stages.comparison.conceptsRemovedByGuidance > 0, "the learning loop should expose a measurable guidance delta");
+assert.equal(validateLearningLoopOutput(learningLoop), true, "learning-loop output should pass its runtime contract");
+assert.throws(
+  () => validateLearningLoopOutput({
+    ...learningLoop,
+    stages: {
+      ...learningLoop.stages,
+      comparison: { ...learningLoop.stages.comparison, conceptsRemovedByGuidance: 99 }
+    }
+  }),
+  /delta is inconsistent/,
+  "learning-loop validation should reject inconsistent comparison deltas"
+);
+assert.throws(
+  () => validateLearningLoopOutput({ ...learningLoop, unexpected: true }),
+  /unsupported fields/,
+  "learning-loop validation should reject fields outside the published closed schema"
+);
+assert.throws(
+  () => validateLearningLoopOutput({
+    ...learningLoop,
+    stages: {
+      ...learningLoop.stages,
+      improved: { ...learningLoop.stages.improved, relations: 10001 }
+    }
+  }),
+  /stage is invalid/,
+  "learning-loop validation should enforce relation bounds from the published schema"
+);
+assert.throws(
+  () => validateLearningLoopOutput({
+    ...learningLoop,
+    stages: {
+      ...learningLoop.stages,
+      improved: {
+        ...learningLoop.stages.improved,
+        labels: ["x".repeat(MAX_CONCEPT_LABEL_CHARS + 1)],
+        concepts: 1
+      }
+    }
+  }),
+  /stage is invalid/,
+  "learning-loop validation should use the canonical concept-label bound"
+);
+const learningLoopCli = execFileSync(process.execPath, ["experiments/learning-loop.mjs"], { encoding: "utf8" });
+assert(JSON.parse(learningLoopCli).proof.rejectedConceptSuppressed, "the learning-loop CLI should emit verifiable JSON");
+const learningLoopPackageCli = execFileSync("npm", ["run", "learning:loop", "--silent"], { encoding: "utf8" });
+assert(JSON.parse(learningLoopPackageCli).proof.reviewedGuidanceIsPortable, "the learning-loop package command should execute the canonical artifact");
 const diffRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-diff-"));
 try {
   const beforePath = join(diffRoot, "before.json");
@@ -36,6 +140,17 @@ try {
   const diff = JSON.parse(diffOutput);
   assert.equal(diff.format, "llm-field-notes/diff@1", "the graph diff CLI should emit the versioned diff contract");
   assert.equal(diff.nodes.added[0].id, "attention", "the graph diff CLI should report added concepts");
+  const diffPath = join(diffRoot, "diff.json");
+  await writeFile(diffPath, diffOutput);
+  const verifiedDiff = JSON.parse(execFileSync(process.execPath, ["experiments/verify-diff.mjs", beforePath, afterPath, diffPath], { encoding: "utf8" }));
+  assert.equal(verifiedDiff.verified, true, "the diff verifier CLI should recompute and verify an existing diff artifact");
+  const tamperedDiffPath = join(diffRoot, "tampered-diff.json");
+  await writeFile(tamperedDiffPath, JSON.stringify({ ...diff, toFingerprint: "fnv64-0000000000000000-1" }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/verify-diff.mjs", beforePath, afterPath, tamperedDiffPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("does not match"),
+    "the diff verifier should reject tampered diff fingerprints"
+  );
   const invalidPath = join(diffRoot, "invalid.json");
   await writeFile(invalidPath, JSON.stringify({ schema: "llm-field-notes/graph@999" }));
   assert.throws(
@@ -108,9 +223,9 @@ try {
     evaluatedAt: "2026-07-13T00:00:00.000Z",
     extraction: { concepts: 100, relations: 100 },
     feedback: {
-      examples: 4,
+      examples: 400,
       datasetFingerprint: "fnv1a-deadbeef",
-      freshExamples: 4,
+      freshExamples: 400,
       staleExamples: 0,
       undatedExamples: 0,
       untrustedExamples: 0,
@@ -190,7 +305,7 @@ try {
   }, "promotion artifacts should record the freshness gate and evaluated counts");
   await writeFile(candidateEvaluationPath, JSON.stringify({
     ...evaluation(.9, .95),
-    feedback: { ...evaluation(.9, .95).feedback, freshExamples: 3, staleExamples: 1, untrustedExamples: 1 }
+    feedback: { ...evaluation(.9, .95).feedback, freshExamples: 399, staleExamples: 1, untrustedExamples: 1 }
   }));
   assert.throws(
     () => execFileSync(process.execPath, [

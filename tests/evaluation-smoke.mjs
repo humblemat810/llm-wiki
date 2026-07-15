@@ -82,6 +82,11 @@ assert.throws(
   "evaluation validation should require a full date-time rather than a date-only value"
 );
 assert.throws(
+  () => validateEvaluationReport({ ...report, evaluatedAt: "2026-02-31T00:00:00.000Z" }),
+  /evaluatedAt must be a valid bounded date-time/,
+  "evaluation validation should reject impossible calendar dates"
+);
+assert.throws(
   () => validateEvaluationReport({ ...report, evaluatedAt: "x".repeat(129) }),
   /evaluatedAt must be a valid bounded date-time/,
   "evaluation validation should bound provenance timestamp strings"
@@ -120,6 +125,42 @@ assert.throws(
   () => validateEvaluationReport({ ...report, feedback: { ...report.feedback, concepts: { ...report.feedback.concepts, accepted: { ...report.feedback.concepts.accepted, evidenceCoverage: 1 } } } }),
   /evidenceCoverage is inconsistent with its counts/,
   "evaluation validation should reject fabricated evidence coverage ratios"
+);
+assert.throws(
+  () => validateEvaluationReport({
+    ...report,
+    feedback: {
+      ...report.feedback,
+      concepts: {
+        ...report.feedback.concepts,
+        accepted: {
+          ...report.feedback.concepts.accepted,
+          expected: report.feedback.concepts.accepted.expected + 1,
+          missed: report.feedback.concepts.accepted.missed + 1,
+          recall: 0.3333
+        }
+      }
+    },
+    overall: {
+      ...report.overall,
+      accepted: {
+        ...report.overall.accepted,
+        expected: report.overall.accepted.expected + 1,
+        missed: report.overall.accepted.missed + 1,
+        recall: 0.5
+      }
+    }
+  }),
+  /category counts do not match the reviewed-example count/,
+  "evaluation validation should reject reports whose category denominators do not cover the declared reviewed dataset"
+);
+assert.throws(
+  () => validateEvaluationReport({
+    ...report,
+    extraction: { concepts: 0, relations: report.extraction.relations }
+  }),
+  /reports more matched candidates than the extraction contains/,
+  "evaluation validation should reject reports claiming matches that exceed candidate output"
 );
 const unmatchedReviewedExamples = evaluateExtraction({
   nodes: [{ id: "attention", label: "Attention" }],
@@ -257,10 +298,14 @@ assert.throws(
 );
 const boundedEvaluationAliases = new Array(21).fill("alias");
 Object.defineProperty(boundedEvaluationAliases, 20, { get() { throw new Error("evaluation alias beyond the bound was read"); } });
-assert.doesNotThrow(() => evaluateExtraction(
+assert.throws(() => evaluateExtraction(
   { source: { title: "Bounded evaluation", text: "Attention uses context to create a useful graph representation for review." }, nodes: [{ id: "attention", label: "Attention" }] },
   [{ kind: "concept", id: "attention", label: "Attention", aliases: boundedEvaluationAliases, status: "accepted" }]
-), "evaluation matching should stop reading aliases after their bound");
+), /aliases exceeds the bounded unique alias contract/, "evaluation should reject aliases beyond the graph contract before matching");
+assert.throws(() => evaluateExtraction(
+  { nodes: [], edges: [] },
+  [{ kind: "concept", id: "duplicate-aliases", label: "Bounded", aliases: ["same", "same"], status: "accepted" }]
+), /aliases exceeds the bounded unique alias contract/, "evaluation should reject duplicate reviewed aliases instead of silently canonicalizing them");
 const largeEvaluation = evaluateExtraction(
   { nodes: [], edges: [] },
   Array.from({ length: 501 }, (_, index) => ({ kind: "concept", id: `evaluation-${index}`, label: `Evaluation ${index}`, status: "accepted" }))
@@ -328,6 +373,12 @@ assert.equal(freshnessReport.feedback.freshExamples, 1);
 assert.equal(freshnessReport.feedback.staleExamples, 1);
 assert.equal(freshnessReport.feedback.undatedExamples, 1);
 assert.equal(freshnessReport.feedback.untrustedExamples, 2);
+const futureDatedReport = evaluateExtraction({ nodes: [], edges: [] }, [
+  { kind: "concept", id: "future", label: "Future", status: "accepted", lastReviewedAt: "2099-01-01T00:00:00.000Z" }
+]);
+assert.equal(futureDatedReport.feedback.freshExamples, 0, "future-dated reviews must not be treated as trusted freshness");
+assert.equal(futureDatedReport.feedback.undatedExamples, 1, "future-dated reviews should fall into the conservative untrusted bucket");
+assert.equal(futureDatedReport.feedback.untrustedExamples, 1);
 
 const temporaryDirectory = await mkdtemp(join("/tmp", "llm-field-notes-evaluation-"));
 try {

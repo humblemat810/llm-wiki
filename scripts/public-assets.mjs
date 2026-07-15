@@ -6,9 +6,11 @@ export const CORE_SHELL_ASSETS = [
   "index.html",
   "styles.css",
   "app.js",
+  "curriculum.js",
   "graph-core.js",
   "graph-store.js",
   "extractor-adapter.js",
+  "rebuild-adapter.js",
   "projection-adapter.js",
   "jsonld-projection.js",
   "storage-adapter.js",
@@ -22,6 +24,7 @@ export const CORE_SHELL_ASSETS = [
 
 export const FIXED_PUBLIC_ASSETS = [
   ...CORE_SHELL_ASSETS,
+  "404.html",
   "robots.txt",
   "README.md",
   "ARCHITECTURE.md",
@@ -31,7 +34,26 @@ export const FIXED_PUBLIC_ASSETS = [
   "SECURITY.md",
   "CODE_OF_CONDUCT.md",
   "CONTRIBUTING.md",
+  "ARTIFACTS.md",
+  "ARTIFACT_SUBMISSION.md",
+  "artifacts.html",
+  "examples/sample-graph.json",
   "experiments/README.md",
+  "experiments/bounded-file.mjs",
+  "experiments/compare-evaluations.mjs",
+  "experiments/diff-graphs.mjs",
+  "experiments/evaluate-feedback.mjs",
+  "experiments/graph-input.mjs",
+  "experiments/inspect-graph.mjs",
+  "experiments/learning-loop.mjs",
+  "experiments/tiny-bpe.mjs",
+  "experiments/tiny-attention.mjs",
+  "experiments/tiny-training.mjs",
+  "experiments/tiny-transformer.mjs",
+  "experiments/project-jsonld.mjs",
+  "experiments/verify-jsonld.mjs",
+  "experiments/verify-graph.mjs",
+  "experiments/verify-diff.mjs",
   "schema/graph.schema.json",
   "schema/feedback.schema.json",
   "schema/backup.schema.json",
@@ -39,6 +61,7 @@ export const FIXED_PUBLIC_ASSETS = [
   "schema/evaluation-comparison.schema.json",
   "schema/health.schema.json",
   "schema/jsonld.schema.json",
+  "schema/learning-loop.schema.json",
   "schema/vault-manifest.schema.json",
   "schema/extractor-request.schema.json",
   "schema/evaluation.schema.json"
@@ -57,10 +80,16 @@ export const LEARNING_NOTE_ASSETS = [
   "notes/rag.md",
   "notes/finetuning.md",
   "notes/agents.md",
-  "notes/production.md"
+  "notes/production.md",
+  "notes/knowledge-graphs.md"
 ];
 
 export const PUBLIC_ASSETS = [...FIXED_PUBLIC_ASSETS, ...LEARNING_NOTE_ASSETS];
+
+export const PUBLIC_SITEMAP_ASSETS = [
+  "artifacts.html",
+  "experiments/README.md"
+];
 
 export const OFFLINE_SHELL_ASSETS = [
   "./",
@@ -72,8 +101,28 @@ export const OFFLINE_SHELL_ASSETS = [
   "llms.txt",
   "SECURITY.md",
   "CONTRIBUTING.md",
+  "ARTIFACTS.md",
+  "ARTIFACT_SUBMISSION.md",
+  "artifacts.html",
+  "examples/sample-graph.json",
   "CODE_OF_CONDUCT.md",
   "version.json",
+  "experiments/README.md",
+  "experiments/bounded-file.mjs",
+  "experiments/compare-evaluations.mjs",
+  "experiments/diff-graphs.mjs",
+  "experiments/evaluate-feedback.mjs",
+  "experiments/graph-input.mjs",
+  "experiments/inspect-graph.mjs",
+  "experiments/learning-loop.mjs",
+  "experiments/tiny-bpe.mjs",
+  "experiments/tiny-attention.mjs",
+  "experiments/tiny-training.mjs",
+  "experiments/tiny-transformer.mjs",
+  "experiments/project-jsonld.mjs",
+  "experiments/verify-jsonld.mjs",
+  "experiments/verify-graph.mjs",
+  "experiments/verify-diff.mjs",
   "schema/graph.schema.json",
   "schema/feedback.schema.json",
   "schema/backup.schema.json",
@@ -83,5 +132,7 @@ export const OFFLINE_SHELL_ASSETS = [
   "schema/evaluation-comparison.schema.json",
   "schema/health.schema.json",
   "schema/jsonld.schema.json",
+  "schema/learning-loop.schema.json",
+  "schema/vault-manifest.schema.json",
   ...LEARNING_NOTE_ASSETS
 ];

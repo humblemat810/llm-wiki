@@ -88,9 +88,25 @@ matter more than polish.
 Every pull request runs the dependency-free verification matrix across Node 18,
 20, 22, and 24, plus the Node and Docker runtime smoke checks. Keep changes
 bounded enough to complete within the repository’s 20-minute CI job limit.
+The release check also rejects mutable GitHub Action references; CodeQL and
+OpenSSF Scorecard run as separate repository-security workflows, so review
+their findings before merging changes that affect runtime or deployment
+boundaries.
 
 For a new learning page, use the Learning note issue template first. It keeps
 the question, build, failure modes, sources, and reproducible exercise visible
 before prose or code is added.
+
+## Share a reusable artifact
+
+The fastest way to help a stranger is to leave them something they can run or
+inspect. Browse the [community artifact index](ARTIFACTS.md), then use the
+[artifact submission template](ARTIFACT_SUBMISSION.md) for a new experiment,
+graph export, benchmark, visualization, learning note, or failed attempt. On
+GitHub, the `Share an artifact` issue form pre-populates the same questions.
+
+Keep the submission small and include the question, the exact way to try it,
+the observed result, and the limitations. A result that disproves your first
+idea is welcome; an unsupported claim is not.
 
 Participation follows the project’s [Code of Conduct](CODE_OF_CONDUCT.md).

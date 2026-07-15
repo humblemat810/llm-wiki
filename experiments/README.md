@@ -9,11 +9,14 @@ node experiments/tiny-attention.mjs
 node experiments/tiny-training.mjs
 node experiments/tiny-transformer.mjs
 node experiments/evaluate-feedback.mjs feedback.json extraction.json --max-untrusted-feedback 0
+npm run learning:loop
 node experiments/compare-evaluations.mjs baseline-evaluation.json candidate-evaluation.json --max-untrusted-feedback 0
 node experiments/inspect-graph.mjs graph.json --min-provenance 95 --min-fresh-source-review 90 --max-orphaned 0 --max-ambiguous 0 --max-conflicting-items 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-review-queue-truncated 0 --max-evidence-grounding-truncated 0 --max-feedback-context-truncated 0 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-truncated-items 0 --max-dropped-items 0
 node experiments/diff-graphs.mjs before.json after.json
+node experiments/verify-diff.mjs before.json after.json diff.json
 node experiments/project-jsonld.mjs graph.json --redacted
 node experiments/verify-jsonld.mjs graph.json graph.jsonld
+node experiments/verify-graph.mjs graph.json
 ```
 
 The training artifact is a deterministic character-level bigram language
@@ -41,6 +44,15 @@ Feedback exports marked with `truncatedExamples` are rejected before scoring;
 evaluation requires a complete reviewed dataset.
 The command rejects input files larger than 10 MB before parsing them.
 
+`learning-loop.mjs` is the smallest end-to-end self-improvement walkthrough:
+it extracts a document, applies one accepted and one rejected human decision,
+exports portable guidance, and extracts a follow-up document with that guidance.
+The output compares an unguided baseline follow-up with the guided result,
+including an explicit concept-count delta and proof that the rejected concept
+was present without guidance but suppressed after review. It demonstrates
+bounded feedback-driven representation improvement; it is not a claim that
+heuristic extraction replaces evaluation or a model provider.
+
 `compare-evaluations.mjs` is a promotion gate for that loop. Evaluation reports
 carry a deterministic reviewed-dataset fingerprint; the command refuses to
 compare reports with different fingerprints, an empty reviewed benchmark, or
@@ -66,6 +78,19 @@ bounded revision-diff contract used by the browser, including learning-memory
 and integrity changes. Its graph input handling is shared with the JSON-LD and
 health CLIs: incompatible graph/backup schemas, tampered fingerprints, and
 inputs larger than 10 MB are rejected before normalization.
+
+`verify-diff.mjs` verifies an existing diff artifact against its bounded,
+fingerprint-checked before and after graph inputs. It recomputes the normalized
+diff, rejects tampered fingerprints or fields, and is suitable for CI and
+release-mirror checks.
+
+`verify-graph.mjs` verifies the canonical graph fingerprint (and backup history
+fingerprint when the input is a full backup) before a graph export is shared or
+used by another tool. Its `verified` result means the fingerprint is internally
+consistent; its separate `complete` flag and `integrity` counts disclose
+truncated or dropped records, including loss inside backup history. A
+fingerprinted export can therefore be valid but incomplete, and should be
+recovered before editing or promotion.
 
 `inspect-graph.mjs` uses that same shared input boundary before emitting health
 diagnostics or evaluating quality thresholds. Use

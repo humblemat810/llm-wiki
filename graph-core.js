@@ -6,12 +6,16 @@ export const HEALTH_FORMAT = "llm-field-notes/health@1";
 export const VAULT_FORMAT = "llm-field-notes/vault@1";
 export const LEGACY_GRAPH_SCHEMAS = new Set(["llm-field-notes/graph@0"]);
 export const MAX_DOCUMENT_CHARS = 300000;
+export const MAX_DOCUMENT_TITLE_CHARS = 200;
 export const MAX_GRAPH_DOCUMENT_CHARS = 50000000;
 export const MAX_GRAPH_DOCUMENTS = 1000;
 export const MAX_GRAPH_NODES = 5000;
 export const MAX_GRAPH_EDGES = 10000;
 export const MAX_GRAPH_REVISIONS = 20;
+export const REVISION_OPERATIONS = new Set(["unknown", "migration", "ingest", "rebuild", "feedback", "learning", "manual", "projection", "source-removal"]);
+export const REVISION_EXTRACTORS = new Set(["unknown", "local", "remote"]);
 export const MAX_EVIDENCE_CHARS = 12000;
+export const MAX_ALIASES = 20;
 export const MAX_EVIDENCE_INPUT_ITEMS = 32;
 export const MAX_EVIDENCE_RECORDS = 8;
 export const MAX_EVIDENCE_GROUNDING_RECORDS = 2000;
@@ -44,12 +48,15 @@ export const MAX_EXTRACTION_TERM_CANDIDATES = 18000;
 export const MAX_RELATION_LABEL_CHARS = 80;
 export const MAX_TIMESTAMP_CHARS = 128;
 export const MAX_SOURCE_URI_CHARS = 2048;
+export const MAX_PRODUCER_VERSION_CHARS = 64;
+export const MAX_JSON_DEPTH = 128;
+export const MAX_JSON_KEY_DIAGNOSTIC_CHARS = 120;
 export const SOURCE_QUALITIES = new Set(["unknown", "primary", "secondary", "tertiary"]);
 export const DEFAULT_GRAPH_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 const isStaleLearningExample = (example, now = Date.now()) => {
   if (!example.lastReviewedAt) return true;
-  const timestamp = Date.parse(example.lastReviewedAt);
-  return Number.isNaN(timestamp) || now - timestamp >= REVIEW_STALE_DAYS * 86400000;
+  const timestamp = parseTimestamp(example.lastReviewedAt);
+  return Number.isNaN(timestamp) || timestamp > now || now - timestamp >= REVIEW_STALE_DAYS * 86400000;
 };
 const isStaleGuidanceItem = (item, now = Date.now()) => isStaleLearningExample(item, now);
 const includeGuidanceItem = (item, includeStale, now = Date.now()) => includeStale || !isStaleGuidanceItem(item, now);
@@ -63,14 +70,27 @@ export function advanceGraphVersion(graph) {
 export function compareGraphFreshness(candidateValue, referenceValue) {
   const candidate = normalizeGraph(candidateValue);
   const reference = normalizeGraph(referenceValue);
-  if (candidate.version !== reference.version) return candidate.version < reference.version ? -1 : 1;
-  const candidateTime = candidate.updatedAt ? Date.parse(candidate.updatedAt) : Number.NaN;
-  const referenceTime = reference.updatedAt ? Date.parse(reference.updatedAt) : Number.NaN;
-  if (Number.isFinite(candidateTime) && Number.isFinite(referenceTime) && candidateTime !== referenceTime) {
-    return candidateTime < referenceTime ? -1 : 1;
+  const candidateTime = trustedPastTimestamp(candidate.committedAt);
+  const referenceTime = trustedPastTimestamp(reference.committedAt);
+  if (candidate.version !== reference.version
+    && Number.isFinite(candidateTime)
+    && Number.isFinite(referenceTime)
+    && candidateTime !== referenceTime) {
+    // Undo and restore intentionally move back to an older graph version,
+    // but their storage commit is newer. A delayed event from the version
+    // that was undone must not overwrite that explicit rollback.
+    if (candidateTime > referenceTime && candidate.version < reference.version) return 1;
+    if (candidateTime < referenceTime && candidate.version > reference.version) return -1;
+    return candidate.version < reference.version ? -1 : 1;
   }
-  if (Number.isFinite(candidateTime) !== Number.isFinite(referenceTime)) {
-    return Number.isFinite(candidateTime) ? 1 : -1;
+  if (candidate.version !== reference.version) return candidate.version < reference.version ? -1 : 1;
+  const candidateUpdatedTime = trustedPastTimestamp(candidate.updatedAt);
+  const referenceUpdatedTime = trustedPastTimestamp(reference.updatedAt);
+  if (Number.isFinite(candidateUpdatedTime) && Number.isFinite(referenceUpdatedTime) && candidateUpdatedTime !== referenceUpdatedTime) {
+    return candidateUpdatedTime < referenceUpdatedTime ? -1 : 1;
+  }
+  if (Number.isFinite(candidateUpdatedTime) !== Number.isFinite(referenceUpdatedTime)) {
+    return Number.isFinite(candidateUpdatedTime) ? 1 : -1;
   }
   return 0;
 }
@@ -102,25 +122,153 @@ export const defaultGraph = () => ({
   integrity: { ambiguousSourceIds: [], ambiguousEdgeIds: [] }
 });
 
+let fallbackIdSequence = 0;
 export const makeId = (prefix) => {
-  if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
-  if (globalThis.crypto?.getRandomValues) {
-    const random = new Uint32Array(4);
-    globalThis.crypto.getRandomValues(random);
-    return `${prefix}-${[...random].map((value) => value.toString(16).padStart(8, "0")).join("")}`;
+  try {
+    if (typeof globalThis.crypto?.randomUUID === "function") {
+      return `${prefix}-${globalThis.crypto.randomUUID()}`;
+    }
+  } catch {
+    // Restricted runtimes may expose crypto but reject access at call time.
   }
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  try {
+    if (typeof globalThis.crypto?.getRandomValues === "function") {
+      const random = new Uint32Array(4);
+      globalThis.crypto.getRandomValues(random);
+      return `${prefix}-${[...random].map((value) => value.toString(16).padStart(8, "0")).join("")}`;
+    }
+  } catch {
+    // Use the collision-resistant process-local fallback below.
+  }
+  fallbackIdSequence = (fallbackIdSequence + 1) % Number.MAX_SAFE_INTEGER;
+  return `${prefix}-${Date.now().toString(36)}-${fallbackIdSequence.toString(36)}`;
 };
 
 export const asArray = (value) => Array.isArray(value) ? value : [];
+export function parseJsonWithUniqueKeys(text, label = "JSON") {
+  if (typeof text !== "string") throw new TypeError(`${label} must be a string.`);
+  let index = 0;
+  const skipWhitespace = () => {
+    while (/\s/.test(text[index] || "")) index += 1;
+  };
+  const parseString = () => {
+    const start = index;
+    if (text[index] !== '"') throw new Error(`${label} contains malformed JSON at offset ${index}.`);
+    index += 1;
+    while (index < text.length) {
+      if (text[index] === "\\") {
+        index += 2;
+        continue;
+      }
+      if (text[index] === '"') {
+        const raw = text.slice(start, index + 1);
+        index += 1;
+        return JSON.parse(raw);
+      }
+      index += 1;
+    }
+    throw new Error(`${label} contains an unterminated JSON string.`);
+  };
+  const parseValue = (depth = 0) => {
+    skipWhitespace();
+    if (depth > MAX_JSON_DEPTH) throw new Error(`${label} exceeds the ${MAX_JSON_DEPTH}-level nesting limit.`);
+    if (text[index] === "{") {
+      index += 1;
+      skipWhitespace();
+      const keys = new Set();
+      if (text[index] === "}") {
+        index += 1;
+        return;
+      }
+      while (index < text.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key)) {
+          const diagnosticKey = key.length > MAX_JSON_KEY_DIAGNOSTIC_CHARS
+            ? `${key.slice(0, MAX_JSON_KEY_DIAGNOSTIC_CHARS)}…`
+            : key;
+          throw new Error(`${label} contains duplicate object key "${diagnosticKey}".`);
+        }
+        keys.add(key);
+        skipWhitespace();
+        if (text[index++] !== ":") throw new Error(`${label} contains malformed JSON at offset ${index}.`);
+        parseValue(depth + 1);
+        skipWhitespace();
+        if (text[index] === "}") {
+          index += 1;
+          return;
+        }
+        if (text[index++] !== ",") throw new Error(`${label} contains malformed JSON at offset ${index}.`);
+      }
+      throw new Error(`${label} contains an unterminated JSON object.`);
+    }
+    if (text[index] === "[") {
+      index += 1;
+      skipWhitespace();
+      if (text[index] === "]") {
+        index += 1;
+        return;
+      }
+      while (index < text.length) {
+        parseValue(depth + 1);
+        skipWhitespace();
+        if (text[index] === "]") {
+          index += 1;
+          return;
+        }
+        if (text[index++] !== ",") throw new Error(`${label} contains malformed JSON at offset ${index}.`);
+      }
+      throw new Error(`${label} contains an unterminated JSON array.`);
+    }
+    if (text[index] === '"') {
+      parseString();
+      return;
+    }
+    const start = index;
+    while (index < text.length && !/[,\]}]/.test(text[index])) index += 1;
+    if (!text.slice(start, index).trim()) throw new Error(`${label} contains malformed JSON at offset ${index}.`);
+  };
+  parseValue();
+  skipWhitespace();
+  if (index !== text.length) throw new Error(`${label} contains trailing data.`);
+  return JSON.parse(text);
+}
 const asBoundedArray = (value, limit) => Array.isArray(value) ? value.slice(0, limit) : [];
-export const slugify = (value) => String(value)
-  .normalize("NFKC")
-  .toLowerCase()
-  .replace(/[`'"“”()[\]{}]/g, "")
-  .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
-  .replace(/^-|-$/g, "")
-  .slice(0, 70);
+export const sliceTextAtCodePointBoundary = (value, limit) => {
+  const bounded = String(value).slice(0, Math.max(0, Math.floor(Number(limit) || 0)));
+  const lastCodeUnit = bounded.charCodeAt(bounded.length - 1);
+  return lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF
+    ? bounded.slice(0, -1)
+    : bounded;
+};
+export const parseTimestamp = (value) => {
+  if (typeof value !== "string" || value.length > MAX_TIMESTAMP_CHARS || !value.trim()) return Number.NaN;
+  const datePrefix = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/);
+  if (datePrefix) {
+    const year = Number(datePrefix[1]);
+    const month = Number(datePrefix[2]);
+    const day = Number(datePrefix[3]);
+    const calendarDate = new Date(0);
+    calendarDate.setUTCFullYear(year, month - 1, day);
+    calendarDate.setUTCHours(0, 0, 0, 0);
+    if (calendarDate.getUTCFullYear() !== year
+      || calendarDate.getUTCMonth() !== month - 1
+      || calendarDate.getUTCDate() !== day) {
+      return Number.NaN;
+    }
+  }
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? Number.NaN : timestamp;
+};
+export const slugify = (value) => sliceTextAtCodePointBoundary(
+  String(value)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[`'"“”()[\]{}]/g, "")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
+    .replace(/^-|-$/g, ""),
+  70
+);
 const asText = (value, fallback = "") => typeof value === "string" ? value : fallback;
 const asLine = (value, fallback = "") => asText(value, fallback).replace(/\s+/g, " ").trim();
 const lexicalCompare = (left, right) => {
@@ -130,15 +278,15 @@ const lexicalCompare = (left, right) => {
 };
 const boundedDocumentTimestamp = (value) => typeof value === "string" && value.length <= MAX_TIMESTAMP_CHARS ? value : "";
 const documentRetentionKey = (document) => [
-  asText(document?.id).slice(0, MAX_ID_CHARS),
-  asText(document?.fingerprint).slice(0, MAX_ID_CHARS),
-  asText(document?.title).slice(0, 200),
-  fingerprintText(asText(document?.text).slice(0, MAX_DOCUMENT_CHARS))
+  sliceTextAtCodePointBoundary(asText(document?.id), MAX_ID_CHARS),
+  sliceTextAtCodePointBoundary(asText(document?.fingerprint), MAX_ID_CHARS),
+  sliceTextAtCodePointBoundary(asText(document?.title), MAX_DOCUMENT_TITLE_CHARS),
+  fingerprintText(sliceTextAtCodePointBoundary(asText(document?.text), MAX_DOCUMENT_CHARS))
 ].join("\u0000");
 const makeDocumentRetentionCandidate = (document, index) => ({
   document,
   index,
-  time: Date.parse(boundedDocumentTimestamp(document?.addedAt)),
+  time: trustedPastTimestamp(boundedDocumentTimestamp(document?.addedAt)),
   key: documentRetentionKey(document)
 });
 const compareDocumentRetention = (left, right) => {
@@ -209,7 +357,7 @@ const canonicalLabelKey = relationLabelKey;
 const stableLabelId = (value) => {
   const key = canonicalLabelKey(value);
   const base = slugify(value);
-  return key.length > 70 ? `${base.slice(0, 61)}-${identityDigest(key)}` : base;
+  return key.length > 70 ? `${sliceTextAtCodePointBoundary(base, 61)}-${identityDigest(key)}` : base;
 };
 const edgeKey = (source, target, label) => JSON.stringify([
   String(source),
@@ -225,7 +373,7 @@ const normalizeId = (value, fallback = "") => {
   const text = asText(value, fallback).trim();
   if (text.length <= MAX_ID_CHARS) return text;
   const suffix = `-${identityDigest(text)}`;
-  return `${text.slice(0, MAX_ID_CHARS - suffix.length)}${suffix}`;
+  return `${sliceTextAtCodePointBoundary(text, MAX_ID_CHARS - suffix.length)}${suffix}`;
 };
 export const makeEdgeId = (source, target, label) => {
   const labelKey = relationLabelKey(label);
@@ -236,7 +384,7 @@ export const makeEdgeId = (source, target, label) => {
 };
 const appendIdSuffix = (base, suffix) => {
   const suffixText = `-${suffix}`;
-  return `${base.slice(0, Math.max(1, MAX_ID_CHARS - suffixText.length))}${suffixText}`;
+  return `${sliceTextAtCodePointBoundary(base, Math.max(1, MAX_ID_CHARS - suffixText.length))}${suffixText}`;
 };
 const asConfidence = (value, fallback = .5) => Number.isFinite(Number(value)) ? Math.max(.01, Math.min(.99, Number(value))) : fallback;
 const asBoundedCounter = (value, fallback, minimum, maximum) => Number.isSafeInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
@@ -244,14 +392,14 @@ const asTruncationCount = (value) => Number.isSafeInteger(value) && value >= 0 ?
 const asDroppedCount = asTruncationCount;
 const asDateTime = (value, fallback = null) => {
   if (typeof value !== "string" || value.length > MAX_TIMESTAMP_CHARS || !value.trim()) return fallback;
-  const timestamp = Date.parse(value);
+  const timestamp = parseTimestamp(value);
   return Number.isNaN(timestamp) ? fallback : new Date(timestamp).toISOString();
 };
-const newestTimestamp = (current, incoming) => incoming && (!current || Date.parse(incoming) > Date.parse(current)) ? incoming : current;
-const oldestTimestamp = (current, incoming) => incoming && (!current || Date.parse(incoming) < Date.parse(current)) ? incoming : current;
-const normalizeAliases = (value) => [...new Set(asBoundedArray(value, 20).filter((item) => typeof item === "string").map((item) => asLine(item).slice(0, MAX_CONCEPT_LABEL_CHARS)).filter(Boolean))]
+const newestTimestamp = (current, incoming) => incoming && (!current || parseTimestamp(incoming) > parseTimestamp(current)) ? incoming : current;
+const oldestTimestamp = (current, incoming) => incoming && (!current || parseTimestamp(incoming) < parseTimestamp(current)) ? incoming : current;
+const normalizeAliases = (value) => [...new Set(asBoundedArray(value, MAX_ALIASES).filter((item) => typeof item === "string").map((item) => sliceTextAtCodePointBoundary(asLine(item), MAX_CONCEPT_LABEL_CHARS)).filter(Boolean))]
   .sort(lexicalCompare)
-  .slice(0, 20);
+  .slice(0, MAX_ALIASES);
 const SAFE_SOURCE_URI_SCHEMES = new Set(["http", "https", "file", "urn", "doi"]);
 export const normalizeSourceUri = (value) => {
   if (typeof value !== "string") return null;
@@ -280,19 +428,19 @@ function canonicalFeedbackExamples(value) {
     .map((example) => example.kind === "concept"
       ? {
         kind: "concept",
-        id: asText(example.id).slice(0, MAX_ID_CHARS),
-        label: asText(example.label).slice(0, MAX_CONCEPT_LABEL_CHARS),
-        aliases: asBoundedArray(example.aliases, 20).filter((alias) => typeof alias === "string").map((alias) => alias.trim().slice(0, MAX_CONCEPT_LABEL_CHARS)).sort(),
+        id: sliceTextAtCodePointBoundary(asText(example.id), MAX_ID_CHARS),
+        label: sliceTextAtCodePointBoundary(asText(example.label), MAX_CONCEPT_LABEL_CHARS),
+        aliases: asBoundedArray(example.aliases, MAX_ALIASES).filter((alias) => typeof alias === "string").map((alias) => sliceTextAtCodePointBoundary(alias.trim(), MAX_CONCEPT_LABEL_CHARS)).sort(),
         status: example.status
       }
       : {
         kind: "relation",
-        id: asText(example.id).slice(0, MAX_ID_CHARS),
-        source: asText(example.source).slice(0, MAX_ID_CHARS),
-        sourceLabel: asText(example.sourceLabel).slice(0, MAX_CONCEPT_LABEL_CHARS),
-        target: asText(example.target).slice(0, MAX_ID_CHARS),
-        targetLabel: asText(example.targetLabel).slice(0, MAX_CONCEPT_LABEL_CHARS),
-        label: asText(example.label).slice(0, MAX_RELATION_LABEL_CHARS),
+        id: sliceTextAtCodePointBoundary(asText(example.id), MAX_ID_CHARS),
+        source: sliceTextAtCodePointBoundary(asText(example.source), MAX_ID_CHARS),
+        sourceLabel: sliceTextAtCodePointBoundary(asText(example.sourceLabel), MAX_CONCEPT_LABEL_CHARS),
+        target: sliceTextAtCodePointBoundary(asText(example.target), MAX_ID_CHARS),
+        targetLabel: sliceTextAtCodePointBoundary(asText(example.targetLabel), MAX_CONCEPT_LABEL_CHARS),
+        label: sliceTextAtCodePointBoundary(asText(example.label), MAX_RELATION_LABEL_CHARS),
         status: example.status
       })
     .sort((left, right) => {
@@ -336,7 +484,7 @@ export function matchesFeedbackFingerprint(value, fingerprint) {
 function normalizeLearningExample(value) {
   if (!value || typeof value !== "object" || !["concept", "relation"].includes(value.kind) || !["accepted", "rejected"].includes(value.status)) return null;
   if (value.kind === "concept") {
-    const label = asLine(value.label, asText(value.id)).slice(0, MAX_CONCEPT_LABEL_CHARS);
+    const label = sliceTextAtCodePointBoundary(asLine(value.label, asText(value.id)), MAX_CONCEPT_LABEL_CHARS);
     const id = normalizeId(asText(value.id)) || slugify(label);
     if (!id || !label) return null;
     return {
@@ -350,15 +498,15 @@ function normalizeLearningExample(value) {
   }
   const source = normalizeId(asText(value.source)) || slugify(asText(value.sourceLabel));
   const target = normalizeId(asText(value.target)) || slugify(asText(value.targetLabel));
-  const label = asLine(value.label).slice(0, MAX_RELATION_LABEL_CHARS);
+  const label = sliceTextAtCodePointBoundary(asLine(value.label), MAX_RELATION_LABEL_CHARS);
   if (!source || !target || !label) return null;
   return {
     kind: "relation",
     id: normalizeId(value.id) || makeEdgeId(source, target, label),
     source,
-    sourceLabel: asLine(value.sourceLabel, source).slice(0, MAX_CONCEPT_LABEL_CHARS),
+    sourceLabel: sliceTextAtCodePointBoundary(asLine(value.sourceLabel, source), MAX_CONCEPT_LABEL_CHARS),
     target,
-    targetLabel: asLine(value.targetLabel, target).slice(0, MAX_CONCEPT_LABEL_CHARS),
+    targetLabel: sliceTextAtCodePointBoundary(asLine(value.targetLabel, target), MAX_CONCEPT_LABEL_CHARS),
     label,
     status: value.status,
     lastReviewedAt: asDateTime(value.lastReviewedAt)
@@ -371,7 +519,7 @@ function learningExampleKey(example) {
     : `relation|${example.id}`;
 }
 
-function feedbackContextStatsForGraph(graph, { includeStale = true, now = Date.now() } = {}) {
+function feedbackContextStatsForGraph(graph, { includeStale = false, now = Date.now() } = {}) {
   const reusableExamples = graph.learning.examples.filter((example) => includeGuidanceItem(example, includeStale, now));
   const allKeys = new Set(graph.learning.examples.map(learningExampleKey));
   const keys = new Set(reusableExamples.map(learningExampleKey));
@@ -425,11 +573,17 @@ function learningExampleTieBreak(example) {
   ].join("\u0001");
 }
 
+export const trustedPastTimestamp = (value, now = Date.now()) => {
+  const timestamp = parseTimestamp(value);
+  return Number.isFinite(timestamp) && timestamp <= now ? timestamp : Number.NaN;
+};
+export const trustedReviewTime = (value, now = Date.now()) => trustedPastTimestamp(value, now);
+
 export function preferLearningExample(existing, incoming) {
   if (!existing) return incoming;
   if (existing.status === "inferred" && ["accepted", "rejected"].includes(incoming.status)) return incoming;
-  const existingTime = existing.lastReviewedAt ? Date.parse(existing.lastReviewedAt) : Number.NaN;
-  const incomingTime = incoming.lastReviewedAt ? Date.parse(incoming.lastReviewedAt) : Number.NaN;
+  const existingTime = trustedReviewTime(existing.lastReviewedAt);
+  const incomingTime = trustedReviewTime(incoming.lastReviewedAt);
   if (Number.isNaN(incomingTime)) {
     if (!Number.isNaN(existingTime)) return existing;
     return learningExampleTieBreak(incoming) >= learningExampleTieBreak(existing) ? incoming : existing;
@@ -443,8 +597,8 @@ export function preferLearningExample(existing, incoming) {
 
 function preferImportedDecision(existing, incoming) {
   if (!existing) return incoming;
-  const existingTime = existing.lastReviewedAt ? Date.parse(existing.lastReviewedAt) : Number.NaN;
-  const incomingTime = incoming.lastReviewedAt ? Date.parse(incoming.lastReviewedAt) : Number.NaN;
+  const existingTime = trustedReviewTime(existing.lastReviewedAt);
+  const incomingTime = trustedReviewTime(incoming.lastReviewedAt);
   if (Number.isNaN(incomingTime)) return Number.isNaN(existingTime) ? incoming : existing;
   if (Number.isNaN(existingTime) || incomingTime > existingTime) return incoming;
   if (incomingTime === existingTime) {
@@ -534,8 +688,9 @@ const canonicalizeEvidenceForFingerprint = (value) => asArray(value)
 
 const canonicalizeGraphForFingerprint = (value) => {
   const graph = normalizeGraph(value);
+  const { committedAt, ...fingerprintGraph } = graph;
   return {
-    ...graph,
+    ...fingerprintGraph,
     // Documents, nodes, and edges are sets from the graph's point of view.
     // Their array order can change during JSON/Obsidian round-trips without
     // changing the represented knowledge. Revision and learning order remain
@@ -584,11 +739,11 @@ function normalizeEvidence(value, fallbackSources = []) {
   const boundedFallbackSources = normalizeSourceIds(fallbackSources);
   const normalized = asBoundedArray(value, MAX_EVIDENCE_INPUT_ITEMS).map((item) => {
     if (typeof item === "string") {
-      const text = item.slice(0, MAX_EVIDENCE_CHARS);
+      const text = sliceTextAtCodePointBoundary(item, MAX_EVIDENCE_CHARS);
       return text.trim() ? { text, sources: boundedFallbackSources } : null;
     }
     if (!item || typeof item !== "object" || !asText(item.text).trim()) return null;
-    const text = asText(item.text).slice(0, MAX_EVIDENCE_CHARS);
+    const text = sliceTextAtCodePointBoundary(asText(item.text), MAX_EVIDENCE_CHARS);
     return {
       text,
       sources: normalizeSourceIds(item.sources)
@@ -623,10 +778,12 @@ function mergeEvidence(current, incoming) {
   return [...merged.values()].slice(0, MAX_EVIDENCE_RECORDS);
 }
 
-const importTruncationLimit = (graph) => {
+const importIntegrityLimit = (graph) => {
   const truncation = graph.integrity?.truncated || {};
-  if (truncation.documentText || truncation.evidenceText) return "document-text";
-  return Object.values(truncation).some((count) => Number.isSafeInteger(count) && count > 0)
+  if (truncation.documentText || truncation.documentTitle || truncation.evidenceText) return "document-text";
+  const dropped = graph.integrity?.dropped || {};
+  return [...Object.values(truncation), ...Object.values(dropped)]
+    .some((count) => Number.isSafeInteger(count) && count > 0)
     ? "import-truncated"
     : null;
 };
@@ -660,11 +817,11 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
   // Reuse an explicit source timestamp for generated item timestamps; otherwise
   // preserve normal current-time chronology for newly extracted material.
   const normalizationTimestamp = asDateTime(inputSource.addedAt, new Date().toISOString());
-  const sourceText = asText(inputSource.text, fallbackText).slice(0, MAX_DOCUMENT_CHARS);
+  const sourceText = sliceTextAtCodePointBoundary(asText(inputSource.text, fallbackText), MAX_DOCUMENT_CHARS);
   const sourceId = normalizeId(inputSource.id) || `doc-${fingerprintText(sourceText)}`;
   const source = {
     id: sourceId,
-    title: asLine(inputSource.title, fallbackTitle).slice(0, 200),
+    title: sliceTextAtCodePointBoundary(asLine(inputSource.title, fallbackTitle), MAX_DOCUMENT_TITLE_CHARS),
     text: sourceText,
     fingerprint: normalizeId(inputSource.fingerprint) || fingerprintText(sourceText),
     uri: normalizeSourceUri(inputSource.uri),
@@ -685,7 +842,7 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
     idMap.set(key, id);
   };
   const normalizedNodes = asArray(input.nodes).slice(0, MAX_GRAPH_NODES).map((node) => {
-    const label = asLine(node?.label, asLine(node?.name, "Unnamed concept")).slice(0, MAX_CONCEPT_LABEL_CHARS);
+    const label = sliceTextAtCodePointBoundary(asLine(node?.label, asLine(node?.name, "Unnamed concept")), MAX_CONCEPT_LABEL_CHARS);
     const rawInputId = asText(node?.id).trim();
     const rawId = normalizeId(rawInputId) || stableLabelId(label) || makeId("concept");
     const id = rawInputId ? rawId : stableLabelId(label) || rawId;
@@ -697,7 +854,7 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
       id,
       label: label || id,
       aliases: normalizeAliases(node?.aliases),
-      type: asLine(node?.type, "concept").slice(0, 30),
+      type: sliceTextAtCodePointBoundary(asLine(node?.type, "concept"), 30),
       confidence: asConfidence(node?.confidence, .55),
       mentions: asBoundedCounter(node?.mentions, 1, 1, MAX_NODE_MENTIONS),
       feedback: asBoundedCounter(node?.feedback, 0, -MAX_FEEDBACK_COUNT, MAX_FEEDBACK_COUNT),
@@ -717,15 +874,15 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
       return;
     }
     const labels = [...new Set([existing.label, node.label, ...existing.aliases, ...node.aliases])];
-    const existingUpdatedAt = Date.parse(existing.updatedAt);
-    const incomingUpdatedAt = Date.parse(node.updatedAt);
+    const existingUpdatedAt = parseTimestamp(existing.updatedAt);
+    const incomingUpdatedAt = parseTimestamp(node.updatedAt);
     const incomingIsCanonical = incomingUpdatedAt > existingUpdatedAt
       || (incomingUpdatedAt === existingUpdatedAt && lexicalCompare(node.label, existing.label) < 0);
     if (incomingIsCanonical) {
       existing.label = node.label;
       existing.type = node.type;
     }
-    existing.aliases = labels.filter((label) => slugify(label) !== slugify(existing.label)).sort(lexicalCompare).slice(0, 20);
+    existing.aliases = labels.filter((label) => slugify(label) !== slugify(existing.label)).sort(lexicalCompare).slice(0, MAX_ALIASES);
     existing.sources = mergeSourceIds(existing.sources, node.sources);
     existing.evidence = mergeEvidence(existing.evidence, node.evidence);
     existing.mentions = Math.min(MAX_NODE_MENTIONS, existing.mentions + node.mentions);
@@ -744,7 +901,7 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
     const rawTarget = asText(edge?.target);
     const source = idMap.get(rawSource) || idMap.get(normalizeId(rawSource)) || idMap.get(canonicalLabelKey(rawSource)) || rawSource;
     const target = idMap.get(rawTarget) || idMap.get(normalizeId(rawTarget)) || idMap.get(canonicalLabelKey(rawTarget)) || rawTarget;
-    const label = asLine(edge?.label, "related to").slice(0, MAX_RELATION_LABEL_CHARS);
+    const label = sliceTextAtCodePointBoundary(asLine(edge?.label, "related to"), MAX_RELATION_LABEL_CHARS);
     if (!nodeIds.has(source) || !nodeIds.has(target)) return null;
     const sources = normalizeSourceIds(edge?.sources, [sourceId]);
     return {
@@ -801,25 +958,76 @@ export function normalizeExtraction(value, fallbackTitle = "Untitled document", 
   return { source, nodes, edges };
 }
 
-export function normalizeExtractionForDocument(value, { title, text, uri } = {}) {
-  const boundedTitle = asLine(title, "Untitled document").slice(0, 200);
-  const boundedText = asText(text).slice(0, MAX_DOCUMENT_CHARS);
+export function normalizeExtractionForDocument(value, { title, text, uri, feedback = [] } = {}) {
+  const boundedTitle = sliceTextAtCodePointBoundary(asLine(title, "Untitled document"), MAX_DOCUMENT_TITLE_CHARS);
+  const boundedText = sliceTextAtCodePointBoundary(asText(text), MAX_DOCUMENT_CHARS);
   const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const inputSource = input.source && typeof input.source === "object" && !Array.isArray(input.source)
     ? input.source
     : {};
+  if (input.nodes !== undefined && !Array.isArray(input.nodes)) {
+    throw Object.assign(new Error("Extractor response contains a malformed concept collection."), { code: "EXTRACTION_NODES_SHAPE" });
+  }
+  if (input.edges !== undefined && !Array.isArray(input.edges)) {
+    throw Object.assign(new Error("Extractor response contains a malformed relation collection."), { code: "EXTRACTION_EDGES_SHAPE" });
+  }
   if (Array.isArray(input.nodes) && input.nodes.length > MAX_GRAPH_NODES) {
     throw Object.assign(new Error(`Extractor response exceeds the ${MAX_GRAPH_NODES}-concept limit.`), { code: "EXTRACTION_NODES_TOO_LARGE" });
   }
   if (Array.isArray(input.edges) && input.edges.length > MAX_GRAPH_EDGES) {
     throw Object.assign(new Error(`Extractor response exceeds the ${MAX_GRAPH_EDGES}-relation limit.`), { code: "EXTRACTION_EDGES_TOO_LARGE" });
   }
+  input.nodes?.forEach((node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)
+      || ![node.label, node.name].some((label) => typeof label === "string" && label.trim())) {
+      throw Object.assign(new Error("Extractor response contains a malformed concept record."), { code: "EXTRACTION_NODES_SHAPE" });
+    }
+  });
+  input.edges?.forEach((edge) => {
+    if (!edge || typeof edge !== "object" || Array.isArray(edge)
+      || typeof edge.source !== "string" || !edge.source.trim()
+      || typeof edge.target !== "string" || !edge.target.trim()
+      || typeof edge.label !== "string" || !edge.label.trim()) {
+      throw Object.assign(new Error("Extractor response contains a malformed relation record."), { code: "EXTRACTION_EDGES_SHAPE" });
+    }
+  });
   const providerRecords = [
     ...(Array.isArray(input.nodes) ? input.nodes.slice(0, MAX_GRAPH_NODES) : []),
     ...(Array.isArray(input.edges) ? input.edges.slice(0, MAX_GRAPH_EDGES) : [])
   ];
   providerRecords.forEach((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return;
+    if (item.aliases !== undefined && (
+      !Array.isArray(item.aliases)
+      || item.aliases.length > MAX_ALIASES
+      || item.aliases.some((alias) => typeof alias !== "string" || alias.length > MAX_CONCEPT_LABEL_CHARS)
+      || new Set(item.aliases.map((alias) => typeof alias === "string" ? alias.replace(/\s+/g, " ").trim() : alias)).size !== item.aliases.length
+    )) {
+      throw Object.assign(new Error(`Extractor response exceeds the ${MAX_ALIASES}-alias contract.`), { code: "EXTRACTION_ALIASES_TOO_LARGE" });
+    }
+    if (item.sources !== undefined && (
+      !Array.isArray(item.sources)
+      || item.sources.some((source) => typeof source !== "string" || source.length > MAX_ID_CHARS || !source.trim())
+    )) {
+      throw Object.assign(new Error(`Extractor response contains malformed provenance references.`), { code: "EXTRACTION_PROVENANCE_SHAPE" });
+    }
+    if (item.evidence !== undefined && (
+      !Array.isArray(item.evidence)
+      || item.evidence.some((evidence) => {
+        if (typeof evidence === "string") return !evidence.trim();
+        return !evidence
+          || typeof evidence !== "object"
+          || Array.isArray(evidence)
+          || typeof evidence.text !== "string"
+          || !evidence.text.trim()
+          || (evidence.sources !== undefined && (
+            !Array.isArray(evidence.sources)
+            || evidence.sources.some((source) => typeof source !== "string" || source.length > MAX_ID_CHARS || !source.trim())
+          ));
+      })
+    )) {
+      throw Object.assign(new Error(`Extractor response contains malformed evidence.`), { code: "EXTRACTION_PROVENANCE_SHAPE" });
+    }
     if (Array.isArray(item.evidence) && item.evidence.length > MAX_EVIDENCE_RECORDS) {
       throw Object.assign(new Error(`Extractor response exceeds the ${MAX_EVIDENCE_RECORDS}-evidence-record limit per graph item.`), { code: "EXTRACTION_EVIDENCE_TOO_LARGE" });
     }
@@ -894,11 +1102,11 @@ export function normalizeExtractionForDocument(value, { title, text, uri } = {})
     sources: [sourceId],
     evidence: item.evidence.map((evidence) => ({ ...evidence, sources: [sourceId] }))
   });
-  return {
+  return applyRejectedFeedback({
     ...normalized,
     nodes: normalized.nodes.map(rebindProvenance),
     edges: normalized.edges.map(rebindProvenance)
-  };
+  }, feedback);
 }
 
 export function normalizeGraph(value) {
@@ -907,6 +1115,8 @@ export function normalizeGraph(value) {
   const graph = defaultGraph();
   graph.version = Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0;
   graph.updatedAt = asDateTime(value.updatedAt, null);
+  const committedAt = asDateTime(value.committedAt, null);
+  if (committedAt) graph.committedAt = committedAt;
   if (value.redacted === true) graph.redacted = true;
   const graphFallbackTimestamp = graph.updatedAt || DEFAULT_GRAPH_TIMESTAMP;
   const ambiguousSourceIds = new Set(asBoundedArray(value.integrity?.ambiguousSourceIds, MAX_AMBIGUOUS_SOURCE_IDS)
@@ -946,10 +1156,12 @@ export function normalizeGraph(value) {
       asTruncationCount(value.integrity?.truncated?.learningExamples),
       Array.isArray(value.learning?.examples) ? Math.max(0, value.learning.examples.length - MAX_FEEDBACK_EXAMPLES) : 0
     ),
+    documentTitle: asTruncationCount(value.integrity?.truncated?.documentTitle),
     documentText: asTruncationCount(value.integrity?.truncated?.documentText),
     evidenceText: asTruncationCount(value.integrity?.truncated?.evidenceText),
     evidenceItems: asTruncationCount(value.integrity?.truncated?.evidenceItems),
-    sourceReferences: asTruncationCount(value.integrity?.truncated?.sourceReferences)
+    sourceReferences: asTruncationCount(value.integrity?.truncated?.sourceReferences),
+    aliases: asTruncationCount(value.integrity?.truncated?.aliases)
   };
   const boundedDocuments = retainNewestDocuments(value.documents);
   const boundedNodes = asBoundedArray(value.nodes, MAX_GRAPH_NODES);
@@ -977,6 +1189,16 @@ export function normalizeGraph(value) {
       });
       return counts;
     }, { evidenceItems: 0, sourceReferences: 0 });
+  const countAliasTruncation = (items) => asBoundedArray(items, MAX_GRAPH_NODES + MAX_GRAPH_EDGES)
+    .reduce((total, item) => {
+      if (!item || typeof item !== "object") return total;
+      if (item.aliases === undefined) return total;
+      if (!Array.isArray(item.aliases)) return total + 1;
+      const retained = item.aliases.slice(0, MAX_ALIASES);
+      return total
+        + Math.max(0, item.aliases.length - MAX_ALIASES)
+        + retained.filter((alias) => typeof alias === "string" && alias.length > MAX_CONCEPT_LABEL_CHARS).length;
+    }, 0);
   const dropped = {
     documents: Math.max(
       asDroppedCount(value.integrity?.dropped?.documents),
@@ -997,11 +1219,11 @@ export function normalizeGraph(value) {
     )
   };
   const normalizedDocuments = boundedDocuments.filter((doc) => doc && typeof doc === "object").map((doc) => {
-    const text = asText(doc.text).slice(0, MAX_DOCUMENT_CHARS);
+    const text = sliceTextAtCodePointBoundary(asText(doc.text), MAX_DOCUMENT_CHARS);
     const fingerprint = normalizeId(doc.fingerprint) || fingerprintText(text);
     return {
       id: normalizeId(doc.id) || `doc-${fingerprintText(fingerprint)}`,
-      title: asLine(doc.title, "Untitled document").slice(0, 200),
+      title: sliceTextAtCodePointBoundary(asLine(doc.title, "Untitled document"), MAX_DOCUMENT_TITLE_CHARS),
       text,
       fingerprint,
       uri: normalizeSourceUri(doc.uri),
@@ -1014,6 +1236,10 @@ export function normalizeGraph(value) {
     truncated.documentText,
     boundedDocuments.filter((document) => document && typeof document.text === "string" && document.text.length > MAX_DOCUMENT_CHARS).length
   );
+  truncated.documentTitle = Math.max(
+    truncated.documentTitle,
+    boundedDocuments.filter((document) => document && typeof document.title === "string" && document.title.length > MAX_DOCUMENT_TITLE_CHARS).length
+  );
   truncated.evidenceText = Math.max(
     truncated.evidenceText,
     countOversizedEvidence([...boundedNodes, ...asBoundedArray(value.edges, MAX_GRAPH_EDGES)])
@@ -1021,6 +1247,10 @@ export function normalizeGraph(value) {
   const nestedTruncation = countNestedTruncation([...boundedNodes, ...asBoundedArray(value.edges, MAX_GRAPH_EDGES)]);
   truncated.evidenceItems = Math.max(truncated.evidenceItems, nestedTruncation.evidenceItems);
   truncated.sourceReferences = Math.max(truncated.sourceReferences, nestedTruncation.sourceReferences);
+  truncated.aliases = Math.max(
+    truncated.aliases,
+    countAliasTruncation([...boundedNodes, ...boundedLearningExamples])
+  );
   const orderedDocuments = [];
   const seenDocumentIds = new Set();
   normalizedDocuments.forEach((document) => {
@@ -1071,7 +1301,7 @@ export function normalizeGraph(value) {
       existing.quality = document.quality;
     }
     existing.addedAt = oldestTimestamp(existing.addedAt, document.addedAt);
-    if (document.lastReviewedAt && (!existing.lastReviewedAt || Date.parse(document.lastReviewedAt) > Date.parse(existing.lastReviewedAt))) {
+    if (document.lastReviewedAt && (!existing.lastReviewedAt || parseTimestamp(document.lastReviewedAt) > parseTimestamp(existing.lastReviewedAt))) {
       existing.lastReviewedAt = document.lastReviewedAt;
     }
   });
@@ -1095,9 +1325,11 @@ export function normalizeGraph(value) {
     .map(({ document }) => document);
   const normalizedTruncated = { ...truncated };
   if (!normalizedTruncated.documentText) delete normalizedTruncated.documentText;
+  if (!normalizedTruncated.documentTitle) delete normalizedTruncated.documentTitle;
   if (!normalizedTruncated.evidenceText) delete normalizedTruncated.evidenceText;
   if (!normalizedTruncated.evidenceItems) delete normalizedTruncated.evidenceItems;
   if (!normalizedTruncated.sourceReferences) delete normalizedTruncated.sourceReferences;
+  if (!normalizedTruncated.aliases) delete normalizedTruncated.aliases;
   graph.integrity = {
     ambiguousSourceIds: [...ambiguousSourceIds].sort(lexicalCompare).slice(0, MAX_AMBIGUOUS_SOURCE_IDS),
     ambiguousEdgeIds: [...ambiguousEdgeIds].sort(lexicalCompare).slice(0, MAX_AMBIGUOUS_EDGE_IDS),
@@ -1106,9 +1338,9 @@ export function normalizeGraph(value) {
   };
   const normalizedNodes = boundedNodes.filter((node) => node && typeof node === "object" && asText(node.id).trim()).map((node) => ({
     id: normalizeId(node.id),
-    label: asLine(node.label, "Unnamed concept").slice(0, MAX_CONCEPT_LABEL_CHARS),
+    label: sliceTextAtCodePointBoundary(asLine(node.label, "Unnamed concept"), MAX_CONCEPT_LABEL_CHARS),
     aliases: normalizeAliases(node.aliases),
-    type: asLine(node.type, "concept").slice(0, 30),
+    type: sliceTextAtCodePointBoundary(asLine(node.type, "concept"), 30),
     confidence: asConfidence(node.confidence),
     mentions: asBoundedCounter(node.mentions, 1, 1, MAX_NODE_MENTIONS),
     feedback: asBoundedCounter(node.feedback, 0, -MAX_FEEDBACK_COUNT, MAX_FEEDBACK_COUNT),
@@ -1120,6 +1352,7 @@ export function normalizeGraph(value) {
     lastReviewedAt: asDateTime(node.lastReviewedAt)
   }));
   const nodesById = new Map();
+  let aliasMergeTruncation = 0;
   normalizedNodes.forEach((node) => {
     const existing = nodesById.get(node.id);
     if (!existing) {
@@ -1128,15 +1361,17 @@ export function normalizeGraph(value) {
     }
     if (existing.status !== node.status) conflictingNodeIds.add(node.id);
     const labels = [...new Set([existing.label, node.label, ...existing.aliases, ...node.aliases])];
-    const existingUpdatedAt = Date.parse(existing.updatedAt);
-    const incomingUpdatedAt = Date.parse(node.updatedAt);
+    const existingUpdatedAt = parseTimestamp(existing.updatedAt);
+    const incomingUpdatedAt = parseTimestamp(node.updatedAt);
     const incomingIsCanonical = incomingUpdatedAt > existingUpdatedAt
       || (incomingUpdatedAt === existingUpdatedAt && lexicalCompare(node.label, existing.label) < 0);
     if (incomingIsCanonical) {
       existing.label = node.label;
       existing.type = node.type;
     }
-    existing.aliases = labels.filter((label) => slugify(label) !== slugify(existing.label)).sort(lexicalCompare).slice(0, 20);
+    const mergedAliases = labels.filter((label) => slugify(label) !== slugify(existing.label)).sort(lexicalCompare);
+    aliasMergeTruncation += Math.max(0, mergedAliases.length - MAX_ALIASES);
+    existing.aliases = mergedAliases.slice(0, MAX_ALIASES);
     existing.sources = mergeSourceIds(existing.sources, node.sources);
     existing.evidence = mergeEvidence(existing.evidence, node.evidence);
     existing.mentions = Math.min(MAX_NODE_MENTIONS, existing.mentions + node.mentions);
@@ -1149,6 +1384,18 @@ export function normalizeGraph(value) {
     existing.createdAt = oldestTimestamp(existing.createdAt, node.createdAt);
   });
   graph.nodes = [...nodesById.values()];
+  if (aliasMergeTruncation > 0) {
+    graph.integrity = {
+      ...graph.integrity,
+      truncated: {
+        ...(graph.integrity.truncated || {}),
+        aliases: Math.min(
+          Number.MAX_SAFE_INTEGER,
+          (graph.integrity.truncated?.aliases || 0) + aliasMergeTruncation
+        )
+      }
+    };
+  }
   const nodeIds = new Set(graph.nodes.map((node) => node.id));
   const boundedEdges = asBoundedArray(value.edges, MAX_GRAPH_EDGES);
   dropped.edges = Math.max(
@@ -1159,7 +1406,7 @@ export function normalizeGraph(value) {
     id: normalizeId(edge.id) || makeEdgeId(normalizeId(edge.source), normalizeId(edge.target), asText(edge.label, "related-to")),
     source: normalizeId(edge.source),
     target: normalizeId(edge.target),
-    label: asLine(edge.label, "related to").slice(0, MAX_RELATION_LABEL_CHARS),
+    label: sliceTextAtCodePointBoundary(asLine(edge.label, "related to"), MAX_RELATION_LABEL_CHARS),
     confidence: asConfidence(edge.confidence),
     feedback: asBoundedCounter(edge.feedback, 0, -MAX_FEEDBACK_COUNT, MAX_FEEDBACK_COUNT),
     evidence: normalizeEvidence(edge.evidence, normalizeSourceIds(edge.sources)),
@@ -1227,7 +1474,9 @@ export function normalizeGraph(value) {
     id: normalizeId(revision.id) || `rev-${graph.version}-${index}`,
     version: Number.isSafeInteger(revision.version) && revision.version >= 0 ? revision.version : 0,
     timestamp: asDateTime(revision.timestamp, graphFallbackTimestamp),
-    reason: asLine(revision.reason, "Updated graph").slice(0, 200),
+    reason: sliceTextAtCodePointBoundary(asLine(revision.reason, "Updated graph"), 200),
+    operation: REVISION_OPERATIONS.has(revision.operation) ? revision.operation : "unknown",
+    extractor: REVISION_EXTRACTORS.has(revision.extractor) ? revision.extractor : "unknown",
     nodes: Number.isInteger(revision.nodes) ? Math.max(0, Math.min(MAX_GRAPH_NODES, revision.nodes)) : graph.nodes.length,
     edges: Number.isInteger(revision.edges) ? Math.max(0, Math.min(MAX_GRAPH_EDGES, revision.edges)) : graph.edges.length
   }));
@@ -1287,6 +1536,7 @@ export function normalizeGraph(value) {
       version: graph.version,
       timestamp: graphFallbackTimestamp,
       reason: `Migrated ${value.schema} to ${GRAPH_SCHEMA}`,
+      operation: "migration",
       nodes: graph.nodes.length,
       edges: graph.edges.length
     });
@@ -1320,6 +1570,36 @@ export function canonicalizeGraphForExport(value) {
       `${relationSemanticKey(left.source, left.target, left.label)}\u0000${left.id}`,
       `${relationSemanticKey(right.source, right.target, right.label)}\u0000${right.id}`
     ))
+  };
+}
+
+export function buildBackupEnvelope(value, history = [], { appVersion = "unknown" } = {}) {
+  const graph = canonicalizeGraphForExport(value);
+  const canonicalHistory = Array.isArray(history)
+    ? history.map(canonicalizeGraphForExport)
+    : [];
+  const normalizedVersion = typeof appVersion === "string" && appVersion.trim()
+    ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS)
+    : "unknown";
+  return {
+    format: BACKUP_FORMAT,
+    exportedAt: new Date().toISOString(),
+    appVersion: normalizedVersion,
+    graph,
+    history: canonicalHistory,
+    graphFingerprint: fingerprintBackup(graph, canonicalHistory)
+  };
+}
+
+export function buildGraphExport(value, { appVersion = "unknown" } = {}) {
+  const graph = canonicalizeGraphForExport(value);
+  const normalizedVersion = typeof appVersion === "string" && appVersion.trim()
+    ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS)
+    : "unknown";
+  return {
+    ...graph,
+    graphFingerprint: fingerprintBackup(graph),
+    appVersion: normalizedVersion
   };
 }
 
@@ -1363,7 +1643,7 @@ function feedbackHints(value) {
     const status = ["accepted", "rejected"].includes(example.status) ? example.status : null;
     if (!status) return;
     if (example.kind === "concept") {
-      const label = cleanPhrase(asLine(example.label)).slice(0, MAX_CONCEPT_LABEL_CHARS);
+      const label = sliceTextAtCodePointBoundary(cleanPhrase(asLine(example.label)), MAX_CONCEPT_LABEL_CHARS);
       const id = normalizeId(asText(example.id)) || slugify(label);
       if (!id || !label) return;
       const aliases = normalizeAliases(example.aliases);
@@ -1378,9 +1658,9 @@ function feedbackHints(value) {
       return;
     }
     if (example.kind === "relation") {
-      const label = cleanPhrase(asLine(example.label)).slice(0, MAX_RELATION_LABEL_CHARS);
-      const sourceLabel = cleanPhrase(asLine(example.sourceLabel, example.source)).slice(0, MAX_CONCEPT_LABEL_CHARS);
-      const targetLabel = cleanPhrase(asLine(example.targetLabel, example.target)).slice(0, MAX_CONCEPT_LABEL_CHARS);
+      const label = sliceTextAtCodePointBoundary(cleanPhrase(asLine(example.label)), MAX_RELATION_LABEL_CHARS);
+      const sourceLabel = sliceTextAtCodePointBoundary(cleanPhrase(asLine(example.sourceLabel, example.source)), MAX_CONCEPT_LABEL_CHARS);
+      const targetLabel = sliceTextAtCodePointBoundary(cleanPhrase(asLine(example.targetLabel, example.target)), MAX_CONCEPT_LABEL_CHARS);
       const source = normalizeId(asText(example.source)) || slugify(sourceLabel);
       const target = normalizeId(asText(example.target)) || slugify(targetLabel);
       if (label && source && target) relations.push({
@@ -1396,8 +1676,58 @@ function feedbackHints(value) {
   return { concepts, ambiguousConceptKeys, relations };
 }
 
+function applyRejectedFeedback(extraction, feedback) {
+  const hints = feedbackHints(feedback);
+  const rejectedConcepts = [...hints.concepts.values()].filter((hint) => hint.status === "rejected");
+  const conceptTokens = (node) => new Set([
+    node.id,
+    node.label,
+    ...(node.aliases || [])
+  ].map((value) => slugify(value)).filter(Boolean));
+  const rejectedNodeIds = new Set(
+    extraction.nodes
+      .filter((node) => rejectedConcepts.some((hint) => {
+        const hintTokens = new Set([hint.id, hint.label, ...(hint.aliases || [])]
+          .map((value) => slugify(value))
+          .filter(Boolean));
+        return [...conceptTokens(node)].some((token) => hintTokens.has(token));
+      }))
+      .map((node) => node.id)
+  );
+  const retainedNodes = extraction.nodes.filter((node) => !rejectedNodeIds.has(node.id));
+  const nodesById = new Map(retainedNodes.map((node) => [node.id, node]));
+  const endpointTokens = (id) => {
+    const node = nodesById.get(id);
+    return new Set([
+      id,
+      node?.label,
+      ...(node?.aliases || [])
+    ].map((value) => slugify(value)).filter(Boolean));
+  };
+  const rejectedRelations = hints.relations.filter((hint) => hint.status === "rejected");
+  const relationRejected = (edge) => rejectedRelations.some((hint) => {
+    const sourceTokens = endpointTokens(edge.source);
+    const targetTokens = endpointTokens(edge.target);
+    const hintSource = slugify(hint.source) || slugify(hint.sourceLabel);
+    const hintTarget = slugify(hint.target) || slugify(hint.targetLabel);
+    const hintLabel = slugify(hint.label);
+    if (!hintSource || !hintTarget || !hintLabel || slugify(edge.label) !== hintLabel) return false;
+    return (sourceTokens.has(hintSource) && targetTokens.has(hintTarget))
+      || (sourceTokens.has(hintTarget) && targetTokens.has(hintSource));
+  });
+  return {
+    ...extraction,
+    nodes: retainedNodes,
+    edges: extraction.edges.filter((edge) => (
+      nodesById.has(edge.source)
+      && nodesById.has(edge.target)
+      && !relationRejected(edge)
+    ))
+  };
+}
+
 export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
-  const boundedText = asText(text).slice(0, MAX_DOCUMENT_CHARS);
+  const boundedText = sliceTextAtCodePointBoundary(asText(text), MAX_DOCUMENT_CHARS);
   const sourceId = `doc-${fingerprintText(boundedText)}`;
   const markdownLines = boundedText.split(/\r?\n/).map((raw) => ({
     raw: raw.trim(),
@@ -1445,7 +1775,7 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
     if (kind === "heading" || kind === "quoted") candidate.kind = kind;
     if (hint?.status === "accepted") {
       candidate.feedback = "accepted";
-      candidate.aliases = [...new Set([...(candidate.aliases || []), ...hint.aliases, label].filter((item) => item !== candidate.label))].slice(0, 20);
+      candidate.aliases = [...new Set([...(candidate.aliases || []), ...hint.aliases, label].filter((item) => item !== candidate.label))].slice(0, MAX_ALIASES);
     }
     candidates.set(id, candidate);
   };
@@ -1573,9 +1903,9 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
         (matchesHintEndpoint(hint, source, "source") && matchesHintEndpoint(hint, target, "target"))
         || (matchesHintEndpoint(hint, source, "target") && matchesHintEndpoint(hint, target, "source"))
       ));
-      if (relationHints.some((hint) => hint.status === "rejected")) return;
       const acceptedRelation = relationHints.find((hint) => hint.status === "accepted");
       const resolvedLabel = acceptedRelation?.label || label;
+      if (relationHints.some((hint) => hint.status === "rejected" && slugify(hint.label) === slugify(resolvedLabel))) return;
       edges.push({
         source: source.id,
         target: target.id,
@@ -1616,10 +1946,10 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
         (matchesHintEndpoint(hint, left, "source") && matchesHintEndpoint(hint, right, "target"))
         || (matchesHintEndpoint(hint, left, "target") && matchesHintEndpoint(hint, right, "source"))
       ));
-      const rejectedRelation = relationHints.find((hint) => hint.status === "rejected");
-      if (rejectedRelation) continue;
       const acceptedRelation = relationHints.find((hint) => hint.status === "accepted");
       const label = acceptedRelation?.label || (relationMatch ? relationMatch[1].toLowerCase() : "co-mentioned with");
+      const rejectedRelation = relationHints.find((hint) => hint.status === "rejected" && slugify(hint.label) === slugify(label));
+      if (rejectedRelation) continue;
       edges.push({
         source: left.id,
         target: right.id,
@@ -1662,10 +1992,10 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
   });
 }
 
-export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
+export function mergeExtraction(graph, extraction, { revisionReason, revisionOperation = "ingest", revisionExtractor = "unknown" } = {}) {
   graph = normalizeGraph(graph);
   extraction = normalizeExtraction(extraction);
-  const importLimit = importTruncationLimit(graph);
+  const importLimit = importIntegrityLimit(graph);
   if (importLimit) return { graph, duplicate: false, limited: importLimit };
   const duplicate = graph.documents.some((document) => (
     sameDocumentContent(document, extraction.source)
@@ -1758,7 +2088,7 @@ export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
         : Math.min(.99, (existing.confidence + incoming.confidence) / 2 + .03 + Math.max(0, existing.feedback) * .015);
       existing.aliases = [...new Set([...(existing.aliases || []), ...(incoming.aliases || [])])]
         .sort(lexicalCompare)
-        .slice(0, 20);
+        .slice(0, MAX_ALIASES);
       existing.sources = mergeSourceIds(existing.sources, incoming.sources);
       existing.evidence = mergeEvidence(existing.evidence, incoming.evidence);
       existing.lastReviewedAt = newestTimestamp(existing.lastReviewedAt, incoming.lastReviewedAt);
@@ -1799,6 +2129,8 @@ export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
     version: graph.version,
     timestamp: now,
     reason: revisionReason || `Ingested ${extraction.source.title}`,
+    operation: REVISION_OPERATIONS.has(revisionOperation) ? revisionOperation : "ingest",
+    extractor: REVISION_EXTRACTORS.has(revisionExtractor) ? revisionExtractor : "unknown",
     nodes: graph.nodes.length,
     edges: graph.edges.length
   });
@@ -1806,9 +2138,9 @@ export function mergeExtraction(graph, extraction, { revisionReason } = {}) {
   return { graph, duplicate: false };
 }
 
-export function replaceSource(value, sourceId, extraction) {
+export function replaceSource(value, sourceId, extraction, { revisionExtractor = "unknown" } = {}) {
   const graph = normalizeGraph(value);
-  const importLimit = importTruncationLimit(graph);
+  const importLimit = importIntegrityLimit(graph);
   if (importLimit) return { graph, replaced: false, limited: importLimit };
   if (graph.integrity.ambiguousSourceIds.includes(normalizeId(sourceId))) {
     return { graph, replaced: false, ambiguous: true };
@@ -1854,7 +2186,9 @@ export function replaceSource(value, sourceId, extraction) {
     ? { ...edge, sources: mergeSourceIds(edge.sources, [sourceId]) }
     : edge);
   const merged = mergeExtraction(removed.graph, normalizedExtraction, {
-    revisionReason: `Replaced ${source.title} with ${normalizedExtraction.source.title}`
+    revisionReason: `Replaced ${source.title} with ${normalizedExtraction.source.title}`,
+    revisionOperation: "rebuild",
+    revisionExtractor
   });
   if (merged.limited || merged.duplicate) return { graph, replaced: false, limited: merged.limited, duplicate: merged.duplicate };
   return {
@@ -1946,7 +2280,7 @@ function diffStringSet(beforeValues, afterValues) {
   };
 }
 
-const INTEGRITY_DIAGNOSTIC_KEYS = ["documents", "nodes", "edges", "revisions", "learningExamples", "documentText", "evidenceText", "evidenceItems", "sourceReferences"];
+const INTEGRITY_DIAGNOSTIC_KEYS = ["documents", "nodes", "edges", "revisions", "learningExamples", "documentTitle", "documentText", "evidenceText", "evidenceItems", "sourceReferences", "aliases"];
 function diffIntegrityCounts(beforeValue, afterValue) {
   const normalizeCounts = (value) => Object.fromEntries(INTEGRITY_DIAGNOSTIC_KEYS.map((key) => [
     key,
@@ -1998,6 +2332,8 @@ export function diffGraphs(beforeValue, afterValue) {
     graphSchema: GRAPH_SCHEMA,
     fromVersion: before.version,
     toVersion: after.version,
+    fromFingerprint: fingerprintBackup(before),
+    toFingerprint: fingerprintBackup(after),
     documents,
     nodes,
     edges,
@@ -2031,6 +2367,8 @@ export function redactGraph(value) {
 
 export function applyFeedback(value, kind, id, action) {
   const graph = normalizeGraph(value);
+  const importLimit = importIntegrityLimit(graph);
+  if (importLimit) return { graph, changed: false, limited: importLimit };
   const collection = kind === "node" ? graph.nodes : kind === "edge" ? graph.edges : null;
   if (!collection || !["restore", "up", "down"].includes(action)) {
     return { graph, changed: false };
@@ -2042,12 +2380,34 @@ export function applyFeedback(value, kind, id, action) {
   const verb = action === "restore" ? "Restored" : action === "up" ? "Confirmed" : "Dismissed";
   mutateFeedbackItem(item, action);
   rememberLearningItem(graph, kind, item);
-  appendRevision(graph, `${verb} ${subject}`);
+  appendRevision(graph, `${verb} ${subject}`, "feedback");
+  return { graph, changed: true };
+}
+
+export function markSourceReviewed(value, sourceId) {
+  const graph = normalizeGraph(value);
+  const importLimit = importIntegrityLimit(graph);
+  if (importLimit) return { graph, changed: false, limited: importLimit };
+  const normalizedSourceId = normalizeId(sourceId);
+  if (graph.integrity.ambiguousSourceIds.includes(normalizedSourceId)) {
+    return { graph, changed: false, ambiguous: true };
+  }
+  const source = graph.documents.find((document) => document.id === normalizedSourceId);
+  if (!source) return { graph, changed: false };
+  const today = new Date().toISOString().slice(0, 10);
+  if (typeof source.lastReviewedAt === "string" && source.lastReviewedAt.slice(0, 10) === today) {
+    return { graph, changed: false, alreadyReviewed: true };
+  }
+  if (!canAdvanceGraphVersion(graph)) return { graph, changed: false, limited: "version" };
+  source.lastReviewedAt = new Date().toISOString();
+  appendRevision(graph, `Reviewed source ${source.title}`, "manual");
   return { graph, changed: true };
 }
 
 export function mergeConcepts(value, sourceId, targetId) {
   const graph = normalizeGraph(value);
+  const importLimit = importIntegrityLimit(graph);
+  if (importLimit) return { graph, changed: false, limited: importLimit };
   if (typeof sourceId !== "string" || typeof targetId !== "string" || sourceId === targetId) {
     return { graph, changed: false };
   }
@@ -2069,7 +2429,7 @@ export function mergeConcepts(value, sourceId, targetId) {
   ])]
     .filter((alias) => slugify(alias) !== slugify(target.label))
     .sort(lexicalCompare)
-    .slice(0, 20);
+    .slice(0, MAX_ALIASES);
   target.sources = mergeSourceIds(target.sources, source.sources);
   target.evidence = mergeEvidence(target.evidence, source.evidence);
   target.mentions = Math.min(MAX_NODE_MENTIONS, target.mentions + source.mentions);
@@ -2142,7 +2502,7 @@ export function mergeConcepts(value, sourceId, targetId) {
   });
   graph.learning.examples = [...remappedLearning.values()].slice(-MAX_FEEDBACK_EXAMPLES);
   rememberLearningItem(graph, "node", target);
-  appendRevision(graph, `Merged concept ${source.label} into ${target.label}`);
+  appendRevision(graph, `Merged concept ${source.label} into ${target.label}`, "manual");
   return { graph, changed: true, mergedId: targetId };
 }
 
@@ -2223,7 +2583,7 @@ export function syncLearningRelationLabels(value) {
   return { graph, changed };
 }
 
-function appendRevision(graph, reason) {
+function appendRevision(graph, reason, operation = "unknown") {
   if (!advanceGraphVersion(graph)) return false;
   graph.updatedAt = new Date().toISOString();
   graph.revisions.unshift({
@@ -2231,6 +2591,7 @@ function appendRevision(graph, reason) {
     version: graph.version,
     timestamp: graph.updatedAt,
     reason,
+    operation: REVISION_OPERATIONS.has(operation) ? operation : "unknown",
     nodes: graph.nodes.length,
     edges: graph.edges.length
   });
@@ -2241,6 +2602,10 @@ function appendRevision(graph, reason) {
 export function applyFeedbackDataset(value, examples) {
   let graph = normalizeGraph(value);
   const originalGraph = normalizeGraph(graph);
+  const importLimit = importIntegrityLimit(graph);
+  if (importLimit) {
+    return { graph, updates: 0, learned: 0, skipped: 0, conflicts: 0, changed: false, limited: importLimit };
+  }
   if (Array.isArray(examples) && examples.length > MAX_FEEDBACK_FINGERPRINT_EXAMPLES) {
     return { graph, updates: 0, learned: 0, skipped: 0, conflicts: 0, changed: false, limited: "feedback-examples" };
   }
@@ -2359,8 +2724,8 @@ export function applyFeedbackDataset(value, examples) {
   });
   normalizedExamples.push(...preferredExamples.values());
   normalizedExamples.sort((left, right) => {
-    const leftTime = left.lastReviewedAt ? Date.parse(left.lastReviewedAt) : Number.NaN;
-    const rightTime = right.lastReviewedAt ? Date.parse(right.lastReviewedAt) : Number.NaN;
+    const leftTime = left.lastReviewedAt ? parseTimestamp(left.lastReviewedAt) : Number.NaN;
+    const rightTime = right.lastReviewedAt ? parseTimestamp(right.lastReviewedAt) : Number.NaN;
     if (Number.isNaN(leftTime) && !Number.isNaN(rightTime)) return -1;
     if (!Number.isNaN(leftTime) && Number.isNaN(rightTime)) return 1;
     if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
@@ -2425,7 +2790,7 @@ export function applyFeedbackDataset(value, examples) {
     }
     if (preferredDecision === normalizedExample && item.status !== normalizedExample.status) {
       mutateFeedbackItem(item, normalizedExample.status === "accepted" ? "up" : "down");
-      if (!appendRevision(graph, `${normalizedExample.status === "accepted" ? "Confirmed" : "Dismissed"} ${kind === "node" ? item.label : `relation ${item.label}`}`)) {
+      if (!appendRevision(graph, `${normalizedExample.status === "accepted" ? "Confirmed" : "Dismissed"} ${kind === "node" ? item.label : `relation ${item.label}`}`, "feedback")) {
         hitVersionLimit = true;
         return;
       }
@@ -2433,7 +2798,7 @@ export function applyFeedbackDataset(value, examples) {
     }
     if (kind === "node" && preferredDecision === normalizedExample && normalizedExample.aliases.length && canAdvanceGraphVersion(graph)) {
       const updatedItem = item;
-      const aliases = [...new Set([...(updatedItem.aliases || []), ...normalizedExample.aliases])].slice(0, 20);
+      const aliases = [...new Set([...(updatedItem.aliases || []), ...normalizedExample.aliases])].slice(0, MAX_ALIASES);
       if (JSON.stringify(aliases) !== JSON.stringify(updatedItem.aliases || [])) {
         updatedItem.aliases = aliases;
         aliases.forEach((alias) => indexNodeLabel(alias, updatedItem));
@@ -2448,6 +2813,7 @@ export function applyFeedbackDataset(value, examples) {
           version: graph.version,
           timestamp: graph.updatedAt,
           reason: `Imported aliases for ${updatedItem.label}`,
+          operation: "feedback",
           nodes: graph.nodes.length,
           edges: graph.edges.length
         });
@@ -2473,19 +2839,19 @@ export function applyFeedbackDataset(value, examples) {
   }).length;
   if (learned) {
     graph.learning.examples = [...finalLearning.values()].slice(-MAX_FEEDBACK_EXAMPLES);
-    if (!updates && !appendRevision(graph, `Stored ${learned} reusable learning example${learned === 1 ? "" : "s"}${conflictingKeys.size ? `; detected ${conflictingKeys.size} contradictory reviewed decision${conflictingKeys.size === 1 ? "" : "s"} and selected a deterministic value` : ""}`)) {
+    if (!updates && !appendRevision(graph, `Stored ${learned} reusable learning example${learned === 1 ? "" : "s"}${conflictingKeys.size ? `; detected ${conflictingKeys.size} contradictory reviewed decision${conflictingKeys.size === 1 ? "" : "s"} and selected a deterministic value` : ""}`, "learning")) {
       return { graph: originalGraph, updates: 0, learned: 0, skipped, conflicts: conflictingKeys.size, changed: false, limited: "version" };
     }
   }
   if (conflictingKeys.size && updates && canAdvanceGraphVersion(graph)) {
-    if (!appendRevision(graph, `Detected ${conflictingKeys.size} contradictory reviewed decision${conflictingKeys.size === 1 ? "" : "s"}; selected values by review freshness or deterministic tie-breaking`)) {
+    if (!appendRevision(graph, `Detected ${conflictingKeys.size} contradictory reviewed decision${conflictingKeys.size === 1 ? "" : "s"}; selected values by review freshness or deterministic tie-breaking`, "learning")) {
       return { graph: originalGraph, updates: 0, learned: 0, skipped, conflicts: conflictingKeys.size, changed: false, limited: "version" };
     }
   }
   return { graph, updates, learned, skipped, conflicts: conflictingKeys.size, changed: updates > 0 || learned > 0 };
 }
 
-export function buildExtractorFeedback(value, { includeStale = true, now = Date.now() } = {}) {
+export function buildExtractorFeedback(value, { includeStale = false, now = Date.now() } = {}) {
   const graph = normalizeGraph(value);
   const nodeLabels = new Map(graph.nodes.map((node) => [node.id, node.label]));
   const concepts = graph.nodes
@@ -2534,7 +2900,7 @@ export function buildExtractorFeedback(value, { includeStale = true, now = Date.
     .map((example, index) => ({
       example,
       index,
-      timestamp: example.lastReviewedAt ? Date.parse(example.lastReviewedAt) : Number.NaN
+      timestamp: trustedReviewTime(example.lastReviewedAt, now)
     }))
     .sort((left, right) => {
       if (Number.isFinite(left.timestamp) && Number.isFinite(right.timestamp) && left.timestamp !== right.timestamp) {
@@ -2548,9 +2914,9 @@ export function buildExtractorFeedback(value, { includeStale = true, now = Date.
     .map(({ example }) => example);
   const learningKeys = new Set(learningExamples.map(learningExampleKey));
   const reservedLiveKeys = new Set([
-    concepts[0],
-    relations[0]
-  ].filter(Boolean)
+    ...concepts,
+    ...relations
+  ]
     .map(learningExampleKey)
     .filter((key) => !learningKeys.has(key)));
   const learningBudget = Math.max(0, MAX_FEEDBACK_EXAMPLES - reservedLiveKeys.size);
@@ -2570,27 +2936,33 @@ export function buildExtractorFeedback(value, { includeStale = true, now = Date.
 
 export function clearLearningMemory(value) {
   const graph = normalizeGraph(value);
+  const importLimit = importIntegrityLimit(graph);
+  if (importLimit) return { graph, changed: false, removed: 0, limited: importLimit };
   const removed = graph.learning.examples.length;
   if (!removed) return { graph, changed: false, removed: 0 };
   if (!canAdvanceGraphVersion(graph)) return { graph, changed: false, removed: 0, limited: "version" };
   graph.learning.examples = [];
-  appendRevision(graph, `Forgot ${removed} reusable learning example${removed === 1 ? "" : "s"}`);
+  appendRevision(graph, `Forgot ${removed} reusable learning example${removed === 1 ? "" : "s"}`, "learning");
   return { graph, changed: true, removed };
 }
 
 export function clearStaleLearningMemory(value) {
   const graph = normalizeGraph(value);
+  const importLimit = importIntegrityLimit(graph);
+  if (importLimit) return { graph, changed: false, removed: 0, limited: importLimit };
   const stale = graph.learning.examples.filter((example) => isStaleLearningExample(example));
   if (!stale.length) return { graph, changed: false, removed: 0 };
   if (!canAdvanceGraphVersion(graph)) return { graph, changed: false, removed: 0, limited: "version" };
   const staleKeys = new Set(stale.map(learningExampleKey));
   graph.learning.examples = graph.learning.examples.filter((example) => !staleKeys.has(learningExampleKey(example)));
-  appendRevision(graph, `Forgot ${stale.length} stale reusable learning example${stale.length === 1 ? "" : "s"}`);
+  appendRevision(graph, `Forgot ${stale.length} stale reusable learning example${stale.length === 1 ? "" : "s"}`, "learning");
   return { graph, changed: true, removed: stale.length };
 }
 
 export function removeSource(value, sourceId, { recordRevision = true } = {}) {
   const graph = normalizeGraph(value);
+  const importLimit = importIntegrityLimit(graph);
+  if (importLimit) return { graph, removed: false, removedNodes: 0, removedEdges: 0, limited: importLimit };
   if (graph.integrity.ambiguousSourceIds.includes(normalizeId(sourceId))) {
     return { graph, removed: false, removedNodes: 0, removedEdges: 0, ambiguous: true };
   }
@@ -2652,6 +3024,7 @@ export function removeSource(value, sourceId, { recordRevision = true } = {}) {
       version: graph.version,
       timestamp: graph.updatedAt,
       reason: `Removed source ${source.title}`,
+      operation: "source-removal",
       nodes: graph.nodes.length,
       edges: graph.edges.length
     });
@@ -2755,8 +3128,8 @@ export function inspectGraph(value, { now = Date.now(), includeReviewQueue = fal
   const reviewedSources = graph.documents.filter((document) => document.lastReviewedAt).length;
   const freshReviewedSources = graph.documents.filter((document) => {
     if (!document.lastReviewedAt) return false;
-    const timestamp = Date.parse(document.lastReviewedAt);
-    return !Number.isNaN(timestamp) && now - timestamp < REVIEW_STALE_DAYS * 86400000;
+    const timestamp = parseTimestamp(document.lastReviewedAt);
+    return !Number.isNaN(timestamp) && timestamp <= now && now - timestamp < REVIEW_STALE_DAYS * 86400000;
   }).length;
   const staleLearningExamples = graph.learning.examples.filter((example) => isStaleLearningExample(example, now)).length;
   const feedbackContext = feedbackContextStatsForGraph(graph, { includeStale: false, now });
@@ -2768,10 +3141,12 @@ export function inspectGraph(value, { now = Date.now(), includeReviewQueue = fal
     truncation.edges,
     truncation.revisions,
     truncation.learningExamples,
+    truncation.documentTitle,
     truncation.documentText,
     truncation.evidenceText,
     truncation.evidenceItems,
-    truncation.sourceReferences
+    truncation.sourceReferences,
+    truncation.aliases
   ].reduce((total, count) => Math.min(
     Number.MAX_SAFE_INTEGER,
     total + (Number.isSafeInteger(count) && count > 0 ? count : 0)
@@ -2837,10 +3212,12 @@ export function inspectGraph(value, { now = Date.now(), includeReviewQueue = fal
     truncatedEdges: truncation.edges || 0,
     truncatedRevisions: truncation.revisions || 0,
     truncatedLearningExamples: truncation.learningExamples || 0,
+    truncatedDocumentTitle: truncation.documentTitle || 0,
     truncatedDocumentText: truncation.documentText || 0,
     truncatedEvidenceText: truncation.evidenceText || 0,
     truncatedEvidenceItems: truncation.evidenceItems || 0,
     truncatedSourceReferences: truncation.sourceReferences || 0,
+    truncatedAliases: truncation.aliases || 0,
     dropped: droppedItems > 0,
     droppedItems,
     droppedDocuments: dropped.documents || 0,
@@ -2894,29 +3271,31 @@ function buildReviewQueue(graph, limit = 20, now = Date.now(), unanchoredByItem 
     || item.evidence.some((evidence) => evidence.sources.some((sourceId) => documentIds.has(sourceId) && !ambiguousSourceIds.has(sourceId)));
   const reviewAgeDays = (item) => {
     if (!item.lastReviewedAt) return null;
-    const timestamp = Date.parse(item.lastReviewedAt);
-    if (Number.isNaN(timestamp)) return null;
+    const timestamp = parseTimestamp(item.lastReviewedAt);
+    if (Number.isNaN(timestamp) || timestamp > now) return null;
     return Math.max(0, Math.floor((now - timestamp) / 86400000));
   };
   const isStaleReview = (item) => item.status !== "inferred"
     && (reviewAgeDays(item) === null || reviewAgeDays(item) >= REVIEW_STALE_DAYS);
   const hasNewEvidenceSinceReview = (item) => {
     if (!item.lastReviewedAt) return false;
-    const reviewedAt = Date.parse(item.lastReviewedAt);
+    const reviewedAt = parseTimestamp(item.lastReviewedAt);
     if (Number.isNaN(reviewedAt)) return false;
     const sourceIds = new Set([
       ...item.sources,
       ...item.evidence.flatMap((evidence) => evidence.sources || [])
     ]);
     return [...sourceIds].some((sourceId) => {
-      const sourceAddedAt = Date.parse(documentsById.get(sourceId)?.addedAt || "");
+    const sourceAddedAt = parseTimestamp(documentsById.get(sourceId)?.addedAt || "");
       return !Number.isNaN(sourceAddedAt) && sourceAddedAt > reviewedAt;
     });
   };
   const unanchoredEvidenceFor = (kind, item) => unanchoredByItem.get(`${kind}:${item.id}`) || 0;
   const staleReason = (item) => {
     const age = reviewAgeDays(item);
-    return age === null ? "review timestamp missing" : `review stale by ${age} day${age === 1 ? "" : "s"}`;
+    if (age !== null) return `review stale by ${age} day${age === 1 ? "" : "s"}`;
+    if (item.lastReviewedAt && parseTimestamp(item.lastReviewedAt) > now) return "review timestamp is in the future";
+    return "review timestamp missing";
   };
   const isStaleSourceReview = (document) => reviewAgeDays(document) === null || reviewAgeDays(document) >= REVIEW_STALE_DAYS;
   const describePriority = ({ confidence, evidence, supported }) => {
@@ -3086,11 +3465,13 @@ export const HEALTH_COUNT_LIMITS = {
   conflictingNodeIds: MAX_CONFLICTING_ITEM_IDS,
   conflictingEdgeIds: MAX_CONFLICTING_ITEM_IDS,
   conflictingItems: MAX_CONFLICTING_ITEM_IDS * 2,
+  truncatedAliases: (MAX_GRAPH_NODES + MAX_FEEDBACK_EXAMPLES) * MAX_ALIASES,
   truncatedDocuments: 0xffffffff,
   truncatedNodes: 0xffffffff,
   truncatedEdges: 0xffffffff,
   truncatedRevisions: 0xffffffff,
   truncatedLearningExamples: 0xffffffff,
+  truncatedDocumentTitle: 0xffffffff,
   truncatedDocumentText: 0xffffffff,
   truncatedEvidenceText: 0xffffffff,
   truncatedEvidenceItems: 0xffffffff,
@@ -3147,9 +3528,9 @@ export function validateHealthReport(value, { label = "health report" } = {}) {
   if (value.format !== HEALTH_FORMAT) throw new Error(`${label} must declare ${HEALTH_FORMAT}.`);
   if (value.graphSchema !== GRAPH_SCHEMA) throw new Error(`${label} must declare ${GRAPH_SCHEMA}.`);
   assertHealthCount(value.graphVersion, `${label}.graphVersion`, Number.MAX_SAFE_INTEGER);
-  if (typeof value.inspectedAt !== "string" || Number.isNaN(Date.parse(value.inspectedAt))) throw new Error(`${label}.inspectedAt must be a valid timestamp.`);
+  if (typeof value.inspectedAt !== "string" || Number.isNaN(parseTimestamp(value.inspectedAt))) throw new Error(`${label}.inspectedAt must be a valid timestamp.`);
   if (value.graphFingerprint !== undefined && !/^fnv64-[0-9a-f]{16}-[0-9]+$/.test(value.graphFingerprint)) throw new Error(`${label}.graphFingerprint is invalid.`);
-  if (value.appVersion !== undefined && (typeof value.appVersion !== "string" || !value.appVersion.trim() || value.appVersion.length > 64)) throw new Error(`${label}.appVersion is invalid.`);
+  if (value.appVersion !== undefined && (typeof value.appVersion !== "string" || !value.appVersion.trim() || value.appVersion.length > MAX_PRODUCER_VERSION_CHARS)) throw new Error(`${label}.appVersion is invalid.`);
   if (!value.health || typeof value.health !== "object" || Array.isArray(value.health)) throw new Error(`${label}.health is missing.`);
   for (const [field, maximum] of Object.entries(HEALTH_COUNT_LIMITS)) {
     if (value.health[field] !== undefined) assertHealthCount(value.health[field], `${label}.health.${field}`, maximum);
@@ -3273,7 +3654,7 @@ export function buildHealthReport(value, {
   const graph = normalizeGraph(value);
   const fallbackInspectionTime = new Date().toISOString();
   const normalizedInspectionTime = asDateTime(inspectedAt, fallbackInspectionTime);
-  const inspectionTime = Date.parse(normalizedInspectionTime);
+  const inspectionTime = parseTimestamp(normalizedInspectionTime);
   const health = inspectGraph(graph, { now: inspectionTime, includeReviewQueue: true });
   const reviewCandidates = health.reviewQueue || [];
   delete health.reviewQueue;
@@ -3282,7 +3663,7 @@ export function buildHealthReport(value, {
     graphSchema: GRAPH_SCHEMA,
     graphVersion: graph.version,
     graphFingerprint: fingerprintBackup(graph),
-    appVersion: typeof appVersion === "string" && appVersion.trim() ? appVersion.trim().slice(0, 64) : "unknown",
+    appVersion: typeof appVersion === "string" && appVersion.trim() ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS) : "unknown",
     inspectedAt: normalizedInspectionTime,
     health,
     reviewQueue: reviewCandidates.map(reviewQueueExportItem)

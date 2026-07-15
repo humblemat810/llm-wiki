@@ -1,4 +1,4 @@
-import { advanceGraphVersion, GRAPH_SCHEMA, matchesGraphFingerprint, MAX_CONCEPT_LABEL_CHARS, MAX_FEEDBACK_COUNT, MAX_GRAPH_DOCUMENTS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_GRAPH_REVISIONS, MAX_GRAPH_VERSION, MAX_ID_CHARS, MAX_NODE_MENTIONS, MAX_RELATION_LABEL_CHARS, MAX_SOURCE_URI_CHARS, MAX_TIMESTAMP_CHARS, normalizeGraph, normalizeSourceUri, rememberLearningItem, SOURCE_QUALITIES, slugify, syncLearningRelationLabels, VAULT_FORMAT } from "./graph-core.js";
+import { advanceGraphVersion, GRAPH_SCHEMA, matchesGraphFingerprint, MAX_ALIASES, MAX_CONCEPT_LABEL_CHARS, MAX_DOCUMENT_TITLE_CHARS, MAX_FEEDBACK_COUNT, MAX_GRAPH_DOCUMENTS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_GRAPH_REVISIONS, MAX_GRAPH_VERSION, MAX_ID_CHARS, MAX_NODE_MENTIONS, MAX_PRODUCER_VERSION_CHARS, MAX_RELATION_LABEL_CHARS, MAX_SOURCE_URI_CHARS, MAX_TIMESTAMP_CHARS, normalizeGraph, normalizeSourceUri, parseJsonWithUniqueKeys, parseTimestamp, rememberLearningItem, sliceTextAtCodePointBoundary, SOURCE_QUALITIES, slugify, syncLearningRelationLabels, VAULT_FORMAT } from "./graph-core.js";
 import { JSONLD_FORMAT, matchesJsonLdProjection } from "./jsonld-projection.js";
 
 const STATUSES = new Set(["inferred", "accepted", "rejected"]);
@@ -34,32 +34,43 @@ const OBSIDIAN_FIELDS_BY_TYPE = {
   source: new Set(["type", "id", "fingerprint", "uri", "added", "quality", "last_reviewed", "graph_version", "graph_fingerprint", "redacted"])
 };
 
-const boundedFeedbackText = (value, limit) => typeof value === "string" ? value.trim().slice(0, limit) : "";
+const boundedFeedbackText = (value, limit) => typeof value === "string" ? sliceTextAtCodePointBoundary(value.trim(), limit) : "";
 const fitsFeedbackText = (value, limit) => value === undefined || value === null
   || (typeof value === "string" && value.length <= limit);
+const canonicalFeedbackAlias = (alias) => alias.replace(/\s+/g, " ").trim();
+const normalizeFeedbackAlias = (alias) => sliceTextAtCodePointBoundary(canonicalFeedbackAlias(alias), MAX_CONCEPT_LABEL_CHARS);
 const boundedFeedbackAliases = (value) => Array.isArray(value)
-  ? value.slice(0, 20).filter((alias) => typeof alias === "string").map((alias) => alias.replace(/\s+/g, " ").trim().slice(0, MAX_CONCEPT_LABEL_CHARS)).filter(Boolean).sort()
+  ? value.slice(0, MAX_ALIASES).filter((alias) => typeof alias === "string").map(normalizeFeedbackAlias).filter(Boolean).sort()
   : [];
+const validFeedbackAliases = (value) => Array.isArray(value)
+  && value.length <= MAX_ALIASES
+  && value.every((alias) => typeof alias === "string" && canonicalFeedbackAlias(alias).length <= MAX_CONCEPT_LABEL_CHARS)
+  && new Set(value.map(canonicalFeedbackAlias)).size === value.length;
 function normalizeFeedbackTimestamp(value, present) {
   if (!present) return { valid: true, value: null };
   if (value === "") return { valid: true, value: null };
-  if (typeof value !== "string" || value.length > MAX_TIMESTAMP_CHARS || Number.isNaN(Date.parse(value))) {
+  if (typeof value !== "string" || value.length > MAX_TIMESTAMP_CHARS || Number.isNaN(parseTimestamp(value))) {
     return { valid: false, value: null };
   }
-  return { valid: true, value: new Date(Date.parse(value)).toISOString() };
+  return { valid: true, value: new Date(parseTimestamp(value)).toISOString() };
 }
 function shouldApplyReviewTimestamp(current, incoming) {
   if (incoming === null) return current !== null;
   if (!current) return true;
-  const currentTime = Date.parse(current);
-  const incomingTime = Date.parse(incoming);
+  const currentTime = parseTimestamp(current);
+  const incomingTime = parseTimestamp(incoming);
+  const now = Date.now();
+  const currentIsTrusted = !Number.isNaN(currentTime) && currentTime <= now;
+  const incomingIsTrusted = !Number.isNaN(incomingTime) && incomingTime <= now;
+  if (incomingIsTrusted && !currentIsTrusted) return true;
+  if (!incomingIsTrusted && currentIsTrusted) return false;
   return Number.isNaN(currentTime) || (!Number.isNaN(incomingTime) && incomingTime >= currentTime);
 }
 function boundFeedbackMutation(value) {
   if (!value || typeof value !== "object" || !["concept", "relation", "source"].includes(value.type)) return null;
   if (!fitsFeedbackText(value.id, MAX_ID_CHARS)) return null;
   if (value.type === "source" && (
-    !fitsFeedbackText(value.title, 200)
+    !fitsFeedbackText(value.title, MAX_DOCUMENT_TITLE_CHARS)
     || !fitsFeedbackText(value.uri, MAX_SOURCE_URI_CHARS)
     || !fitsFeedbackText(value.fingerprint, MAX_ID_CHARS)
   )) return null;
@@ -68,9 +79,7 @@ function boundFeedbackMutation(value) {
     || (value.type === "relation" && (!fitsFeedbackText(value.source, MAX_ID_CHARS) || !fitsFeedbackText(value.target, MAX_ID_CHARS)))
   )) return null;
   if (value.aliases !== undefined && (
-    !Array.isArray(value.aliases)
-    || value.aliases.length > 20
-    || value.aliases.some((alias) => typeof alias !== "string" || alias.replace(/\s+/g, " ").trim().length > MAX_CONCEPT_LABEL_CHARS)
+    !validFeedbackAliases(value.aliases)
   )) return null;
   const bounded = {
     type: value.type,
@@ -88,7 +97,7 @@ function boundFeedbackMutation(value) {
       && (typeof rawUri !== "string" || (rawUri.trim() && !normalizedUri))) return null;
     return {
       ...bounded,
-      title: boundedFeedbackText(value.title, 200),
+      title: boundedFeedbackText(value.title, MAX_DOCUMENT_TITLE_CHARS),
       uri: normalizedUri,
       fingerprint: boundedFeedbackText(value.fingerprint, MAX_ID_CHARS) || undefined,
       quality: SOURCE_QUALITIES.has(value.quality) ? value.quality : null,
@@ -116,7 +125,7 @@ function parseValue(value) {
   const trimmed = value.trim();
   if (!trimmed) return "";
   try {
-    return JSON.parse(trimmed);
+    return parseJsonWithUniqueKeys(trimmed, "Obsidian frontmatter value");
   } catch {
     return trimmed.replace(/^["']|["']$/g, "");
   }
@@ -150,9 +159,7 @@ export function parseObsidianFeedback(markdown) {
   if (Object.keys(fields).some((key) => !OBSIDIAN_FIELDS_BY_TYPE[fields.type].has(key))) return null;
   if (Object.hasOwn(fields, "status") && !STATUSES.has(fields.status)) return null;
   if (Object.hasOwn(fields, "aliases") && (
-    !Array.isArray(fields.aliases)
-    || fields.aliases.length > 20
-    || fields.aliases.some((alias) => typeof alias !== "string" || alias.replace(/\s+/g, " ").trim().length > MAX_CONCEPT_LABEL_CHARS)
+    !validFeedbackAliases(fields.aliases)
   )) return null;
   const hasProjectionMetadata = Object.hasOwn(fields, "graph_version") || Object.hasOwn(fields, "graph_fingerprint");
   const projectionMetadataValid = !hasProjectionMetadata || (
@@ -168,11 +175,11 @@ export function parseObsidianFeedback(markdown) {
     projectionMetadataError: projectionMetadataValid ? null : "Projection metadata is invalid."
   };
   const heading = markdown.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim();
-  if (typeof heading === "string" && heading.length > 200) return null;
+  if (typeof heading === "string" && heading.length > MAX_DOCUMENT_TITLE_CHARS) return null;
   const hasReviewDate = Object.hasOwn(fields, "last_reviewed");
   if (hasReviewDate && (
     typeof fields.last_reviewed !== "string"
-    || (fields.last_reviewed.trim() && (fields.last_reviewed.length > MAX_TIMESTAMP_CHARS || Number.isNaN(Date.parse(fields.last_reviewed))))
+    || (fields.last_reviewed.trim() && (fields.last_reviewed.length > MAX_TIMESTAMP_CHARS || Number.isNaN(parseTimestamp(fields.last_reviewed))))
   )) return null;
   if (fields.type === "source") {
     const hasUri = Object.hasOwn(fields, "uri");
@@ -188,7 +195,7 @@ export function parseObsidianFeedback(markdown) {
     if (Object.hasOwn(fields, "added") && (
       typeof fields.added !== "string"
       || fields.added.length > MAX_TIMESTAMP_CHARS
-      || Number.isNaN(Date.parse(fields.added))
+      || Number.isNaN(parseTimestamp(fields.added))
     )) return null;
     if (Object.hasOwn(fields, "redacted") && typeof fields.redacted !== "boolean") return null;
     return {
@@ -200,7 +207,7 @@ export function parseObsidianFeedback(markdown) {
       title: typeof heading === "string" && heading ? heading : undefined,
       uri: normalizeSourceUri(fields.uri),
       quality: SOURCE_QUALITIES.has(fields.quality) ? fields.quality : null,
-      lastReviewedAt: typeof fields.last_reviewed === "string" && fields.last_reviewed.length <= MAX_TIMESTAMP_CHARS && !Number.isNaN(Date.parse(fields.last_reviewed)) ? new Date(Date.parse(fields.last_reviewed)).toISOString() : null,
+      lastReviewedAt: typeof fields.last_reviewed === "string" && fields.last_reviewed.length <= MAX_TIMESTAMP_CHARS && !Number.isNaN(parseTimestamp(fields.last_reviewed)) ? new Date(parseTimestamp(fields.last_reviewed)).toISOString() : null,
       hasLastReviewedAt: Object.hasOwn(fields, "last_reviewed")
     };
   }
@@ -225,7 +232,7 @@ export function parseObsidianFeedback(markdown) {
   if (fields.type === "relation" && hasRelationEndpoints
     && (typeof fields.source !== "string" || !fields.source.trim() || typeof fields.target !== "string" || !fields.target.trim())) return null;
   const aliases = Array.isArray(fields.aliases)
-    ? fields.aliases.map((alias) => alias.replace(/\s+/g, " ").trim()).filter(Boolean)
+    ? fields.aliases.map(normalizeFeedbackAlias).filter(Boolean)
     : [];
   const label = fields.type === "concept"
     ? (heading || fields.label)
@@ -234,8 +241,8 @@ export function parseObsidianFeedback(markdown) {
   if (typeof label === "string" && label.trim().length > labelLimit) return null;
   const parsedLastReviewedAt = typeof fields.last_reviewed === "string"
     && fields.last_reviewed.length <= MAX_TIMESTAMP_CHARS
-    && !Number.isNaN(Date.parse(fields.last_reviewed))
-    ? new Date(Date.parse(fields.last_reviewed)).toISOString()
+    && !Number.isNaN(parseTimestamp(fields.last_reviewed))
+    ? new Date(parseTimestamp(fields.last_reviewed)).toISOString()
     : null;
   return {
     ...projectionMetadata,
@@ -257,7 +264,7 @@ function feedbackMutationFingerprint(feedback) {
     return JSON.stringify({
       type: feedback.type,
       id: boundedFeedbackText(feedback.id, MAX_ID_CHARS),
-      title: boundedFeedbackText(feedback.title, 200) || null,
+      title: boundedFeedbackText(feedback.title, MAX_DOCUMENT_TITLE_CHARS) || null,
       hasUri,
       uri: boundedFeedbackText(feedback.uri, MAX_ID_CHARS) || null,
       fingerprint: boundedFeedbackText(feedback.fingerprint, MAX_ID_CHARS) || null,
@@ -332,8 +339,8 @@ export function applyObsidianFeedback(value, feedbacks) {
         changed += 1;
         sourceMetadataChanged = true;
       }
-      const normalizedReviewedAt = typeof feedback.lastReviewedAt === "string" && feedback.lastReviewedAt.length <= MAX_TIMESTAMP_CHARS && !Number.isNaN(Date.parse(feedback.lastReviewedAt))
-        ? new Date(Date.parse(feedback.lastReviewedAt)).toISOString()
+      const normalizedReviewedAt = typeof feedback.lastReviewedAt === "string" && feedback.lastReviewedAt.length <= MAX_TIMESTAMP_CHARS && !Number.isNaN(parseTimestamp(feedback.lastReviewedAt))
+        ? new Date(parseTimestamp(feedback.lastReviewedAt)).toISOString()
         : null;
       const reviewDateChanged = feedback.hasLastReviewedAt && normalizedReviewedAt !== source.lastReviewedAt;
       if (feedback.hasLastReviewedAt
@@ -373,11 +380,11 @@ export function applyObsidianFeedback(value, feedbacks) {
         skipped += 1;
         continue;
       } else if (feedback.type === "concept") {
-        item.aliases = [...new Set([...(item.aliases || []), item.label])].slice(0, 20);
+        item.aliases = [...new Set([...(item.aliases || []), item.label])].slice(0, MAX_ALIASES);
         item.label = feedback.label;
         item.updatedAt = new Date().toISOString();
       } else {
-        item.label = feedback.label.slice(0, MAX_RELATION_LABEL_CHARS);
+        item.label = sliceTextAtCodePointBoundary(feedback.label, MAX_RELATION_LABEL_CHARS);
       }
       changed += 1;
       humanCorrection = true;
@@ -385,7 +392,7 @@ export function applyObsidianFeedback(value, feedbacks) {
     const feedbackAliases = boundedFeedbackAliases(feedback.aliases);
     if (feedback.type === "concept" && feedbackAliases.length) {
       const existingAliases = [...new Set(item.aliases || [])].sort();
-      const aliases = [...existingAliases, ...feedbackAliases.filter((alias) => !existingAliases.includes(alias))].slice(0, 20);
+      const aliases = [...existingAliases, ...feedbackAliases.filter((alias) => !existingAliases.includes(alias))].slice(0, MAX_ALIASES);
       if (aliases.length !== (item.aliases || []).length || aliases.some((alias, index) => alias !== item.aliases[index])) {
         item.aliases = aliases;
         changed += 1;
@@ -434,6 +441,7 @@ export function applyObsidianFeedback(value, feedbacks) {
     version: graph.version,
     timestamp: graph.updatedAt,
     reason: `${changed ? `Imported ${changed} Obsidian feedback update${changed === 1 ? "" : "s"}` : "Repaired reusable learning memory from Obsidian feedback"}`,
+    operation: "projection",
     nodes: graph.nodes.length,
     edges: graph.edges.length
   });
@@ -459,7 +467,14 @@ function crc32(bytes) {
 }
 
 export function readStoredZip(input, { maxUncompressedBytes = MAX_ZIP_BYTES } = {}) {
-  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  const bytes = input instanceof Uint8Array
+    ? input
+    : input instanceof ArrayBuffer
+      ? new Uint8Array(input)
+      : ArrayBuffer.isView(input)
+        ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+        : null;
+  if (!bytes) throw new Error("The vault archive must be provided as byte data.");
   if (bytes.length > MAX_ZIP_BYTES) throw new Error("The vault archive is larger than the 50 MB safety limit.");
   const uncompressedLimit = Number.isFinite(Number(maxUncompressedBytes)) && Number(maxUncompressedBytes) >= 0
     ? Math.min(MAX_ZIP_BYTES, Math.floor(Number(maxUncompressedBytes)))
@@ -542,7 +557,7 @@ export function parseObsidianVault(input) {
       manifestError = "Vault manifest metadata exceeds the safety limit.";
     } else {
       try {
-        const candidate = JSON.parse(manifestFile.text);
+        const candidate = parseJsonWithUniqueKeys(manifestFile.text, "Vault manifest");
         const valid = candidate
           && candidate.format === VAULT_FORMAT
           && candidate.graphSchema === GRAPH_SCHEMA
@@ -551,10 +566,14 @@ export function parseObsidianVault(input) {
           && typeof candidate.graphFingerprint === "string"
           && candidate.graphFingerprint.length <= 128
           && /^fnv64-[0-9a-f]{16}-[0-9]+$/.test(candidate.graphFingerprint)
+          && (candidate.appVersion === undefined
+            || (typeof candidate.appVersion === "string"
+              && candidate.appVersion.trim().length >= 1
+              && candidate.appVersion.length <= MAX_PRODUCER_VERSION_CHARS))
           && typeof candidate.redacted === "boolean"
           && typeof candidate.generatedAt === "string"
           && candidate.generatedAt.length <= MAX_TIMESTAMP_CHARS
-          && !Number.isNaN(Date.parse(candidate.generatedAt));
+          && !Number.isNaN(parseTimestamp(candidate.generatedAt));
         if (valid) manifest = candidate;
         else manifestError = "Vault manifest metadata is invalid.";
       } catch {
@@ -567,7 +586,7 @@ export function parseObsidianVault(input) {
   let graphError = null;
   if (graphFile) {
     try {
-      embeddedGraph = JSON.parse(graphFile.text);
+      embeddedGraph = parseJsonWithUniqueKeys(graphFile.text, "Embedded graph");
       const validSchema = embeddedGraph
         && (embeddedGraph.schema === GRAPH_SCHEMA || embeddedGraph.schema === "llm-field-notes/graph@0");
       if (!validSchema) {
@@ -577,11 +596,19 @@ export function parseObsidianVault(input) {
           || !GRAPH_FINGERPRINT_PATTERN.test(embeddedGraph.graphFingerprint)
           || !matchesGraphFingerprint(embeddedGraph, embeddedGraph.graphFingerprint))) {
         graphError = "Embedded graph JSON fingerprint does not match its contents.";
+      } else if (embeddedGraph.appVersion !== undefined
+        && (typeof embeddedGraph.appVersion !== "string"
+          || embeddedGraph.appVersion.trim().length < 1
+          || embeddedGraph.appVersion.length > MAX_PRODUCER_VERSION_CHARS)) {
+        graphError = "Embedded graph JSON producer metadata is invalid.";
       } else if (manifest && (
         embeddedGraph.graphFingerprint !== manifest.graphFingerprint
         || embeddedGraph.version !== manifest.graphVersion
         || (embeddedGraph.redacted === true) !== manifest.redacted
         || embeddedGraph.schema !== manifest.graphSchema
+        || (manifest.appVersion !== undefined
+          && embeddedGraph.appVersion !== undefined
+          && embeddedGraph.appVersion !== manifest.appVersion)
       )) {
         graphError = "Embedded graph JSON metadata does not match its vault manifest.";
       }
@@ -593,7 +620,7 @@ export function parseObsidianVault(input) {
   let jsonLdError = null;
   if (jsonLdFile) {
     try {
-      const projection = JSON.parse(jsonLdFile.text);
+      const projection = parseJsonWithUniqueKeys(jsonLdFile.text, "JSON-LD projection");
       if (!projection
         || projection.format !== JSONLD_FORMAT
         || projection.graphSchema !== GRAPH_SCHEMA
@@ -601,12 +628,19 @@ export function parseObsidianVault(input) {
         || projection.graphVersion < 0
         || typeof projection.fingerprint !== "string"
         || !GRAPH_FINGERPRINT_PATTERN.test(projection.fingerprint)
+        || (projection.appVersion !== undefined
+          && (typeof projection.appVersion !== "string"
+            || projection.appVersion.trim().length < 1
+            || projection.appVersion.length > MAX_PRODUCER_VERSION_CHARS))
         || typeof projection.redacted !== "boolean"
-        || (manifest && (
-          projection.fingerprint !== manifest.graphFingerprint
-          || projection.graphVersion !== manifest.graphVersion
-          || projection.redacted !== manifest.redacted
-        ))) {
+          || (manifest && (
+            projection.fingerprint !== manifest.graphFingerprint
+            || projection.graphVersion !== manifest.graphVersion
+            || projection.redacted !== manifest.redacted
+            || (manifest.appVersion !== undefined
+              && projection.appVersion !== undefined
+              && projection.appVersion !== manifest.appVersion)
+          ))) {
         jsonLdError = "Embedded JSON-LD metadata does not match its vault manifest.";
       } else if (embeddedGraph && !graphError && !matchesJsonLdProjection(embeddedGraph, projection)) {
         jsonLdError = "Embedded JSON-LD does not match the authoritative embedded graph JSON.";

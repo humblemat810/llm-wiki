@@ -22,16 +22,18 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
       - name: Run smoke checks
         run: npm test
-      - name: Smoke test npm start
+      - name: Smoke test standalone server lifecycle
         run: |
           set -e
-          PORT=18001 HOST=127.0.0.1 npm start >/tmp/llm-field-notes-start.log 2>&1 &
+          PORT=18001 HOST=127.0.0.1 node server.mjs >/tmp/llm-field-notes-start.log 2>&1 &
           pid=$!
           cleanup() {
             kill -TERM "$pid" >/dev/null 2>&1 || true
@@ -50,21 +52,23 @@ jobs:
             cat /tmp/llm-field-notes-start.log
             exit 1
           fi
+          grep -q '"event":"server-ready"' /tmp/llm-field-notes-start.log
           curl --fail --silent http://127.0.0.1:18001/metrics | grep llm_field_notes_http_requests_total
           kill -TERM "$pid"
-          if wait "$pid"; then
-            :
-          else
-            status=$?
-            test "$status" -eq 143
-          fi
+          status=0
+          wait "$pid" || status=$?
+          test "$status" -eq 0
+          grep -q '"event":"server-draining"' /tmp/llm-field-notes-start.log
+          grep -q '"event":"server-stopped"' /tmp/llm-field-notes-start.log
           trap - EXIT
       - name: Build container
         run: |
           set -e
           version=$(node -p "require('./package.json').version")
-          docker build --build-arg APP_VERSION="$version" --tag llm-field-notes:ci .
+          docker build --build-arg APP_VERSION="$version" --build-arg VCS_REF="$GITHUB_SHA" --tag llm-field-notes:ci .
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' llm-field-notes:ci)" = "$version"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' llm-field-notes:ci)" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{.Config.StopSignal}}' llm-field-notes:ci)" = "SIGTERM"
       - name: Smoke test container readiness
         run: |
           trap 'docker rm --force llm-field-notes-smoke >/dev/null 2>&1 || true' EXIT

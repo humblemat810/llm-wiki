@@ -9,3 +9,10 @@ export function normalizePublicOrigin(value) {
     return "";
   }
 }
+
+export function requirePublicOrigin(value) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const normalized = normalizePublicOrigin(value);
+  if (!normalized) throw new Error("Public origin must be an absolute credential-free HTTP(S) origin.");
+  return normalized;
+}
