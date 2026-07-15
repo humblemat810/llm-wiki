@@ -3,8 +3,10 @@ import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { relative } from "node:path";
 import { parseJsonWithUniqueKeys } from "../graph-core.js";
 import { LEARNING_NOTE_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, OFFLINE_SHELL_ASSETS, PUBLIC_ASSETS, PUBLIC_SITEMAP_ASSETS } from "./public-assets.mjs";
+import { readServiceWorkerShellAssets } from "./service-worker-cache.mjs";
 
 const packageManifest = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json");
+const packageLock = parseJsonWithUniqueKeys(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"), "package-lock.json");
 const release = parseJsonWithUniqueKeys(await readFile(new URL("../version.json", import.meta.url), "utf8"), "version.json");
 const changelog = await readFile(new URL("../CHANGELOG.md", import.meta.url), "utf8");
 const serviceWorker = await readFile(new URL("../sw.js", import.meta.url), "utf8");
@@ -13,6 +15,7 @@ const notesIndex = await readFile(new URL("../notes/README.md", import.meta.url)
 const { notes: browserNotes } = await import(new URL("../curriculum.js", import.meta.url));
 const llms = await readFile(new URL("../llms.txt", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+const dockerignore = await readFile(new URL("../.dockerignore", import.meta.url), "utf8");
 const version = packageManifest.version;
 const workflowDirectory = new URL("../.github/workflows/", import.meta.url);
 const rootRealPath = await realpath(new URL("../", import.meta.url));
@@ -59,6 +62,15 @@ if (unpublishedSitemapAssets.length) throw new Error(`sitemap assets are not pub
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`package.json version is not a stable semver triplet: ${version}`);
 if (packageManifest.license !== "CC-BY-4.0") throw new Error(`package.json license must declare CC-BY-4.0: ${packageManifest.license}`);
+const lockedRoot = packageLock?.packages?.[""];
+if (packageLock.lockfileVersion !== 3
+  || !lockedRoot
+  || lockedRoot.name !== packageManifest.name
+  || lockedRoot.version !== packageManifest.version
+  || lockedRoot.license !== packageManifest.license
+  || JSON.stringify(lockedRoot.engines) !== JSON.stringify(packageManifest.engines)) {
+  throw new Error("package-lock.json root metadata is out of sync with package.json");
+}
 if (release.version !== version) throw new Error(`version.json (${release.version}) does not match package.json (${version})`);
 if (!["stable", "unreleased"].includes(release.channel)) throw new Error(`version.json channel is unsupported: ${release.channel}`);
 const releaseDate = /^\d{4}-\d{2}-\d{2}$/.test(release.date)
@@ -81,12 +93,17 @@ if (!serviceWorker.includes(`const CACHE = "llm-field-notes-v${version}"`)) thro
 if (!/^FROM node:22-alpine@sha256:[0-9a-f]{64}$/m.test(dockerfile)) {
   throw new Error("Dockerfile must use the digest-pinned Node 22 Alpine production baseline");
 }
+if (!dockerignore.split(/\r?\n/).some((entry) => entry.trim() === ".codex")) {
+  throw new Error(".dockerignore must exclude .codex");
+}
 const dockerVersion = dockerfile.match(/^ARG APP_VERSION=(\d+\.\d+\.\d+)$/m)?.[1];
 const dockerRevision = dockerfile.match(/^ARG VCS_REF=([^\s]+)$/m)?.[1];
 if (dockerVersion !== version
   || dockerRevision !== "unknown"
   || !dockerfile.includes('org.opencontainers.image.version="$APP_VERSION"')
   || !dockerfile.includes('org.opencontainers.image.revision="$VCS_REF"')
+  || !dockerfile.includes('org.opencontainers.image.source="https://github.com/humblemat810/llm-wiki"')
+  || !dockerfile.includes('org.opencontainers.image.documentation="https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md"')
   || !dockerfile.includes("ENV BUILD_REVISION=$VCS_REF")
   || !dockerfile.includes('org.opencontainers.image.description=')
   || !dockerfile.includes('org.opencontainers.image.licenses="CC-BY-4.0"')) {
@@ -100,9 +117,7 @@ const structuredDataCsp = `'sha256-${structuredDataHash}'`;
 if (!index.includes(structuredDataCsp)) throw new Error("index.html CSP does not authorize its structured discovery metadata");
 const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
 if (!server.includes(structuredDataCsp)) throw new Error("server CSP does not authorize index.html structured discovery metadata");
-const shellMatch = serviceWorker.match(/const APP_SHELL = \[([\s\S]*?)\];/);
-if (!shellMatch) throw new Error("sw.js is missing its APP_SHELL declaration");
-const shellAssets = [...shellMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+const shellAssets = readServiceWorkerShellAssets(serviceWorker);
 if (new Set(shellAssets).size !== shellAssets.length) throw new Error("sw.js APP_SHELL contains duplicate assets");
 if (JSON.stringify(shellAssets) !== JSON.stringify(OFFLINE_SHELL_ASSETS.map((asset) => asset.startsWith("./") ? asset : `./${asset}`))) {
   throw new Error("sw.js APP_SHELL is out of sync with scripts/public-assets.mjs");

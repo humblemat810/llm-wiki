@@ -257,7 +257,8 @@ export function validateEvaluationReport(value, { label = "evaluation", allowEmp
     || !value.evaluatedAt.trim()
     || value.evaluatedAt.length > MAX_TIMESTAMP_CHARS
     || !DATE_TIME_PATTERN.test(value.evaluatedAt)
-    || Number.isNaN(parseTimestamp(value.evaluatedAt))) {
+    || Number.isNaN(parseTimestamp(value.evaluatedAt))
+    || parseTimestamp(value.evaluatedAt) > Date.now()) {
     throw new Error(`${label}.evaluatedAt must be a valid bounded date-time.`);
   }
   if (!value.extraction || typeof value.extraction !== "object" || Array.isArray(value.extraction)) throw new Error(`${label}.extraction is missing.`);
@@ -429,7 +430,7 @@ function categoryMetric(examples, candidates, matcher, acceptedMatcher = matcher
   };
 }
 
-export function evaluateExtraction(extraction, feedback = []) {
+export function evaluateExtraction(extraction, feedback = [], { now = Date.now() } = {}) {
   if (Array.isArray(extraction?.nodes) && extraction.nodes.length > MAX_GRAPH_NODES) {
     throw new Error(`Evaluation extraction exceeds the ${MAX_GRAPH_NODES.toLocaleString("en-US")} concept safety limit.`);
   }
@@ -449,7 +450,8 @@ export function evaluateExtraction(extraction, feedback = []) {
     seenFeedback.add(key);
     return true;
   });
-  const freshness = freshnessCounts(reviewed);
+  const evaluationNow = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const freshness = freshnessCounts(reviewed, evaluationNow);
   const conceptExamples = reviewed.filter((example) => example.kind === "concept");
   const relationExamples = reviewed.filter((example) => example.kind === "relation");
   const feedbackStatuses = new Map();

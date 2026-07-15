@@ -1,6 +1,5 @@
-import { BACKUP_FORMAT, GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_PRODUCER_VERSION_CHARS, fingerprintBackup, matchesGraphFingerprint, normalizeGraph, parseJsonWithUniqueKeys, parseTimestamp } from "../graph-core.js";
-import { HISTORY_LIMIT } from "../graph-store.js";
-import { MAX_GRAPH_INPUT_BYTES } from "./graph-input.mjs";
+import { BACKUP_FORMAT, GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, fingerprintBackup, matchesGraphFingerprint, normalizeGraph, parseJsonWithUniqueKeys, validateBackupEnvelope } from "../graph-core.js";
+import { MAX_GRAPH_INPUT_BYTES, validateProducerVersion } from "./graph-input.mjs";
 import { readBoundedTextFile } from "./bounded-file.mjs";
 
 const [inputPath, ...options] = process.argv.slice(2);
@@ -45,35 +44,15 @@ if (process.argv.includes("--help")) {
     const graph = value?.format === BACKUP_FORMAT ? value.graph : value;
     const history = value?.format === BACKUP_FORMAT ? value.history : [];
     const fingerprint = value?.graphFingerprint;
+    if (value?.format === BACKUP_FORMAT) validateBackupEnvelope(value, { label: "Backup input" });
     if (!graph || ![GRAPH_SCHEMA, ...LEGACY_GRAPH_SCHEMAS].includes(graph.schema)) {
       throw new Error(`Graph input must declare ${GRAPH_SCHEMA}: ${inputPath}`);
     }
-    if (value?.format === BACKUP_FORMAT
-      && (typeof value.exportedAt !== "string"
-        || Number.isNaN(parseTimestamp(value.exportedAt))
-        || !Array.isArray(history)
-        || history.length > HISTORY_LIMIT
-        || history.some((item) => !item || ![GRAPH_SCHEMA, ...LEGACY_GRAPH_SCHEMAS].includes(item.schema)))) {
-      throw new Error(`Backup input must contain a valid timestamp and at most ${HISTORY_LIMIT} compatible graph snapshots.`);
-    }
-    if (value?.format === BACKUP_FORMAT
-      && value.appVersion !== undefined
-      && (typeof value.appVersion !== "string"
-        || !value.appVersion.trim()
-        || value.appVersion.length > MAX_PRODUCER_VERSION_CHARS)) {
-      throw new Error("Backup producer metadata is invalid.");
-    }
+    if (value?.format === BACKUP_FORMAT) validateProducerVersion(value.appVersion, "Backup");
+    validateProducerVersion(graph.appVersion, "Graph");
+    history.forEach((snapshot) => validateProducerVersion(snapshot.appVersion, "History graph"));
     if (typeof fingerprint !== "string") {
       throw new Error(`Graph input must include a graphFingerprint: ${inputPath}`);
-    }
-    if (graph.appVersion !== undefined
-      && (typeof graph.appVersion !== "string"
-        || !graph.appVersion.trim()
-        || graph.appVersion.length > MAX_PRODUCER_VERSION_CHARS)) {
-      throw new Error("Graph producer metadata is invalid.");
-    }
-    if (value?.format === BACKUP_FORMAT && (!Array.isArray(history) || !matchesGraphFingerprint(graph, fingerprint, history))) {
-      throw new Error("Backup graphFingerprint does not match its graph and history.");
     }
     if (value?.format !== BACKUP_FORMAT && !matchesGraphFingerprint(graph, fingerprint)) {
       throw new Error("Graph fingerprint does not match its normalized contents.");

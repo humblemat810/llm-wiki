@@ -54,8 +54,11 @@ let malformedBody = false;
 let crossOriginResponse = false;
 let opaqueResponse = false;
 let htmlForAssetResponse = false;
+let discardableErrorResponse = false;
+let discardableErrorBodyCancelCalls = 0;
 let declaredResponseLength = null;
 let bodyUnavailable = false;
+let earlyResponseCancelCalls = 0;
 let networkCalls = 0;
 let lastFetchOptions = null;
 let claimCalls = 0;
@@ -90,21 +93,43 @@ const context = {
       });
     }
     if (!online) throw new Error("offline");
+    const earlyResponse = ({ type = "basic", url = request.url, headers = {} } = {}) => ({
+      ok: true,
+      status: 200,
+      type,
+      url,
+      headers: { get: (name) => headers[name] ?? null },
+      body: { cancel: () => { earlyResponseCancelCalls += 1; } }
+    });
     if (opaqueResponse) {
-      const response = new Response(`opaque:${request.url}`, { status: 200 });
-      Object.defineProperty(response, "type", { value: "opaque" });
-      return response;
+      return earlyResponse({ type: "opaque" });
     }
     if (htmlForAssetResponse) {
-      return new Response("<!doctype html><title>Login</title>", {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8" }
-      });
+      return earlyResponse({ headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    if (discardableErrorResponse) {
+      const reader = {
+        read: async () => ({ done: true }),
+        releaseLock: () => {}
+      };
+      return {
+        ok: false,
+        status: 503,
+        type: "basic",
+        url: request.url,
+        headers: { get: () => null },
+        body: {
+          getReader: () => reader,
+          cancel: () => { discardableErrorBodyCancelCalls += 1; }
+        },
+        clone: () => ({ body: { getReader: () => reader } })
+      };
     }
     if (crossOriginResponse) {
-      const response = new Response(`foreign:${request.url}`, { status: 200 });
-      Object.defineProperty(response, "url", { value: "https://evil.example.test/app.js" });
-      return response;
+      return earlyResponse({ url: "https://evil.example.test/app.js" });
+    }
+    if (declaredResponseLength !== null && declaredResponseLength < 0) {
+      return earlyResponse({ headers: { "content-length": String(declaredResponseLength) } });
     }
     if (stalledBody) {
       return new Response(new ReadableStream({
@@ -198,6 +223,11 @@ assert.equal(await versionedFresh.text(), `fresh:${new URL("./app.js?cache-bust=
 assert([...entries.keys()].every((key) => !key.includes("?")), "shell cache keys should ignore query strings to prevent duplicate cache growth");
 assert.equal(await (await shellCache.match(new URL("./app.js", location).toString())).text(), `fresh:${new URL("./app.js", location).toString()}`, "query-bearing shell responses should not overwrite canonical cache content");
 
+networkStatus = 206;
+const partialShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
+assert.equal(await partialShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "partial shell responses should fall back to the last complete cache entry");
+networkStatus = 200;
+
 cacheWritable = false;
 const freshWithCacheFailure = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./styles.css", location).toString() });
 assert.equal(await freshWithCacheFailure.text(), `fresh:${new URL("./styles.css", location).toString()}`, "cache failures must not hide fresh network responses");
@@ -245,6 +275,13 @@ assert.equal(notFoundNavigation.status, 404, "online client-error navigations sh
 assert.equal(await notFoundNavigation.text(), `fresh:${notFoundNavigationUrl.toString()}`, "online not-found responses should not be replaced by the cached workbench shell");
 networkStatus = 200;
 
+discardableErrorResponse = true;
+const discardedErrorCancelCallsBefore = discardableErrorBodyCancelCalls;
+const cachedAfterError = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
+assert.equal(await cachedAfterError.text(), `fresh:${new URL("./app.js", location).toString()}`, "cached shell responses should replace transient network errors");
+assert.equal(discardableErrorBodyCancelCalls, discardedErrorCancelCallsBefore + 1, "discarded transient network responses should cancel their unread bodies");
+discardableErrorResponse = false;
+
 online = false;
 const offlineShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await offlineShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "offline shell requests should use the updated cache");
@@ -267,17 +304,30 @@ malformedBody = true;
 const malformedBodyShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./styles.css", location).toString() });
 assert.equal(await malformedBodyShell.text(), `fresh:${new URL("./styles.css", location).toString()}`, "malformed shell stream chunks must fail closed and use the cached response");
 malformedBody = false;
+online = true;
 crossOriginResponse = true;
+const crossOriginCancelCallsBefore = earlyResponseCancelCalls;
 const crossOriginShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await crossOriginShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "cross-origin redirects must not replace a cached shell response");
+assert.equal(earlyResponseCancelCalls, crossOriginCancelCallsBefore + 1, "cross-origin shell responses should cancel their unread bodies before fallback");
 crossOriginResponse = false;
 opaqueResponse = true;
+const opaqueCancelCallsBefore = earlyResponseCancelCalls;
 const opaqueShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await opaqueShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "opaque shell responses must not replace a cached application asset");
+assert.equal(earlyResponseCancelCalls, opaqueCancelCallsBefore + 1, "opaque shell responses should cancel their unread bodies before fallback");
 opaqueResponse = false;
 htmlForAssetResponse = true;
+const htmlCancelCallsBefore = earlyResponseCancelCalls;
 const htmlForScriptShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await htmlForScriptShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "HTML responses must not replace non-HTML shell assets with a cached login or error page");
+assert.equal(earlyResponseCancelCalls, htmlCancelCallsBefore + 1, "HTML shell responses should cancel their unread bodies before fallback");
 htmlForAssetResponse = false;
+declaredResponseLength = -1;
+const invalidLengthCancelCallsBefore = earlyResponseCancelCalls;
+const invalidLengthShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
+assert.equal(await invalidLengthShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "malformed Content-Length shell responses should fall back to the cached asset");
+assert.equal(earlyResponseCancelCalls, invalidLengthCancelCallsBefore + 1, "malformed Content-Length shell responses should cancel their unread bodies before fallback");
+declaredResponseLength = null;
 
 console.log("service worker smoke ok");

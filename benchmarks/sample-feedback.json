@@ -1,0 +1,73 @@
+{
+  "format": "llm-field-notes/feedback@1",
+  "graphSchema": "llm-field-notes/graph@1",
+  "examples": [
+    {
+      "kind": "concept",
+      "id": "attention",
+      "label": "Attention",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "weighted-lookup",
+      "label": "Weighted lookup",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "positional-encoding",
+      "label": "Positional encoding",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "missing-concept",
+      "label": "Missing concept",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "relation",
+      "id": "attention--weighted-lookup--uses",
+      "source": "attention",
+      "target": "weighted-lookup",
+      "sourceLabel": "Attention",
+      "targetLabel": "Weighted lookup",
+      "label": "uses",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "relation",
+      "id": "attention--positional-encoding--complements",
+      "source": "attention",
+      "target": "positional-encoding",
+      "sourceLabel": "Attention",
+      "targetLabel": "Positional encoding",
+      "label": "complements",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "noise",
+      "label": "Noise",
+      "status": "rejected",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "relation",
+      "source": "attention",
+      "target": "weighted-lookup",
+      "sourceLabel": "Attention",
+      "targetLabel": "Weighted lookup",
+      "label": "causes",
+      "status": "rejected",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    }
+  ]
+}

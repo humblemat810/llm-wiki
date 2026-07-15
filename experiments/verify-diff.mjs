@@ -1,4 +1,4 @@
-import { DIFF_FORMAT, diffGraphs, parseJsonWithUniqueKeys, parseTimestamp } from "../graph-core.js";
+import { DIFF_FORMAT, diffGraphs, parseJsonWithUniqueKeys, parseTimestamp, trustedPastTimestamp } from "../graph-core.js";
 import { MAX_GRAPH_INPUT_BYTES, readGraphInput } from "./graph-input.mjs";
 import { readBoundedTextFile } from "./bounded-file.mjs";
 
@@ -35,7 +35,7 @@ if (process.argv.includes("--help")) {
     if (!diff || typeof diff !== "object" || diff.format !== DIFF_FORMAT) {
       throw new Error(`Graph diff must declare ${DIFF_FORMAT}: ${diffPath}`);
     }
-    if (typeof diff.exportedAt !== "string" || Number.isNaN(parseTimestamp(diff.exportedAt))) {
+    if (typeof diff.exportedAt !== "string" || Number.isNaN(parseTimestamp(diff.exportedAt)) || Number.isNaN(trustedPastTimestamp(diff.exportedAt))) {
       throw new Error("Graph diff exportedAt must be a valid timestamp.");
     }
     const expected = diffGraphs(before, after);

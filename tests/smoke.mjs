@@ -20,6 +20,7 @@ import {
   parseTimestamp,
   canonicalizeGraphForExport,
   buildBackupEnvelope,
+  validateBackupEnvelope,
   buildGraphExport,
   compareGraphFreshness,
   normalizeExtraction,
@@ -47,6 +48,7 @@ import {
   makeId,
   makeEdgeId,
   MAX_GRAPH_REVISIONS,
+  MAX_BACKUP_HISTORY,
   MAX_GRAPH_DOCUMENTS,
   MAX_GRAPH_NODES,
   MAX_GRAPH_EDGES,
@@ -106,6 +108,23 @@ const backupEnvelope = buildBackupEnvelope(defaultGraph(), [defaultGraph()], { a
 assert.equal(backupEnvelope.appVersion, "0.1.0", "backup envelopes should retain a trimmed bounded producer version");
 assert.equal(backupEnvelope.format, "llm-field-notes/backup@1", "backup envelopes should carry the shared backup format");
 assert.match(backupEnvelope.graphFingerprint, /^fnv64-[0-9a-f]{16}-\d+$/, "backup envelopes should fingerprint their canonical graph and history");
+assert.equal(MAX_BACKUP_HISTORY, 3, "full backup history should have an explicit schema-aligned bound");
+assert.doesNotThrow(() => validateBackupEnvelope(backupEnvelope), "published backups should satisfy the shared strict envelope boundary");
+assert.throws(
+  () => validateBackupEnvelope({ ...backupEnvelope, history: "not-an-array" }),
+  /history must contain at most 3 compatible graph snapshots/,
+  "backup imports should reject a malformed history instead of treating it as empty"
+);
+assert.throws(
+  () => validateBackupEnvelope({ ...backupEnvelope, unsupported: true }),
+  /unsupported fields/,
+  "backup imports should reject unsupported envelope fields instead of silently discarding them"
+);
+assert.throws(
+  () => buildBackupEnvelope(defaultGraph(), Array.from({ length: MAX_BACKUP_HISTORY + 1 }, () => defaultGraph())),
+  /cannot contain more than 3 snapshots/,
+  "backup construction should reject history that exceeds the published backup schema"
+);
 
 const sourceText = `# Attention
 Attention is a mechanism for mixing information.
@@ -206,12 +225,19 @@ The tokenizer maps rare words into reusable subword tokens.`);
 const phraseLabels = phraseQualityExtraction.nodes.map((node) => node.label.toLowerCase());
 assert(phraseLabels.includes("request tracing") && phraseLabels.includes("bounded retries"), "phrase extraction should retain durable domain noun phrases");
 assert(!phraseLabels.some((label) => ["improves answer", "tokenizer maps", "regressions before", "before users"].includes(label)), "phrase extraction should avoid common verb and preposition fragments");
+assert(phraseQualityExtraction.nodes.find((node) => node.label === "Production retrieval")?.evidence.some((evidence) => evidence.text.includes("# Production retrieval")), "heading-derived concepts should retain their source-line evidence");
+const quotedExtraction = extractGraph("Quoted terms", "The `scaled attention` pattern uses a bounded context representation.");
+assert(quotedExtraction.nodes.find((node) => node.label === "scaled attention")?.evidence.some((evidence) => evidence.text.includes("`scaled attention`")), "quoted concepts should retain their source-line evidence");
 const relationQualityExtraction = extractGraph("Relation quality", "Reranking improves answer relevance. Positional encoding preserves sequence order. Caching reduces request latency. Batching increases system throughput.");
 assert(relationQualityExtraction.nodes.some((node) => node.label.toLowerCase() === "positional encoding"), "sentence-initial domain phrases should remain intact");
 assert(!relationQualityExtraction.nodes.some((node) => node.label === "Positional"), "subsumed sentence-initial terms should not duplicate a stronger phrase");
 assert(relationQualityExtraction.edges.some((edge) => edge.label === "improves"), "explicit improvement relations should retain their verb");
 assert(relationQualityExtraction.edges.some((edge) => edge.label === "preserves"), "explicit preservation relations should retain their verb");
 assert(relationQualityExtraction.edges.some((edge) => edge.label === "reduces") && relationQualityExtraction.edges.some((edge) => edge.label === "increases"), "explicit operational relations should retain their verbs");
+const reviewedRelationVerb = extractGraph("Reviewed relation verb", "Connects concepts in a reviewed representation.", {
+  feedback: [{ kind: "concept", id: "connects", label: "Connects", status: "accepted" }]
+});
+assert(reviewedRelationVerb.nodes.some((node) => node.id === "connects" && node.feedback === 0), "phrase-boundary filtering should not suppress an explicitly accepted concept");
 const clauseRelationExtraction = extractGraph("Clause relations", "Evaluation catches unsupported claims and measures answer quality.");
 assert(clauseRelationExtraction.edges.some((edge) => edge.source === "evaluation" && edge.target === "answer-quality" && edge.label === "measures"), "shared-subject clauses should attach the later relation to the original subject");
 assert(!clauseRelationExtraction.edges.some((edge) => edge.source === "claims" && edge.target === "answer-quality" && edge.label === "measures"), "shared-subject clauses should not attach later verbs to the prior object");
@@ -278,6 +304,9 @@ assert.equal(MAX_PHRASE_CANDIDATES_PER_UNIT, 40, "phrase extraction should have 
 assert.doesNotThrow(() => extractGraph("Unicode volume", "注意 ".repeat(150000)), "large Unicode inputs should respect the bounded word path");
 const punctuationLight = extractGraph("Punctuation-light Markdown", "# Attention map\n\n- Attention organizes context for useful representations\n- Context carries the evidence through the model");
 assert(punctuationLight.nodes.length > 0, "heuristic extraction should handle bullet-heavy documents without sentence punctuation");
+const sparseTitleExtraction = extractGraph("Transformer architecture", "A short note.");
+assert.equal(sparseTitleExtraction.nodes[0]?.label, "Transformer architecture", "sparse documents should retain a bounded title topic");
+assert.equal(sparseTitleExtraction.nodes[0]?.evidence.length, 0, "title-only topics must not fabricate body evidence");
 const multilingualExtraction = extractGraph("Multilingual notes", "注意 机制 保留 上下文 信息，并且 注意 机制 使用 上下文。");
 assert(multilingualExtraction.nodes.some((node) => /[^\x00-\x7F]/.test(node.label)), "local extraction should retain non-Latin concept labels");
 assert(multilingualExtraction.edges.some((edge) => /[^\x00-\x7F]/.test(edge.source) || /[^\x00-\x7F]/.test(edge.target)), "local extraction should connect non-Latin concepts when they co-occur");
@@ -588,6 +617,9 @@ assert.equal(acceptedNodeFeedback.graph.nodes.find((node) => node.id === merged.
 assert.equal(acceptedNodeFeedback.graph.nodes.find((node) => node.id === merged.nodes[0].id).feedback, 1);
 assert.match(acceptedNodeFeedback.graph.nodes.find((node) => node.id === merged.nodes[0].id).lastReviewedAt, /^\d{4}-\d{2}-\d{2}T/);
 assert.equal(acceptedNodeFeedback.graph.nodes.find((node) => node.id === merged.nodes[0].id).updatedAt, acceptedNodeFeedback.graph.nodes.find((node) => node.id === merged.nodes[0].id).lastReviewedAt, "concept feedback should advance the item update timestamp with its review");
+const paddedNodeFeedback = applyFeedback(merged, "node", ` ${merged.nodes[0].id} `, "up");
+assert.equal(paddedNodeFeedback.changed, true, "feedback mutations should normalize caller-provided item IDs");
+assert.equal(paddedNodeFeedback.graph.nodes.find((node) => node.id === merged.nodes[0].id).status, "accepted", "normalized feedback should reach the intended concept");
 const dismissedEdgeFeedback = applyFeedback(merged, "edge", merged.edges[0].id, "down");
 assert.equal(dismissedEdgeFeedback.graph.edges.find((edge) => edge.id === merged.edges[0].id).status, "rejected");
 assert.equal(dismissedEdgeFeedback.graph.edges.find((edge) => edge.id === merged.edges[0].id).feedback, -1);
@@ -650,6 +682,9 @@ assert.equal(remappedRelationMemory.source, "canonical-concept", "relation learn
 assert.equal(remappedRelationMemory.id, mergedConcepts.graph.edges[0].id, "relation learning memory should follow the canonical merged edge ID");
 assert.equal(remappedRelationMemory.lastReviewedAt, "2026-01-01T00:00:00.000Z", "relation learning merges should preserve the newest review timestamp");
 assert(mergedConcepts.graph.revisions[0].reason.includes("Merged concept"), "concept merges should be recorded in revision history");
+const paddedMergedConcepts = mergeConcepts(mergeableConcepts, " legacy-concept ", " canonical-concept ");
+assert.equal(paddedMergedConcepts.changed, true, "concept merges should normalize caller-provided concept IDs");
+assert.equal(paddedMergedConcepts.mergedId, "canonical-concept", "concept merges should report the canonical target ID");
 const dismissedConfidence = dismissedEdgeFeedback.graph.edges.find((edge) => edge.id === merged.edges[0].id).confidence;
 const reingestedDismissed = mergeExtraction(dismissedEdgeFeedback.graph, {
   source: { id: "doc-follow-up", title: "Follow-up", text: "follow-up", fingerprint: "follow-up-1", addedAt: new Date().toISOString() },
@@ -736,6 +771,15 @@ const repeatedSourceReview = markSourceReviewed(sourceReview.graph, merged.docum
 assert.equal(repeatedSourceReview.changed, false, "repeating a same-day source review should be idempotent");
 assert.equal(repeatedSourceReview.alreadyReviewed, true, "repeating a same-day source review should explain that no mutation was needed");
 assert.equal(repeatedSourceReview.graph.version, sourceReview.graph.version, "repeating a same-day source review should not create a revision");
+const futureReviewedSource = normalizeGraph({
+  ...merged,
+  documents: [{ ...merged.documents[0], lastReviewedAt: `${new Date().toISOString().slice(0, 10)}T23:59:59.000Z` }]
+});
+const repairedFutureReview = markSourceReviewed(futureReviewedSource, futureReviewedSource.documents[0].id);
+assert.equal(repairedFutureReview.changed, true, "a future-dated same-day source review should be replaceable");
+assert(repairedFutureReview.graph.documents[0].lastReviewedAt <= new Date().toISOString(), "source review should repair future chronology with the current timestamp");
+const paddedSourceReview = markSourceReviewed(merged, ` ${merged.documents[0].id} `);
+assert.equal(paddedSourceReview.changed, true, "source review should normalize caller-provided source IDs");
 const exportedQueue = reviewQueueExport(merged, 15000);
 assert(exportedQueue.length <= 15000, "review queue exports should remain bounded");
 assert(exportedQueue.every((candidate) => candidate.id && candidate.reason && !("evidenceText" in candidate) && !("sourceText" in candidate) && !("uri" in candidate)), "review queue exports should contain routing metadata without source material");
@@ -973,6 +1017,44 @@ assert.equal(replacement.graph.version, replacementGraph.version + 1, "source re
 assert.match(replacement.graph.revisions[0].reason, /^Replaced /, "source replacement should be explicit in revision history");
 assert.equal(replacement.graph.documents.find((document) => document.id === extracted.source.id).quality, "primary", "source replacement should preserve source quality");
 assert.equal(replacement.graph.documents.find((document) => document.id === extracted.source.id).lastReviewedAt, null, "source replacement should clear the old review date");
+const inferredOnlyReplacementGraph = normalizeGraph({
+  ...replacementGraph,
+  nodes: replacementGraph.nodes.map((node) => ({ ...node, status: "inferred" })),
+  edges: replacementGraph.edges.map((edge) => ({ ...edge, status: "inferred" }))
+});
+const emptySourceReplacement = replaceSource(inferredOnlyReplacementGraph, extracted.source.id, {
+  source: { id: "empty-replacement", title: "Empty replacement", text: "replacement text" },
+  nodes: [],
+  edges: []
+});
+assert.equal(emptySourceReplacement.empty, true, "source replacement should reject an empty representation over existing source-linked knowledge");
+assert.equal(emptySourceReplacement.replaced, false, "empty source replacement should not mutate the graph");
+assert.equal(emptySourceReplacement.graph.version, inferredOnlyReplacementGraph.version, "empty source replacement should return the original graph revision");
+const relationDroppingReplacement = replaceSource(inferredOnlyReplacementGraph, extracted.source.id, {
+  source: { id: "relation-dropping-replacement", title: "Relation dropping replacement", text: "replacement text" },
+  nodes: [{ id: "replacement-concept", label: "Replacement concept", sources: ["relation-dropping-replacement"], evidence: [{ text: "replacement evidence", sources: ["relation-dropping-replacement"] }] }],
+  edges: []
+});
+assert.equal(relationDroppingReplacement.replaced, true, "explicit source replacement should allow intentional relation pruning");
+assert.equal(relationDroppingReplacement.graph.version, inferredOnlyReplacementGraph.version + 1, "explicit relation pruning should record one replacement revision");
+const guardedRelationDroppingReplacement = replaceSource(inferredOnlyReplacementGraph, extracted.source.id, {
+  source: { id: "guarded-relation-dropping-replacement", title: "Guarded relation dropping replacement", text: "replacement text" },
+  nodes: [{ id: "guarded-replacement-concept", label: "Guarded replacement concept", sources: ["guarded-relation-dropping-replacement"], evidence: [{ text: "replacement evidence", sources: ["guarded-relation-dropping-replacement"] }] }],
+  edges: []
+}, { preserveSourceCategories: true });
+assert.equal(guardedRelationDroppingReplacement.replaced, false, "automatic source rebuilds should reject a representation that loses every prior source-linked relation");
+assert.deepEqual(guardedRelationDroppingReplacement.degraded, ["relations"], "automatic source rebuilds should identify the source-linked category lost by a provider");
+assert.equal(guardedRelationDroppingReplacement.graph.version, inferredOnlyReplacementGraph.version, "guarded category-degraded replacement should return the original graph revision");
+const paddedReplacement = replaceSource(replacementGraph, ` ${extracted.source.id} `, {
+  source: { id: "doc-padded-replacement", title: "Padded replacement", text: "replacement text with enough context to extract a new representation", fingerprint: "padded-replacement-1", addedAt: new Date().toISOString() },
+  nodes: [{ id: "padded-replacement-node", label: "Padded replacement node", sources: ["doc-padded-replacement"], evidence: [{ text: "padded replacement evidence", sources: ["doc-padded-replacement"] }] }],
+  edges: []
+});
+assert.equal(paddedReplacement.replaced, true, "source replacement should normalize caller-provided source IDs");
+assert.equal(paddedReplacement.replacedSourceId, extracted.source.id, "source replacement should report the canonical source ID");
+assert.equal(paddedReplacement.graph.nodes.find((node) => node.id === "padded-replacement-node")?.sources[0], extracted.source.id, "source replacement should rebind extracted provenance to the canonical source ID");
+const paddedRemoval = removeSource(merged, ` ${extracted.source.id} `);
+assert.equal(paddedRemoval.removed, true, "source removal should normalize caller-provided source IDs");
 const replacementWithDuplicate = mergeExtraction(replacement.graph, {
   source: { id: "another-source", title: "Another", text: "another source contains enough distinct text to be represented separately", fingerprint: "another-source-1", addedAt: new Date().toISOString() },
   nodes: [],
@@ -1035,6 +1117,7 @@ assert.equal(redactedGraph.redacted, true, "redacted graph exports should carry 
 assert.equal(normalizeGraph(redactedGraph).redacted, true, "redaction markers should survive graph normalization");
 assert.equal(inspectGraph(redactedGraph).redacted, true, "graph health should expose redacted state");
 assert(redactedGraph.documents.every((document) => document.text === "" && document.uri === null), "redacted graph exports should remove source text and URIs");
+assert(redactedGraph.documents.every((document) => document.title === "Redacted source"), "redacted graph exports should remove source document titles");
 assert(redactedGraph.nodes.concat(redactedGraph.edges).every((item) => item.evidence.every((evidence) => evidence.text === "[redacted]")), "redacted graph exports should remove evidence quotes");
 assert(redactedGraph.learning.examples.every((example) => !example.evidence || example.evidence.every((evidence) => evidence.text === "[redacted]")), "redacted graph exports should remove reusable-learning evidence quotes");
 const lyingRedactedGraph = normalizeGraph({
@@ -1209,6 +1292,45 @@ assert.equal(clearSafetyStore.clear(), true, "clear should retain its safe fallb
 assert.equal(clearSafetyStore.getLastWriteMode(), "without-history", "clear should report reduced history after an oversized preflight");
 assert.equal(clearSafetyStorage.has("clear-safety-graph"), false, "clear should still remove the graph after oversized history preflight");
 assert.equal(clearSafetyStorage.has("clear-safety-history"), false, "clear should discard only history when its preflight cannot fit");
+const partialRollbackGraph = JSON.stringify(normalizeGraph({
+  schema: GRAPH_SCHEMA,
+  nodes: [{ id: "partial-rollback", label: "Partial rollback graph" }]
+}));
+const partialRollbackHistory = JSON.stringify([defaultGraph()]);
+const partialRollbackStorage = new Map([
+  ["partial-rollback-graph", partialRollbackGraph],
+  ["partial-rollback-history", partialRollbackHistory]
+]);
+let partialRollbackMode = "normal";
+let partialRollbackGraphRemovals = 0;
+const partialRollbackAdapter = {
+  getItem: (key) => partialRollbackStorage.has(key) ? partialRollbackStorage.get(key) : null,
+  setItem: (key, value) => {
+    if (key === "partial-rollback-history" && partialRollbackMode === "fail-history-rollback") {
+      throw new Error("history rollback failure");
+    }
+    partialRollbackStorage.set(key, String(value));
+    if (key === "partial-rollback-history" && partialRollbackMode === "normal") {
+      partialRollbackMode = "fail-history-rollback";
+    }
+  },
+  removeItem: (key) => {
+    if (key === "partial-rollback-graph" && partialRollbackMode === "fail-history-rollback" && partialRollbackGraphRemovals++ === 0) {
+      throw new Error("graph clear failure");
+    }
+    partialRollbackStorage.delete(key);
+  }
+};
+const partialRollbackStore = createGraphStore(partialRollbackAdapter, {
+  graphKey: "partial-rollback-graph",
+  historyKey: "partial-rollback-history",
+  recoveryKey: "partial-rollback-recovery",
+  historyRecoveryKey: "partial-rollback-history-recovery"
+});
+assert.equal(partialRollbackStore.clear(), true, "clear should complete its degraded fallback after a partial rollback");
+assert.equal(partialRollbackStore.getLastWriteMode(), "without-history", "partial rollback clear should disclose reduced recovery");
+assert.equal(partialRollbackStore.readRecovery(), partialRollbackGraph, "partial rollback should preserve the raw graph before degraded clear");
+assert.equal(partialRollbackStore.readHistoryRecovery(), partialRollbackHistory, "partial rollback should preserve the raw history before degraded clear");
 storage.set("graph", JSON.stringify({ schema: "llm-field-notes/graph@999", nodes: [{ id: "lost", label: "Recover me" }] }));
 assert.equal(graphStore.read().nodes.length, 0, "unsupported schema should fail closed");
 assert(storage.get("recovery")?.includes("graph@999"), "unsupported schema should be preserved for recovery");
@@ -1350,6 +1472,19 @@ assert.equal(graphFailureStore.write(merged), false, "a replacement graph write 
 assert.equal(graphFailureStore.read().version, defaultGraph().version, "a failed replacement graph write should preserve the current graph");
 assert.equal(graphFailureStore.readHistory().length, graphFailureHistory.length, "a failed replacement graph write should preserve undo history");
 assert(graphFailureStore.readRecovery()?.includes('"schema":"llm-field-notes/graph@1"'), "failed graph rollback should preserve the previous graph for recovery");
+const silentStorage = {
+  getItem: () => null,
+  setItem: () => {},
+  removeItem: () => {}
+};
+const silentStore = createGraphStore(silentStorage, {
+  graphKey: "silent-graph",
+  historyKey: "silent-history",
+  recoveryKey: "silent-recovery"
+});
+assert.equal(silentStore.write(merged), false, "graph writes should fail when storage silently drops the requested value");
+assert.equal(silentStore.getLastWriteMode(), "failed", "silent storage loss should expose a failed write mode");
+assert.equal(silentStore.read().version, 0, "silent storage loss should not report an unsaved graph as current");
 
 const snapshotFailureStorage = new Map();
 let snapshotReadsFail = false;
@@ -1412,6 +1547,8 @@ const cappedIngest = mergeExtraction(cappedGraph, {
   edges: []
 });
 assert.equal(cappedIngest.limited, "documents", "document caps should refuse new sources explicitly");
+assert.equal(cappedIngest.graph.documents.length, cappedGraph.documents.length, "document-cap failures should not append the source");
+assert.equal(cappedIngest.graph.nodes.length, cappedGraph.nodes.length, "document-cap failures should preserve the existing concept collection");
 const textCappedGraph = normalizeGraph({
   schema: GRAPH_SCHEMA,
   documents: Array.from({ length: 167 }, (_, index) => ({
@@ -1443,6 +1580,7 @@ assert.equal(nodeCappedIngest.limited, "nodes", "node caps should refuse new con
 assert.equal(nodeCappedIngest.graph.documents.length, nodeCappedGraph.documents.length, "a limited merge should not append its source");
 assert.equal(nodeCappedIngest.graph.nodes.find((node) => node.id === "node-0").mentions, nodeCappedGraph.nodes.find((node) => node.id === "node-0").mentions, "a limited merge should not mutate existing concept mentions");
 assert.equal(nodeCappedIngest.graph.nodes.find((node) => node.id === "node-0").sources.length, nodeCappedGraph.nodes.find((node) => node.id === "node-0").sources.length, "a limited merge should not mutate existing provenance");
+assert.equal(nodeCappedIngest.graph.nodes.length, nodeCappedGraph.nodes.length, "node-cap failures should preserve the existing concept collection");
 const edgeCappedGraph = normalizeGraph({
   schema: GRAPH_SCHEMA,
   nodes: [{ id: "edge-source", label: "Edge source" }, { id: "edge-target", label: "Edge target" }],
@@ -1467,6 +1605,7 @@ const edgeCappedIngest = mergeExtraction(edgeCappedGraph, {
 assert.equal(edgeCappedIngest.limited, "edges", "edge caps should refuse new relations explicitly");
 assert.equal(edgeCappedIngest.graph.documents.length, edgeCappedGraph.documents.length, "an edge-limited merge should not append its source");
 assert.equal(edgeCappedIngest.graph.edges.find((edge) => edge.label === "relation-0").confidence, edgeCappedGraph.edges.find((edge) => edge.label === "relation-0").confidence, "an edge-limited merge should not mutate existing relation confidence");
+assert.equal(edgeCappedIngest.graph.edges.length, edgeCappedGraph.edges.length, "edge-cap failures should preserve the existing relation collection");
 const sourceCollisionFirst = mergeExtraction(defaultGraph(), {
   source: { id: "provider-source", title: "First source", text: "First source content for the graph.", fingerprint: "first" },
   nodes: [{ id: "first", label: "First", sources: ["provider-source"], evidence: [{ text: "First source content for the graph.", sources: ["provider-source"] }] }],
@@ -1554,6 +1693,7 @@ assert.equal(ambiguousSourceReplacement.ambiguous, true, "ambiguous source repla
 const ambiguousSourceHealth = inspectGraph(ambiguousSourceReferences);
 assert.equal(ambiguousSourceHealth.ambiguousSourceReferences, 2, "ambiguous provenance references should be counted separately");
 assert.equal(ambiguousSourceHealth.provenanceCoverage, 0, "ambiguous provenance should not count as trustworthy coverage");
+assert(!reviewQueue(ambiguousSourceReferences, 20).some((candidate) => candidate.kind === "source" && candidate.id === "duplicate-source"), "review queues must not expose ambiguous source IDs as actionable candidates");
 const legacyFingerprintGraph = normalizeGraph({
   schema: GRAPH_SCHEMA,
   documents: [{ id: "legacy-doc", title: "Legacy", text: sourceText, fingerprint: "old-custom-fingerprint" }],
@@ -2045,6 +2185,27 @@ assert.equal(
   ambiguousRelationLearning.edges.find((edge) => edge.label === "supports")?.id,
   "ambiguous relation learning should remap by semantic endpoints and label instead of trusting the ambiguous ID"
 );
+const ambiguousRelationFeedback = applyFeedback(ambiguousRelationLearning, "edge", "ambiguous-edge", "up");
+assert.equal(ambiguousRelationFeedback.changed, false, "edge feedback must refuse ambiguous imported relation IDs");
+assert.equal(ambiguousRelationFeedback.ambiguous, true, "ambiguous edge feedback should disclose the integrity conflict");
+const ambiguousRelationDataset = applyFeedbackDataset(ambiguousRelationLearning, [{
+  kind: "relation",
+  id: "ambiguous-edge",
+  source: "left",
+  sourceLabel: "Left",
+  target: "other",
+  targetLabel: "Other",
+  label: "supports",
+  status: "accepted"
+}]);
+assert.equal(ambiguousRelationDataset.changed, false, "bulk feedback must refuse ambiguous imported relation IDs");
+assert.equal(ambiguousRelationDataset.skipped, 1, "ambiguous bulk relation feedback should be disclosed as skipped");
+assert(!reviewQueue(ambiguousRelationLearning, 20).some((candidate) => candidate.kind === "edge" && candidate.id === "ambiguous-edge"), "review queues must not expose ambiguous relation IDs as actionable candidates");
+const ambiguousGuidance = buildExtractorFeedback(normalizeGraph({
+  ...ambiguousRelationLearning,
+  edges: ambiguousRelationLearning.edges.map((edge) => edge.id === "ambiguous-edge" ? { ...edge, status: "accepted" } : edge)
+}), { includeStale: true });
+assert(!ambiguousGuidance.some((example) => example.kind === "relation" && example.id === "ambiguous-edge"), "extractor guidance must not teach from ambiguous relation IDs");
 const orderedIntegrityA = normalizeGraph({
   schema: GRAPH_SCHEMA,
   integrity: { ambiguousSourceIds: ["source-z", "source-a"], ambiguousEdgeIds: ["edge-z", "edge-a"] }
@@ -2371,14 +2532,31 @@ assert.equal(
   "empty graph vault manifests should use the deterministic graph timestamp"
 );
 assert(vaultFiles.find((file) => file.name === "README.md")?.content.includes("Open [[_index]]"), "Obsidian vaults should include orientation and round-trip instructions");
+assert(vaultFiles.find((file) => file.name === "README.md")?.content.includes("[[Graph.canvas]]"), "Obsidian vaults should include a native Canvas viewer link");
 assert(vaultFiles.find((file) => file.name === "README.md")?.content.includes("[[Learning/review-ledger]]"), "Obsidian vaults should link the reusable review ledger");
 assert(vaultFiles.find((file) => file.name === "Learning/review-ledger.md")?.content.includes("type: learning-ledger"), "Obsidian vaults should export a versioned reusable review ledger");
 assert(buildVaultFiles(acceptedKnowledge).find((file) => file.name === "Learning/review-ledger.md")?.content.includes("concept: [[Concepts/"), "review ledger entries should link back to projected concept notes");
+const reviewedGraphWithoutDetachedMemory = normalizeGraph({
+  ...acceptedKnowledge,
+  learning: { examples: [] }
+});
+assert(
+  buildVaultFiles(reviewedGraphWithoutDetachedMemory)
+    .find((file) => file.name === "Learning/review-ledger.md")
+    ?.content.includes("concept: [[Concepts/"),
+  "Obsidian review ledgers should retain live reviewed decisions even when detached learning memory is absent"
+);
 const vaultManifest = JSON.parse(vaultFiles.find((file) => file.name === "vault-manifest.json")?.content || "{}");
 assert.equal(vaultManifest.format, "llm-field-notes/vault@1", "Obsidian vaults should declare a versioned manifest contract");
 assert.equal(vaultManifest.graphVersion, merged.version);
 assert.equal(vaultManifest.graphFingerprint, fingerprintBackup(merged), "vault manifests should bind exports to the normalized graph fingerprint");
 assert.equal(vaultManifest.appVersion, "0.1.0", "vault manifests should retain a trimmed bounded producer version");
+const canvas = JSON.parse(vaultFiles.find((file) => file.name === "Graph.canvas")?.content || "{}");
+assert.equal(canvas.nodes.length, merged.nodes.length, "Obsidian Canvas should contain one file card per concept");
+assert.equal(canvas.edges.length, merged.edges.length, "Obsidian Canvas should contain one edge per relation");
+assert(canvas.nodes.every((node) => node.type === "file" && typeof node.file === "string" && node.file.startsWith("Concepts/")), "Obsidian Canvas concept cards should target projected concept notes");
+assert(canvas.edges.every((edge) => typeof edge.fromNode === "string" && typeof edge.toNode === "string" && typeof edge.label === "string"), "Obsidian Canvas relations should retain bounded endpoints and labels");
+assert.deepEqual(JSON.parse(buildVaultFiles(merged).find((file) => file.name === "Graph.canvas")?.content || "{}"), canvas, "Obsidian Canvas exports should be deterministic");
 const vaultGraphJson = JSON.parse(vaultFiles.find((file) => file.name === "graph.json")?.content || "{}");
 assert.equal(vaultGraphJson.graphFingerprint, fingerprintBackup(merged), "vault graph JSON should carry the same integrity fingerprint as its manifest");
 assert.equal(vaultGraphJson.appVersion, "0.1.0", "vault graph JSON should retain bounded producer-version metadata");
@@ -2476,6 +2654,7 @@ assert(redactedVaultFiles.find((file) => file.name === "README.md")?.content.inc
 assert.equal(JSON.parse(redactedVaultFiles.find((file) => file.name === "vault-manifest.json")?.content || "{}").redacted, true, "redacted vault manifests should preserve the privacy boundary");
 assert(redactedVaultFiles.find((file) => file.name.startsWith("Sources/"))?.content.includes('uri: ""'), "redacted vault source notes should remove source URIs");
 assert(!redactedVaultFiles.find((file) => file.name.startsWith("Sources/"))?.content.includes("Reviewed source text"), "redacted vault source notes should remove source text");
+assert(!redactedVaultFiles.find((file) => file.name.startsWith("Sources/"))?.content.includes("Reviewed source"), "redacted vault source notes should remove source document titles");
 assert(JSON.parse(redactedVaultFiles.find((file) => file.name === "graph.json")?.content || "{}").learning.examples.every((example) => example.evidence.every((evidence) => evidence.text === "[redacted]")), "redacted vault graph JSON should remove reusable-learning evidence quotes");
 assert(redactedVaultFiles.every((file) => !file.content.includes("Reviewed source text") && !file.content.includes("https://example.org/reviewed-source")), "redacted vault files should not leak source text or URIs through any projection file");
 assert(redactedVaultFiles.find((file) => file.name === "_index.md")?.content.includes("Redacted projection"), "redacted vault index should disclose its privacy boundary");

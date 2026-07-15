@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MAX_CONCEPT_LABEL_CHARS, buildBackupEnvelope, buildGraphExport, defaultGraph, fingerprintBackup } from "../graph-core.js";
+import { readGraphInput } from "../experiments/graph-input.mjs";
 import { scaledDotProductAttention, softmax } from "../experiments/tiny-attention.mjs";
 import { runLearningLoop, validateLearningLoopOutput } from "../experiments/learning-loop.mjs";
 
@@ -61,11 +62,29 @@ try {
     () => execFileSync(process.execPath, ["experiments/verify-graph.mjs", malformedBackupPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     "graph verifier should reject malformed backup history even when its normalized fingerprint matches"
   );
+  const malformedHistoryProducerPath = join(verifierRoot, "malformed-history-producer.json");
+  const malformedHistoryProducer = {
+    ...buildBackupEnvelope(graph, [defaultGraph()], { appVersion: "0.1.0" }),
+    history: [{ ...defaultGraph(), appVersion: "x".repeat(65) }]
+  };
+  malformedHistoryProducer.graphFingerprint = fingerprintBackup(malformedHistoryProducer.graph, malformedHistoryProducer.history);
+  await writeFile(malformedHistoryProducerPath, JSON.stringify(malformedHistoryProducer));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/verify-graph.mjs", malformedHistoryProducerPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    "graph verifier should reject malformed producer metadata in backup history"
+  );
   const tamperedPath = join(verifierRoot, "tampered.json");
   await writeFile(tamperedPath, JSON.stringify({ ...graph, nodes: [{ id: "attention", label: "Tampered" }] }));
   assert.throws(
     () => execFileSync(process.execPath, ["experiments/verify-graph.mjs", tamperedPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     "graph verifier should reject a tampered graph"
+  );
+  const malformedProducerPath = join(verifierRoot, "malformed-producer.json");
+  await writeFile(malformedProducerPath, JSON.stringify({ ...graph, appVersion: "x".repeat(65) }));
+  await assert.rejects(
+    () => readGraphInput(malformedProducerPath),
+    /producer metadata is invalid/,
+    "shared graph input validation should reject malformed producer metadata instead of normalizing it away"
   );
 } finally {
   await rm(verifierRoot, { recursive: true, force: true });
@@ -79,6 +98,7 @@ assert(learningLoop.stages.reviewed.guidanceExamples <= 500, "the learning loop 
 assert.equal(learningLoop.stages.comparison.rejectedConceptPresentWithoutGuidance, true, "the learning loop baseline should contain the rejected concept");
 assert.equal(learningLoop.stages.comparison.rejectedConceptPresentWithGuidance, false, "the guided follow-up should suppress the rejected concept");
 assert(learningLoop.stages.comparison.conceptsRemovedByGuidance > 0, "the learning loop should expose a measurable guidance delta");
+assert(!learningLoop.stages.improved.labels.some((label) => ["loop also", "also connects", "connects citations"].includes(label.toLowerCase())), "guided extraction should not retain discourse or relation-verb phrase fragments");
 assert.equal(validateLearningLoopOutput(learningLoop), true, "learning-loop output should pass its runtime contract");
 assert.throws(
   () => validateLearningLoopOutput({
@@ -144,6 +164,13 @@ try {
   await writeFile(diffPath, diffOutput);
   const verifiedDiff = JSON.parse(execFileSync(process.execPath, ["experiments/verify-diff.mjs", beforePath, afterPath, diffPath], { encoding: "utf8" }));
   assert.equal(verifiedDiff.verified, true, "the diff verifier CLI should recompute and verify an existing diff artifact");
+  const futureDiffPath = join(diffRoot, "future-diff.json");
+  await writeFile(futureDiffPath, JSON.stringify({ ...diff, exportedAt: "2099-01-01T00:00:00.000Z" }));
+  assert.throws(
+    () => execFileSync(process.execPath, ["experiments/verify-diff.mjs", beforePath, afterPath, futureDiffPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("exportedAt"),
+    "the diff verifier should reject future-dated artifact metadata"
+  );
   const tamperedDiffPath = join(diffRoot, "tampered-diff.json");
   await writeFile(tamperedDiffPath, JSON.stringify({ ...diff, toFingerprint: "fnv64-0000000000000000-1" }));
   assert.throws(

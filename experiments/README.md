@@ -17,6 +17,7 @@ node experiments/verify-diff.mjs before.json after.json diff.json
 node experiments/project-jsonld.mjs graph.json --redacted
 node experiments/verify-jsonld.mjs graph.json graph.jsonld
 node experiments/verify-graph.mjs graph.json
+node experiments/verify-backup.mjs llm-field-notes-backup.json
 ```
 
 The training artifact is a deterministic character-level bigram language
@@ -43,6 +44,25 @@ production promotion when stale or undated examples exceed an explicit bound.
 Feedback exports marked with `truncatedExamples` are rejected before scoring;
 evaluation requires a complete reviewed dataset.
 The command rejects input files larger than 10 MB before parsing them.
+
+The checked-in `benchmarks/sample-feedback.json` dataset is scored by
+`npm run evaluation:check` against the published sample graph, while
+`benchmarks/local-extraction-feedback.json` checks the deterministic local
+extractor's phrase and relation behavior. They are small regression benchmarks
+for recall, reviewed precision, evidence coverage, rejected-item suppression,
+and review freshness. The production harness stamps these deterministic
+fixtures at runtime so they do not expire as a side effect of repository age;
+the evaluator and promotion tests separately fail closed on stale or undated
+real review data. These fixtures are not substitutes for a domain-sized
+human-reviewed benchmark.
+
+`benchmarks/extraction-cases.json` adds explicitly dated representative
+reviewed cases for technical phrases, sparse title-only documents, and
+non-Latin text. The production gate evaluates every case against a deterministic
+reference time derived from those fixture dates, so local-extractor changes must
+preserve both evidence-backed concepts and intentionally evidence-free title
+metadata without reintroducing rejected phrase fragments. Live promotion
+artifacts still use the actual current time for freshness decisions.
 
 `learning-loop.mjs` is the smallest end-to-end self-improvement walkthrough:
 it extracts a document, applies one accepted and one rejected human decision,
@@ -107,3 +127,15 @@ than 10 MB before parsing. The output declares the versioned
 full backup, using the same deterministic projection code as the browser and
 the exporter. It is suitable for CI or release-artifact checks and rejects
 semantic, fingerprint, and redaction mismatches.
+
+`verify-backup.mjs` is the backup-specific recovery check. It validates
+plaintext backup envelopes and reports only bounded graph counts, fingerprints,
+history, and integrity diagnostics. Encrypted backups can be checked for
+envelope validity without a password; provide the password through stdin with
+`--password-stdin` to decrypt and verify the graph fingerprint:
+
+```bash
+printf '%s\n' "$BACKUP_PASSWORD" | node experiments/verify-backup.mjs encrypted-backup.json --password-stdin
+```
+
+The password is never included in output or command arguments.

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
 
@@ -48,7 +48,11 @@ const pagesBuildOutput = execFileSync(process.execPath, ["scripts/build-pages.mj
   encoding: "utf8",
   env: { ...process.env, PUBLIC_ORIGIN: "https://wiki.example.test/field-notes/" }
 });
-assert(pagesBuildOutput.includes("artifact check ok: 16 public cards"), "direct Pages builds should execute the artifact consistency gate");
+assert(pagesBuildOutput.includes("artifact check ok: 17 public cards"), "direct Pages builds should execute the artifact consistency gate");
+execFileSync(process.execPath, ["scripts/verify-pages.mjs"], {
+  stdio: "ignore",
+  env: { ...process.env, PUBLIC_ORIGIN: "https://wiki.example.test/field-notes" }
+});
 const escapedManifestRoot = resolve(root, "../dist-escaped-manifest");
 const escapedManifestTarget = resolve(root, "../pages-verifier-outside.json");
 try {
@@ -90,6 +94,70 @@ assert.equal(new Set(manifestPaths).size, manifestPaths.length, "Pages asset man
 assert(!manifestPaths.includes("asset-manifest.json") && !manifestPaths.includes(".nojekyll"), "Pages asset manifest should exclude itself and the deployment marker");
 const expectedManifestPaths = outputFiles.map((file) => file.slice(root.length + 1)).filter((file) => file !== "asset-manifest.json" && file !== ".nojekyll").sort();
 assert.deepEqual(manifestPaths, expectedManifestPaths, "Pages asset manifest should cover exactly the published files");
+const robotsText = await readFile(join(root, "robots.txt"), "utf8");
+assert.equal(
+  robotsText,
+  "User-agent: *\nAllow: /\nSitemap: https://wiki.example.test/field-notes/sitemap.xml\n",
+  "Pages should publish a robots policy bound to the configured public origin"
+);
+const tamperedRobotsRoot = resolve(root, "../dist-tampered-robots");
+try {
+  await rm(tamperedRobotsRoot, { recursive: true, force: true });
+  await cp(root, tamperedRobotsRoot, { recursive: true });
+  const tamperedRobotsPath = join(tamperedRobotsRoot, "robots.txt");
+  await writeFile(tamperedRobotsPath, "User-agent: *\nAllow: /\nSitemap: https://wrong.example.test/sitemap.xml\n", "utf8");
+  const tamperedRobotsManifestPath = join(tamperedRobotsRoot, "asset-manifest.json");
+  const tamperedRobotsManifest = JSON.parse(await readFile(tamperedRobotsManifestPath, "utf8"));
+  const tamperedRobotsBytes = await readFile(tamperedRobotsPath);
+  const tamperedRobotsEntry = tamperedRobotsManifest.files.find((entry) => entry.path === "robots.txt");
+  tamperedRobotsEntry.sha256 = createHash("sha256").update(tamperedRobotsBytes).digest("hex");
+  tamperedRobotsEntry.bytes = tamperedRobotsBytes.byteLength;
+  await writeFile(tamperedRobotsManifestPath, JSON.stringify(tamperedRobotsManifest), "utf8");
+  assert.throws(
+    () => execFileSync(process.execPath, ["scripts/verify-pages.mjs", tamperedRobotsRoot], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PUBLIC_ORIGIN: "https://wiki.example.test/field-notes" }
+    }),
+    (error) => String(error?.stderr).includes("robots policy does not match"),
+    "Pages verification should reject a crawler policy that points at a different deployment origin"
+  );
+} finally {
+  await rm(tamperedRobotsRoot, { recursive: true, force: true });
+}
+const tamperedShellRoot = resolve(root, "../dist-tampered-shell");
+try {
+  await rm(tamperedShellRoot, { recursive: true, force: true });
+  await cp(root, tamperedShellRoot, { recursive: true });
+  const generatedNoteAsset = manifestPaths.find((asset) => /^notes\/.+\.html$/.test(asset));
+  assert(generatedNoteAsset, "Pages output should contain a generated note page for shell tamper coverage");
+  const tamperedServiceWorkerPath = join(tamperedShellRoot, "sw.js");
+  const tamperedServiceWorker = await readFile(tamperedServiceWorkerPath, "utf8");
+  const generatedNoteLiteral = `"./${generatedNoteAsset}"`;
+  const generatedNoteWithSeparator = `, ${generatedNoteLiteral}`;
+  await writeFile(
+    tamperedServiceWorkerPath,
+    tamperedServiceWorker.replace(generatedNoteWithSeparator, " ".repeat(generatedNoteWithSeparator.length)),
+    "utf8"
+  );
+  const tamperedManifestPath = join(tamperedShellRoot, "asset-manifest.json");
+  const tamperedManifest = JSON.parse(await readFile(tamperedManifestPath, "utf8"));
+  const tamperedWorkerBytes = await readFile(tamperedServiceWorkerPath);
+  const tamperedWorkerEntry = tamperedManifest.files.find((entry) => entry.path === "sw.js");
+  tamperedWorkerEntry.sha256 = createHash("sha256").update(tamperedWorkerBytes).digest("hex");
+  await writeFile(tamperedManifestPath, JSON.stringify(tamperedManifest), "utf8");
+  assert.throws(
+    () => execFileSync(process.execPath, ["scripts/verify-pages.mjs", tamperedShellRoot], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PUBLIC_ORIGIN: "https://wiki.example.test/field-notes" }
+    }),
+    (error) => String(error?.stderr).includes("APP_SHELL is missing generated note page"),
+    "Pages verification must reject a service worker that omits a published generated note page"
+  );
+} finally {
+  await rm(tamperedShellRoot, { recursive: true, force: true });
+}
 for (const entry of assetManifest.files) {
   const content = await readFile(join(root, entry.path));
   assert.equal(entry.bytes, content.byteLength, `asset manifest byte length should match ${entry.path}`);
@@ -120,7 +188,10 @@ try {
   const index = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(index.status, 200);
   const indexText = await index.text();
-  assert(indexText.includes("LLM Field Notes"));
+assert(indexText.includes("LLM Field Notes"));
+  const productionStatus = await fetch(`http://127.0.0.1:${port}/PRODUCTION_STATUS.md`);
+  assert.equal(productionStatus.status, 200, "Pages should publish the production status contract linked from README");
+  assert((await productionStatus.text()).includes("Hosted multi-user workspace"), "the published production status should disclose the hosted product boundary");
   assert(indexText.includes('href="https://wiki.example.test/field-notes/"'), "Pages HTML should declare the deployed canonical origin");
   assert(indexText.includes('href="https://wiki.example.test/field-notes/feed.xml"'), "Pages HTML should advertise the deployed feed URL");
   assert(indexText.includes('content="https://wiki.example.test/field-notes/social-card.svg"'), "Pages social metadata should use the deployed asset origin");

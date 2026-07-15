@@ -6,26 +6,41 @@
   "description": "A document-to-knowledge-graph workspace with Obsidian projections.",
   "license": "CC-BY-4.0",
   "scripts": {
-    "test": "node --check app.js && node --check graph-core.js && node --check graph-store.js && node --check extractor-adapter.js && node --check rebuild-adapter.js && node --check projection-adapter.js && node --check jsonld-projection.js && node --check storage-adapter.js && node --check evaluation.js && node --check server.mjs && node --check sw.js && node --check scripts/public-assets.mjs && node --check scripts/public-origin.mjs && node --check scripts/note-page.mjs && node --check scripts/service-worker-cache.mjs && node --check scripts/build-pages.mjs && node --check scripts/verify-pages.mjs && node --check scripts/check-artifacts.mjs && node --check tests/pages-smoke.mjs && node --check tests/build-revision-smoke.mjs && node --check tests/notes-smoke.mjs && node --check tests/browser-response-smoke.mjs && node --check tests/copy-smoke.mjs && node --check tests/onboarding-smoke.mjs && node --check tests/sample-graph-smoke.mjs && node --check tests/rebuild-smoke.mjs && node --check tests/artifacts-smoke.mjs && node --check tests/draft-smoke.mjs && node --check scripts/check-contracts.mjs && node --check experiments/bounded-file.mjs && node --check experiments/tiny-attention.mjs && node --check experiments/tiny-bpe.mjs && node --check experiments/tiny-training.mjs && node --check experiments/tiny-transformer.mjs && node --check experiments/evaluate-feedback.mjs && node --check experiments/compare-evaluations.mjs && node --check experiments/inspect-graph.mjs && node --check experiments/graph-input.mjs && node --check experiments/project-jsonld.mjs && node --check experiments/verify-jsonld.mjs && node --check experiments/verify-graph.mjs && node --check experiments/verify-diff.mjs && node scripts/check-release.mjs && node scripts/check-contracts.mjs && node scripts/build-pages.mjs && node scripts/verify-pages.mjs && node tests/smoke.mjs && node tests/extractor-smoke.mjs && node tests/projection-smoke.mjs && node tests/storage-smoke.mjs && node tests/evaluation-smoke.mjs && node tests/experiment-smoke.mjs && node tests/notes-smoke.mjs && node tests/bpe-smoke.mjs && node tests/training-smoke.mjs && node tests/transformer-smoke.mjs && node tests/normalization-fuzz.mjs && node tests/build-revision-smoke.mjs && node tests/server-smoke.mjs && node tests/browser-response-smoke.mjs && node tests/copy-smoke.mjs && node tests/onboarding-smoke.mjs && node tests/sample-graph-smoke.mjs && node tests/rebuild-smoke.mjs && node tests/artifacts-smoke.mjs && node tests/draft-smoke.mjs && node tests/site-check.mjs && node tests/http-smoke.mjs && node tests/pages-smoke.mjs && node tests/sw-smoke.mjs",
+    "test": "node scripts/run-tests.mjs",
     "start": "node server.mjs",
     "serve": "python3 -m http.server 8000",
     "serve:node": "node server.mjs",
+    "smoke:server": "node scripts/smoke-server.mjs",
+    "smoke:container": "node scripts/smoke-container.mjs",
+    "load:server": "node scripts/load-server.mjs",
     "build:pages": "node scripts/build-pages.mjs",
     "serve:pages": "npm run build:pages && python3 -m http.server 8000 --directory dist",
     "diff": "node experiments/diff-graphs.mjs",
     "compare:evaluations": "node experiments/compare-evaluations.mjs",
     "health": "node experiments/inspect-graph.mjs",
+    "health:sample": "node experiments/inspect-graph.mjs examples/sample-graph.json --min-provenance 100 --max-orphaned 0 --max-ambiguous 0 --max-conflicting-items 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-review-queue-truncated 0 --max-evidence-grounding-truncated 0 --max-feedback-context-truncated 0 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-unanchored-evidence 0 --max-truncated-items 0 --max-dropped-items 0",
+    "production:check": "node scripts/production-check.mjs",
+    "runtime:check": "node scripts/check-runtime.mjs",
     "learning:loop": "node experiments/learning-loop.mjs",
+    "learning:check": "node scripts/check-learning-loop.mjs",
+    "evaluation:check": "node scripts/check-evaluation-benchmark.mjs",
     "project:jsonld": "node experiments/project-jsonld.mjs",
     "verify:jsonld": "node experiments/verify-jsonld.mjs",
     "verify:graph": "node experiments/verify-graph.mjs",
+    "verify:backup": "node experiments/verify-backup.mjs",
     "verify:diff": "node experiments/verify-diff.mjs",
     "release:check": "node scripts/check-release.mjs",
+    "release:tag:check": "node scripts/check-release-tag.mjs",
     "contracts:check": "node scripts/check-contracts.mjs",
     "verify:pages": "node scripts/verify-pages.mjs",
-    "artifacts:check": "node scripts/check-artifacts.mjs"
+    "smoke:pages:deployment": "node scripts/smoke-pages-deployment.mjs",
+    "accessibility:check": "node scripts/check-accessibility.mjs",
+    "performance:check": "node scripts/check-performance.mjs",
+    "artifacts:check": "node scripts/check-artifacts.mjs",
+    "security:check": "node scripts/check-security-txt.mjs",
+    "backup:smoke": "node tests/backup-crypto-smoke.mjs && node tests/backup-verifier-smoke.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

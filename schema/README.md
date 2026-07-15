@@ -6,9 +6,16 @@
 backup schema uses a file-relative identifier and resolves the graph contract
 through the same-directory `graph.schema.json` reference, so bundled offline
 validators do not need network access.
-New backups carry a deterministic `graphFingerprint` and bounded `appVersion`
-producer metadata; older backups without either optional field remain readable
+`encrypted-backup.schema.json` describes the optional password-encrypted wrapper
+around that backup. It identifies the authenticated cipher and key-derivation
+parameters, but never contains or derives a password from the envelope.
+New backups carry a deterministic `graphFingerprint`, bounded `appVersion`
+producer metadata, and at most three undo-history snapshots; older backups
+without either optional field remain readable
 through the browser compatibility path.
+The browser, graph-input library, and verification CLI nevertheless require
+the envelope's required fields, compatible history array, past export
+timestamp, and closed top-level metadata contract before normalization.
 Persisted browser commits may also carry optional `committedAt` metadata. It is
 local synchronization metadata, not graph content: undo and restore use it to
 remain authoritative across delayed cross-tab events.
@@ -85,8 +92,9 @@ not fail health validation merely because their provenance is richly grounded.
 
 `vault-manifest.schema.json` describes the identity envelope included in
 Obsidian vault exports. It binds the projection to a graph version and
-deterministic fingerprint, bounded producer version, and redaction state while
-remaining compatible with older manifests that lack producer metadata.
+deterministic fingerprint, bounded producer version, redaction state, and
+optional learning-note completeness diagnostics while remaining compatible
+with older manifests that lack producer metadata or learning status.
 
 `jsonld.schema.json` describes the versioned semantic-web projection emitted
 by the browser and `project-jsonld.mjs`. It retains the graph fingerprint,

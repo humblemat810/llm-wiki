@@ -24,10 +24,12 @@ sitting and honest enough to show what failed.
   before/after graph fingerprints.
 - [Graph verifier](experiments/verify-graph.mjs) — verify a graph export or
   full backup before sharing or consuming it.
+- [Backup verifier](experiments/verify-backup.mjs) — inspect plaintext or
+  encrypted backups without putting a password in command arguments.
 - [Sample graph export](examples/sample-graph.json) — start with a small,
   evidence-backed graph for health, diff, and projection tooling.
 
-Run an experiment from the repository root with Node 18 or newer. The
+Run an experiment from the repository root with Node 22 or newer. The
 experiments are intentionally dependency-free.
 
 ## Quality and tooling

@@ -1,10 +1,10 @@
-import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_GRAPH_REVISIONS, defaultGraph, fingerprintBackup, normalizeGraph, parseJsonWithUniqueKeys } from "./graph-core.js";
+import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_BACKUP_HISTORY, MAX_GRAPH_REVISIONS, defaultGraph, fingerprintBackup, normalizeGraph, parseJsonWithUniqueKeys } from "./graph-core.js";
 
 export const GRAPH_KEY = "llm-field-notes-knowledge-graph";
 export const HISTORY_KEY = "llm-field-notes-knowledge-graph-history";
 export const RECOVERY_KEY = "llm-field-notes-knowledge-graph-recovery";
 export const HISTORY_RECOVERY_KEY = "llm-field-notes-knowledge-graph-history-recovery";
-export const HISTORY_LIMIT = 3;
+export const HISTORY_LIMIT = MAX_BACKUP_HISTORY;
 export const MAX_PERSISTED_JSON_CHARS = 50 * 1024 * 1024;
 export const MAX_PERSISTED_JSON_BYTES = 50 * 1024 * 1024;
 export const MAX_HISTORY_CAPACITY = MAX_GRAPH_REVISIONS;
@@ -156,8 +156,7 @@ export function createGraphStore(storage, {
   const rollback = (previousGraphRaw, previousHistoryRaw) => {
     const restore = (key, raw) => {
       try {
-        if (raw === null || raw === undefined) storage.removeItem(key);
-        else storage.setItem(key, raw);
+        writeAndVerify(key, raw);
         return true;
       } catch {
         return false;
@@ -170,9 +169,22 @@ export function createGraphStore(storage, {
   };
   const rollbackAndCapture = (previousGraphRaw, previousHistoryRaw) => {
     const restored = rollback(previousGraphRaw, previousHistoryRaw);
-    if (!restored.graph) captureRaw(recoveryKey, previousGraphRaw);
-    if (!restored.history) captureRaw(historyRecoveryKey, previousHistoryRaw);
+    if (!restored.graph || !restored.history) {
+      // A degraded fallback may intentionally continue after a partial
+      // rollback. Preserve both raw inputs in that case: restoring one key
+      // does not make the other key's snapshot safe to discard.
+      captureRaw(recoveryKey, previousGraphRaw);
+      captureRaw(historyRecoveryKey, previousHistoryRaw);
+    }
     return restored;
+  };
+  const writeAndVerify = (key, value) => {
+    const expected = value === null || value === undefined ? null : String(value);
+    if (expected === null) storage.removeItem(key);
+    else storage.setItem(key, expected);
+    if (storage.getItem(key) !== expected) {
+      throw Object.assign(new Error("Storage did not retain the requested value."), { code: "STORAGE_VERIFY_FAILED" });
+    }
   };
   const readRawSnapshot = () => {
     try {
@@ -248,21 +260,21 @@ export function createGraphStore(storage, {
         // terminated between synchronous storage writes, preserving the
         // newest graph is safer than exposing history for a graph that is
         // still current.
-        storage.setItem(graphKey, normalizedRaw);
-        if (nextHistoryRaw !== null) storage.setItem(historyKey, nextHistoryRaw);
+        writeAndVerify(graphKey, normalizedRaw);
+        if (nextHistoryRaw !== null) writeAndVerify(historyKey, nextHistoryRaw);
         lastWriteMode = "normal";
         return true;
       } catch {
         rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
         try {
-          storage.setItem(graphKey, normalizedRaw || serializeGraph(graph));
+          writeAndVerify(graphKey, normalizedRaw || serializeGraph(graph));
           lastWriteMode = "without-new-history";
           return true;
         } catch {
           rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
           try {
-            storage.setItem(graphKey, normalizedRaw || serializeGraph(graph));
-            storage.removeItem(historyKey);
+            writeAndVerify(graphKey, normalizedRaw || serializeGraph(graph));
+            writeAndVerify(historyKey, null);
             lastWriteMode = "without-history";
             return true;
           } catch {
@@ -301,8 +313,8 @@ export function createGraphStore(storage, {
           return false;
         }
         previous.committedAt = commitTimestamp();
-        storage.setItem(graphKey, serializeGraph(previous));
-        storage.setItem(historyKey, serializeHistory(history));
+        writeAndVerify(graphKey, serializeGraph(previous));
+        writeAndVerify(historyKey, serializeHistory(history));
         lastWriteMode = "normal";
         return true;
       } catch {
@@ -404,15 +416,15 @@ export function createGraphStore(storage, {
           normalizedGraph.committedAt = current.committedAt;
           normalizedGraphRaw = serializeGraph(normalizedGraph);
         }
-        storage.setItem(graphKey, normalizedGraphRaw);
-        storage.setItem(historyKey, normalizedHistoryRaw);
+        writeAndVerify(graphKey, normalizedGraphRaw);
+        writeAndVerify(historyKey, normalizedHistoryRaw);
         lastWriteMode = "normal";
         return true;
         } catch {
           rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
           try {
-            storage.setItem(graphKey, normalizedGraphRaw);
-            storage.removeItem(historyKey);
+            writeAndVerify(graphKey, normalizedGraphRaw);
+            writeAndVerify(historyKey, null);
             lastWriteMode = "without-history";
             return true;
           } catch {
@@ -450,15 +462,15 @@ export function createGraphStore(storage, {
         // the visible graph so an interrupted operation preserves recovery.
         // If termination occurs after this write, the still-visible graph is
         // safer than losing it before its snapshot exists.
-        if (nextHistoryRaw !== null) storage.setItem(historyKey, nextHistoryRaw);
-        storage.removeItem(graphKey);
+        if (nextHistoryRaw !== null) writeAndVerify(historyKey, nextHistoryRaw);
+        writeAndVerify(graphKey, null);
         lastWriteMode = "normal";
         return true;
       } catch {
         rollbackAndCapture(previousGraphRaw, previousHistoryRaw);
         try {
-          storage.removeItem(graphKey);
-          storage.removeItem(historyKey);
+          writeAndVerify(graphKey, null);
+          writeAndVerify(historyKey, null);
           lastWriteMode = "without-history";
           return true;
         } catch {

@@ -48,9 +48,12 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   common verb/preposition fragments from adjacent phrases, preserve explicit
   relation verbs and shared-subject clauses, keep sparse documents on the
   noise-filtered ranking path while retaining accepted feedback endpoints,
+  attach source-line evidence to heading and quoted-term candidates, and
   removing only evidence-subsumed one-word duplicates, and passing through
   bounded candidate and evidence collection with reserved phrase capacity
-  before `normalizeExtraction()`.
+  before `normalizeExtraction()`. A genuinely sparse document may contribute
+  its bounded title as an inferred topic, but that metadata-only candidate
+  carries no fabricated body evidence.
   merge; network adapters should use `normalizeExtractionForDocument()` to
   preserve the submitted document's provenance envelope. That boundary rejects
   provider node and edge collections above graph limits before scanning or
@@ -85,9 +88,14 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   preserves the newest graph. Destructive clears record the undo snapshot
   before removing the graph, prioritizing recoverability over a transient
   duplicate history entry. The existing rollback and recovery paths still
-  handle ordinary storage failures. If the undo snapshot cannot fit, the
+  handle ordinary storage failures, and every graph/history write reads its
+  value back before reporting success so silent storage adapters cannot claim
+  persistence they did not perform. If the undo snapshot cannot fit, the
   clear operation falls back explicitly to a reduced-history clear and reports
-  that degraded mode to the workbench.
+  that degraded mode to the workbench. If rollback restores only one storage
+  key, both raw pre-mutation keys are retained before any degraded fallback
+  continues, so a partial storage failure cannot discard the graph merely
+  because its history key was the one that failed.
   Graphs imported with truncation or dropped-entry diagnostics remain readable
   for inspection, but mutations that preserve those data-loss markers are
   rejected until a clean restore is written. The browser also captures the
@@ -97,23 +105,53 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   feedback, concept merging, source removal, and learning-memory cleanup, so
   callers receive an explicit incomplete-import limit before persistence can
   fail generically.
+- `buildBackupEnvelope()` applies the separate three-snapshot backup
+  interchange ceiling before canonicalization, so automation cannot emit a
+  backup that exceeds `backup.schema.json`; oversized input fails closed rather
+  than being silently truncated.
+  `validateBackupEnvelope()` is the shared strict import boundary for the
+  browser, graph-input library, and verification CLI; it checks required
+  envelope fields, compatible history, trusted export time, producer metadata,
+  and the closed top-level key set before normalization.
   Empty graph projections use the same deterministic epoch timestamp as graph
   normalization, so an untouched workspace can be exported reproducibly.
   Full backups also carry bounded producer-version metadata alongside their
   graph/history fingerprint, so long-lived archives can be traced to the
   application release that created them without trusting that metadata for
   restore authorization.
+- `backup-crypto.js` optionally wraps a complete backup in an authenticated
+  AES-GCM envelope using a PBKDF2-SHA-256 password-derived key. Encryption is
+  browser-local, bounded, and never persists or transmits the password;
+  plaintext backups remain a deliberate interoperability option. The browser
+  download path applies the larger bounded envelope ceiling to encrypted
+  backups, while ordinary text and binary projections retain the 50 MB export
+  ceiling.
 - The reference Node host applies the same published-asset trust boundary at
   runtime as the release and Pages builders: every static shell, learning note,
   and generated note source is checked with `lstat` before resolution, so a
   mutable deployment root cannot introduce a symlinked asset after startup.
+  Its response helpers also stop when a response has already sent headers, so a
+  late filesystem or rendering failure cannot trigger a second header write and
+  hide the original failure.
+- The reference server's metrics expose a privacy-safe draining gauge alongside
+  aggregate HTTP and extraction latency, in-flight request pressure, and
+  extraction capacity, so graceful shutdown and gateway saturation are
+  distinguishable from provider failure while `/readyz` transitions to 503.
+  These metrics do not add document, URI, or client-identity labels.
+- The production Docker context excludes local Codex artifacts in
+  `.dockerignore`; agent workspace files, tests, and release-only benchmark
+  fixtures are not part of the runtime image.
+  It also excludes Pages staging and rollback directories, which may remain
+  briefly after an interrupted atomic publication.
 - `storage-adapter.js` provides browser storage. IndexedDB is preferred;
   localStorage is migrated and retained as a fallback. Cross-tab changes are
-  synchronized through storage events and `BroadcastChannel`. A bounded
-  localStorage write-ahead marker protects synchronous mirror writes until
-  their IndexedDB commits complete, so reloads cannot silently resurrect an
+  synchronized through storage events and `BroadcastChannel`. Bounded
+  per-key localStorage write-ahead markers protect synchronous mirror writes
+  until their IndexedDB commits complete, so concurrent tabs cannot overwrite
+  one another's recovery metadata and reloads cannot silently resurrect an
   older graph revision; marker generations include a storage-instance identity
-  so same-key writes from separate tabs cannot acknowledge one another.
+  so same-key writes from separate tabs cannot acknowledge one another. A
+  bounded aggregate marker remains for compatibility with older state.
   Cross-tab broadcasts ignore that internal marker key, keeping recovery
   bookkeeping out of the graph value stream. They also accept only bounded key
   names and string values across hydration, storage events, and broadcasts, so
@@ -133,8 +171,12 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   same revision and timestamp, it preserves the visible workspace and reports a
   same-revision conflict instead of silently choosing one graph. Namespace clearing removes only LLM Field
   Notes keys, preserving unrelated localStorage data owned by the same origin,
-  and includes keys awaiting durable commit. IndexedDB write and delete
-  transactions have their own bounded timeout; stalled operations abort when
+  and includes keys awaiting durable commit. During hydration, the adapter
+  compares bounded graph `committedAt` metadata: if a
+  synchronous local mirror is newer than the durable copy after an out-of-order
+  cross-tab transaction, the local graph and history are selected and queued
+  for durable repair before the workspace becomes ready. IndexedDB write and
+  delete transactions have their own bounded timeout; stalled operations abort when
   possible, demote the adapter to its synchronous fallback, and emit the
   existing durability warning. An explicit cross-tab graph removal event is
   treated as an intentional clear rather than stale state, so the newer tab
@@ -143,7 +185,20 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   shared duplicate-key/depth-safe JSON boundary before it influences hydration,
   so ambiguous synchronization metadata preserves the synchronous mirror,
   discloses degraded durability, and is repaired through a fresh bounded
-  durable write.
+  durable write. The workbench listens for both the graph and history keys:
+  because those keys are committed separately, a history notification that
+  arrives after the graph notification still refreshes the visible undo
+  timeline instead of leaving it stale until reload. Reusable hosts can await
+  the adapter's `dispose()` method to
+  remove native storage listeners, close BroadcastChannel and IndexedDB
+  resources, and wait for queued durable writes to settle during a remount.
+- Workbench graph selections use `#item=` deep links containing only a bounded
+  item kind and stable ID. Reloads and browser back/forward restore local
+  selection when that graph exists in the current browser, while copied links
+  never serialize source text, evidence, URIs, or local graph state.
+  Inspector share actions use the same URL contract, native sharing when
+  available, and generic share metadata so source titles and graph content
+  cannot escape through the share sheet.
 - `projection-adapter.js` owns the editable Obsidian contract. Markdown notes
   are feedback inputs, not a second source of truth. ZIP imports validate paths,
   filenames, bounds, and checksums before applying updates; the browser requires
@@ -152,15 +207,26 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   by file order. Relation projections retain and validate both endpoints before
   an edit can reach the graph, while source projections bind metadata edits to
   the document fingerprint. The vault also includes a derived reusable-review
-  ledger; it is navigational and does not become an independent learning store.
+  ledger built from both live reviewed graph items and detached learning memory;
+  it is navigational and does not become an independent learning store.
   Vault parsing also checks each editable feedback note against the manifest
   identity so one stale note cannot hide behind a current archive manifest.
   Vault manifests also retain bounded producer-version metadata, while older
   manifests without that optional field remain importable.
+  Vault exports also record bounded learning-note completeness in the manifest,
+  so a transient note-fetch failure remains machine-readable instead of being
+  mistaken for a complete Obsidian projection. Imports cross-check those counts
+  against the archive's actual `Learning/` files before trusting the status.
+  Manifest keys are closed against the published schema so unsupported
+  metadata cannot hide behind a valid graph fingerprint. A vault containing
+  JSON-LD without the authoritative embedded graph JSON is marked unverified
+  instead of treating matching metadata as semantic verification.
   Obsidian feedback frontmatter is a closed, type-specific allowlist matching
   the exporter; unknown keys and malformed read-only metadata are rejected
   instead of being silently ignored, so a typo or unsupported edit remains
   visible as an invalid feedback note.
+  Projection path allocation keys relation notes by stable relation ID rather
+  than object identity, so cloned normalized edges retain the same vault path.
   Editable note fields that exceed graph bounds are rejected rather than
   silently truncated before mutation. Direct feedback batches above the
   published file/item bound, or with over-limit correction fields, are
@@ -175,6 +241,11 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   The workbench also emits JSON-LD as a non-editable interoperability
   projection; JSON-LD consumers must treat the normalized graph and its
   fingerprint as the source of truth.
+  Obsidian vault exports also include a deterministic `Graph.canvas` file with
+  one file-backed card per concept and one labeled edge per relation. It is a
+  native visual browsing projection, not an additional graph store: linked
+  Markdown notes and authoritative `graph.json` remain the recovery and
+  round-trip sources of truth.
 - `jsonld-projection.js` is the pure JSON-LD projection boundary. It has no DOM
   dependency and normalizes its input, so browser exports and automation can
   share one bounded representation. Entity IDs use a reserved unambiguous
@@ -184,21 +255,57 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   ignores JSON-LD object-key and unordered-member ordering differences.
   JSON-LD exports may include bounded producer-version metadata; verification
   treats that field as optional so older projection files remain valid.
+- The browser also provides a self-contained redacted HTML projection for
+  human sharing. It contains only bounded graph labels, statuses, counts,
+  health, and the graph fingerprint; source text, evidence quotes, source
+  URIs, and source document titles are removed before rendering. The generated
+  file has no scripts,
+  uses a restrictive document CSP, escapes every graph-derived value, and
+  remains behind the shared export byte limit.
+  The same projection can use the shared browser file-share boundary when
+  available and falls back to downloading the exact same bounded bytes; a
+  canceled share does not create a second artifact. Markdown sharing uses that
+  boundary too, then adds its clipboard fallback.
 - `buildGraphExport()` is the shared raw graph JSON projection boundary. It
   canonicalizes collection ordering, adds the normalized graph fingerprint,
   and records bounded producer-version metadata without making that metadata
   part of graph identity or restore authorization.
+- Pages publication verifies the generated `robots.txt` policy against the
+  configured public origin, requiring the matching sitemap when origin-aware
+  discovery is enabled and rejecting origin-aware sitemap output otherwise.
+- The Pages workflow also runs `scripts/smoke-pages-deployment.mjs` against the
+  URL returned by the deployment action. It retries propagation with bounded
+  timeouts, checks that redirects remain inside the deployed origin, and probes
+  the served HTML, crawler files, artifact gallery, service worker, and a
+  generated learning-note page. This verifies the live artifact rather than
+  treating a successful upload as proof of a healthy publication.
+- `.github/workflows/pages-monitor.yml` repeats that same bounded probe daily
+  using the configured public origin or the repository's default Pages URL.
+  Its read-only permissions and immutable action references make ongoing
+  publication monitoring safe to run on forks and manual dispatches.
+- `.github/workflows/release.yml` is the versioned-release boundary. It accepts
+  only a tag matching the stable package version, reruns the full suite,
+  verifies a fresh Pages bundle, builds the container with the same semantic
+  version and source revision, and smoke-tests that exact image under the
+  read-only non-root runtime contract before the release job succeeds.
 - `experiments/graph-input.mjs` is the shared automation input boundary for
   graph JSON and full backups; `project-jsonld.mjs` and `verify-jsonld.mjs`
   use it so artifact generation and verification apply the same schema, bounded
   timestamp, size, normalization, and fingerprint rules. Diff and graph
   verifiers use the same timestamp and duplicate-key boundaries for their
-  exported artifacts; JSON-LD and evaluation verifiers use the same JSON
-  boundary.
+  exported artifacts; producer-version metadata, including backup-history
+  metadata, is rejected before normalization can silently discard it. Backup,
+  diff, and evaluation timestamps must also be trusted past timestamps before
+  they can enter chronology or promotion workflows. JSON-LD and evaluation
+  verifiers use the same JSON boundary.
 - `extractor-adapter.js` is the provider-neutral HTTP client. It bounds
   documents, feedback, response bytes, timeouts, and cancellation, then
   normalizes provider output against the submitted document so provenance
-  metadata remains request-authoritative. External JSON text is decoded as
+  metadata remains request-authoritative. The shared normalization boundary
+  also restores accepted reviewed concepts and relations that a provider omits
+  only when their labels and endpoints are present in the submitted source,
+  attaching exact bounded source evidence rather than fabricating unsupported
+  fallback records. External JSON text is decoded as
   fatal UTF-8 and parsed through the shared duplicate-key/depth-safe JSON
   boundary, so malformed or ambiguous provider bytes cannot silently alter a
   graph. Browser note
@@ -232,6 +339,8 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   extractor failures (`1` second for provider failures and `5` seconds for
   timeouts), while malformed or oversized provider output receives no retry
   hint because repeating a deterministic contract violation is not useful.
+  The browser adapter uses bounded exponential fallback backoff across
+  multiple retries and honors provider `Retry-After` values when supplied.
   Terminal non-JSON and non-2xx responses receive the same best-effort body
   cancellation before their error is surfaced, preventing failed provider
   responses from retaining unread streams.
@@ -239,6 +348,11 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   paths such as `/api/extract-graph` to absolute URLs before handing them to
   this adapter, while the adapter itself continues to reject ambiguous
   non-HTTP provider URLs.
+- `tests/provider-http-smoke.mjs` exercises the gateway and adapter against a
+  real localhost provider socket, including the serialized request envelope, a
+  retryable HTTP failure, streamed response decoding, and rebinding provider
+  evidence to the submitted source. Mock-only tests remain useful for malformed
+  readers, but this integration check proves the network boundary itself.
   Oversized streamed responses use the same non-blocking cleanup rule, so
   rejecting an over-limit body cannot itself hang.
 - `rebuild-adapter.js` owns the pure sequential saved-source rebuild loop.
@@ -247,8 +361,24 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   source fails, stops before work when canceled, and preserves stable source
   identities through the injected graph replacement function. Browser code
   supplies the local or remote extractor and performs one final optimistic
-  graph-store commit. Failure diagnostics are normalized and bounded before
-  they reach the browser status surface.
+  graph-store commit. Replacement results are normalized and rejected when
+  normalization would drop or truncate graph data, so a custom provider or
+  test double cannot report a partial rebuild as successful. Failure
+  diagnostics are normalized and bounded before they reach the browser status
+  surface. Extraction is raced against the rebuild abort signal, so an
+  extractor that ignores cancellation cannot hold the orchestration loop open.
+  Replacement graphs carrying ambiguous source/relation IDs or contradictory
+  duplicate-identity diagnostics are rejected before they can be counted or
+  persisted.
+  Each replacement also preserves every unrelated saved source record
+  byte-for-byte at the normalized field level; only the target source may be
+  replaced by the rebuild operation.
+  A rebuild also rejects a structurally valid empty replacement when
+  the source previously grounded concepts or relations, preserving the prior
+  representation through transient provider/model failures. Successful bounded
+  detail records retain before/after source-linked concept and relation counts,
+  allowing the workbench to report how a learning pass changed the
+  representation instead of hiding the delta behind a source total.
 - `evaluation.js` measures extractor output against reviewed examples. It
   reports accepted recall, reviewed-candidate precision, source-anchored
   evidence coverage, and
@@ -299,10 +429,17 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   trusted gateway. The CLI additionally fails extraction closed on non-loopback
   hosts until a bearer token is configured, while loopback development remains
   convenient; operational metrics follow the same non-loopback authentication
-  default. The extraction boundary checks feedback cardinality before
+  default. Readiness also fails closed when either required bearer secret is
+  missing, so an externally bound container cannot enter service while its
+  extraction or observability boundary is unusable. The extraction boundary
+  checks feedback cardinality before
   mapping or serializing provider hints, preventing oversized arrays from
   creating avoidable intermediate allocations. The server enforces the
-  extractor-request schema's closed root, document, and feedback shapes, so
+  process-local extraction budget with bounded `RateLimit-Limit`,
+  `RateLimit-Remaining`, and `RateLimit-Reset` response headers; a trusted
+  gateway remains authoritative for multi-instance deployments. It also
+  enforces the extractor-request schema's closed root, document, and feedback
+  shapes, so
   unknown fields fail before they can be silently discarded. It also rejects
   duplicate aliases and contradictory decisions for the same concept or
   relation at the gateway, matching the browser adapter's canonical feedback
@@ -313,6 +450,13 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   The request reader validates numeric, safe `Content-Length` values and
   compares them with the received byte count before JSON parsing, so
   truncated keep-alive requests cannot become valid extraction envelopes.
+  Wrong-method extraction requests drain any supplied body before returning
+  `405`, preserving framing when clients reuse the connection.
+  The generic unsupported-method fallback applies the same drain rule to
+  non-extraction routes.
+  All non-POST requests begin that bounded drain at the server boundary, so
+  unknown-path and body-bearing read-only probes preserve connection framing
+  too.
   Readiness also performs bounded fatal-UTF-8 decoding of every published
   shell asset, so a corrupted text asset cannot make the server report ready
   while the browser workbench is unable to execute or render.
@@ -326,6 +470,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   It also validates that `version.json` is well-formed, uses a real calendar
   date rather than a parser-rollover value, is non-future, and matches the
   running package version before advertising the deployment as ready.
+  Non-loopback startup also fails readiness when the sanitized source build
+  revision is unknown, keeping externally served health metadata traceable to a
+  release artifact; loopback development remains revision-agnostic.
   The bounded in-process client-window limiter expires stale entries on a
   short periodic sweep instead of scanning the full key map for every
   extraction request, keeping abuse protection from adding avoidable
@@ -347,7 +494,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   publication commands cannot bypass the release contract. The builder writes
   into a private staging directory and swaps it into the requested output only
   after generation, cache revision, manifest, and aggregate-size checks pass;
-  a failed commit restores the previous output.
+  a failed commit restores the previous output. Bounded source-note reads and
+  staged asset copies use `O_NOFOLLOW` where supported, closing the
+  validation-to-publication symlink race.
 - `scripts/check-contracts.mjs` keeps the public JSON schemas coupled to the
   runtime safety constants, including the extractor request and Obsidian
   manifest boundaries. It is dependency-free and runs in CI, so changing an
@@ -375,6 +524,19 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   findings. Both workflows use immutable action commits, bounded execution,
   credential-free checkout, and explicit permissions; `check-release.mjs`
   rejects any future workflow that reintroduces mutable action references.
+- `RUNBOOK.md` turns release, health, graceful-drain, browser-backup, incident,
+  and rollback contracts into repeatable operator procedures. It intentionally
+  keeps secrets and user graph payloads out of commands and observability
+  examples.
+- `scripts/check-accessibility.mjs` audits the generated HTML release surface
+  without a third-party parser. It checks document language and titles,
+  heading progression, duplicate IDs, named controls/links/buttons, image
+  alternative text, and accessible image roles; its tamper fixture runs in the
+  standard smoke suite.
+- `scripts/check-performance.mjs` keeps the uncompressed critical browser shell
+  below a 1 MB budget, with a separate 768 KB JavaScript budget and smaller
+  HTML/CSS limits. The budget is intentionally measured over the browser's
+  bounded source assets, not an optimistic compressed-size estimate.
 - `scripts/public-origin.mjs` centralizes optional deployment-origin
   normalization and fail-closed validation. A non-empty invalid origin stops
   both Node startup and Pages publication instead of silently dropping
@@ -462,6 +624,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   an unbounded read or bypassing the response budget.
   Response-reader cancellation is non-blocking as well, so an ignored stream
   cancel cannot extend the worker's bounded network fallback.
+  Responses discarded in favor of a cached shell or offline index are canceled
+  before the fallback is returned, so transient failures do not retain unread
+  network bodies.
   Shell installation uses bounded parallel precaching rather than an
   unbounded fan-out or unnecessarily slow serial asset fetch.
   Cross-tab stale graph repair also uses optimistic version and fingerprint
@@ -502,8 +667,13 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
    portable concept labels or relation endpoint labels, so workspace-specific
    IDs cannot preserve contradictory learning hints as separate examples.
    Source metadata review has a one-click browser path that records the current
-   review timestamp as an undoable manual revision; source quality remains an
-   explicit human choice rather than being inferred from that timestamp.
+   review timestamp as an undoable manual revision; repeated same-day reviews
+   are idempotent, and future-dated imported timestamps are repaired rather
+   than trusted. Source quality remains an explicit human choice rather than
+   being inferred from that timestamp.
+   The source inspector also rejects future review dates at the interactive
+   edit boundary, preventing ordinary users from creating chronology that the
+   health and learning gates would later distrust.
    The workbench can re-run every saved source through the current extractor
    and fresh reviewed guidance; successful source replacements accumulate in
    memory and commit once against the initial graph version and fingerprint,
@@ -574,8 +744,9 @@ Obsidian imports follow the same rule: a substantive label, alias, or decision
 change refreshes the item's review timestamp even when the exported note still
 contains the old timestamp, preventing a valid correction from being withheld
 as stale memory. Non-substantive imports apply review timestamps
-monotonically, so an older projection cannot undo a newer review; explicit
-clearing remains available.
+monotonically, so an older projection cannot undo a newer review; an empty
+imported timestamp also cannot erase trusted chronology. Explicit clearing
+remains available through the in-app review controls.
 Source title, URI, and quality edits use the same rule in both the workbench and
 Obsidian projections, so source-review coverage cannot become stale merely
 because the exported date was left unchanged.
@@ -630,7 +801,19 @@ because the content changed. It also invalidates review dates for retained
 concepts, relations, and their reusable learning entries that depended on the
 changed source, so the review queue can revalidate the new evidence basis. A
 replacement that duplicates another source is rejected before the old
-representation is touched.
+representation is touched. If a replacement has no source-linked concepts or
+relations while the old source did, the domain operation returns the original
+graph unchanged; intentionally clearing a source remains an explicit
+remove-source action rather than an extractor failure. Automatic saved-source
+rebuilds additionally preserve each previously represented category: a provider
+cannot erase every grounded concept or every grounded relation while retaining
+only the other category. Explicit interactive replacement remains able to prune
+a category when the user intentionally supplies a materially different source.
+The orchestration adapter repeats the category check after normalization, so an
+alternate replacement implementation cannot bypass the automatic rebuild
+invariant. Successful rebuilds also return bounded source identity and pruning
+counts so the workbench can explain semantic change without exporting source
+content.
 
 `diffGraphs()` compares normalized revisions using stable identities and emits
 compact summaries of documents, concepts, relations, reusable learning memory,
@@ -759,5 +942,23 @@ The test contract is intentionally dependency-free:
 npm test
 ```
 
-The same checks run across Node 18, 20, 22, and 24, build the container, verify
+`scripts/run-tests.mjs` discovers JavaScript source files for syntax checks and
+executes every `tests/*.mjs` regression test in an isolated child process.
+Generated bundles and dependency directories are excluded; new source and
+test files are included automatically, so this command is a behavioral gate
+rather than a syntax-only check.
+
+The same test command runs `scripts/check-release.mjs` on each supported
+runtime, so Node-version differences cannot bypass deployment-contract checks.
+
+The canonical `production:check` also runs `release:check` and
+`smoke:server`, coupling the behavioral suite to package-lock, release
+metadata, workflow permissions and pinning, public/offline asset parity, OCI
+provenance, and the real standalone server lifecycle.
+
+The same checks run across Node 22 and 24, build the container, verify
 readiness, and exercise static delivery and offline service-worker behavior.
+`npm run smoke:server` separately exercises the real standalone Node process,
+including its authenticated readiness boundary and SIGTERM lifecycle; the
+verification workflow calls this same command rather than maintaining a
+second shell-only implementation.

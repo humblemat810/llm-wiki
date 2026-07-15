@@ -1,0 +1,65 @@
+{
+  "format": "llm-field-notes/feedback@1",
+  "graphSchema": "llm-field-notes/graph@1",
+  "examples": [
+    {
+      "kind": "concept",
+      "id": "attention",
+      "label": "Attention",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "weighted-lookup",
+      "label": "Weighted lookup",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "positional-encoding",
+      "label": "Positional encoding",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "sequence",
+      "label": "sequence",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "relation",
+      "source": "positional-encoding",
+      "target": "sequence",
+      "sourceLabel": "Positional encoding",
+      "targetLabel": "sequence",
+      "label": "gives",
+      "status": "accepted",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "mixes-information",
+      "label": "mixes information",
+      "status": "rejected",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "information-across",
+      "label": "information across",
+      "status": "rejected",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    },
+    {
+      "kind": "concept",
+      "id": "across-tokens",
+      "label": "across tokens",
+      "status": "rejected",
+      "lastReviewedAt": "2026-07-14T00:00:00.000Z"
+    }
+  ]
+}

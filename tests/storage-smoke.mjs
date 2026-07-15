@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { IDB_OPERATION_TIMEOUT_MS, MAX_BROADCAST_VALUE_BYTES, MAX_BROADCAST_VALUE_CHARS, MAX_STORAGE_KEY_CHARS, PENDING_WRITES_KEY, createMemoryStorage, getBrowserStorage, isExternalStorageRemoval, isValidStorageValue } from "../storage-adapter.js";
+import { IDB_OPERATION_TIMEOUT_MS, MAX_BROADCAST_VALUE_BYTES, MAX_BROADCAST_VALUE_CHARS, MAX_STORAGE_KEY_CHARS, PENDING_WRITE_MARKER_PREFIX, PENDING_WRITES_KEY, createMemoryStorage, getBrowserStorage, isExternalStorageRemoval, isValidStorageValue } from "../storage-adapter.js";
 import { MAX_GRAPH_DOCUMENTS } from "../graph-core.js";
 import { MAX_HISTORY_CAPACITY, MAX_PERSISTED_JSON_BYTES, MAX_PERSISTED_JSON_CHARS, MAX_RECOVERY_JSON_CHARS, createGraphStore } from "../graph-store.js";
 
@@ -108,9 +108,11 @@ function createFakeIndexedDB(controlWrites = false) {
   const values = new Map();
   const pendingCompletions = [];
   let initialized = false;
+  let closeCount = 0;
   const database = {
     objectStoreNames: { contains: (name) => name === "values" },
     createObjectStore: () => {},
+    close: () => { closeCount += 1; },
     transaction: () => {
       const transaction = { error: null, oncomplete: null, onerror: null, onabort: null };
       transaction.objectStore = () => ({
@@ -122,6 +124,12 @@ function createFakeIndexedDB(controlWrites = false) {
         },
         delete(key) {
           values.delete(key);
+          const complete = () => queueMicrotask(() => transaction.oncomplete?.());
+          if (controlWrites) pendingCompletions.push(complete);
+          else complete();
+        },
+        clear() {
+          values.clear();
           const complete = () => queueMicrotask(() => transaction.oncomplete?.());
           if (controlWrites) pendingCompletions.push(complete);
           else complete();
@@ -160,8 +168,10 @@ function createFakeIndexedDB(controlWrites = false) {
       return request;
     },
     seed: (key, value) => values.set(key, value),
+    has: (key) => values.has(key),
     releaseNextWrite: () => pendingCompletions.shift()?.(),
-    pendingWriteCount: () => pendingCompletions.length
+    pendingWriteCount: () => pendingCompletions.length,
+    closeCalls: () => closeCount
   };
 }
 
@@ -253,6 +263,33 @@ fallbackPersistent.storage.setItem("llm-field-notes-knowledge-graph", "local-gra
 assert.equal(fallbackBroadcastMessages[0].lastMessage.value, "local-graph", "localStorage fallback should publish local writes to other tabs");
 unsubscribeFallback();
 fallbackStorageChange = null;
+let fallbackStorageListenerRemoved = 0;
+let fallbackChannelListenerRemoved = 0;
+let fallbackChannelClosed = 0;
+class DisposableFallbackBroadcastChannel {
+  addEventListener() {}
+  removeEventListener() {
+    fallbackChannelListenerRemoved += 1;
+  }
+  close() {
+    fallbackChannelClosed += 1;
+  }
+  postMessage() {}
+}
+const disposableFallback = getBrowserStorage({
+  localStorage: createLocalStorage(),
+  addEventListener: () => {},
+  removeEventListener: () => {
+    fallbackStorageListenerRemoved += 1;
+  },
+  BroadcastChannel: DisposableFallbackBroadcastChannel
+});
+await disposableFallback.ready;
+await disposableFallback.dispose();
+await disposableFallback.dispose();
+assert.equal(fallbackStorageListenerRemoved, 1, "storage disposal should remove the native storage listener exactly once");
+assert.equal(fallbackChannelListenerRemoved, 1, "storage disposal should remove the BroadcastChannel listener exactly once");
+assert.equal(fallbackChannelClosed, 1, "storage disposal should close its BroadcastChannel exactly once");
 fallbackStorageEventHandler({
   key: "llm-field-notes-progress",
   newValue: "[1]",
@@ -268,14 +305,23 @@ fallbackClearPersistent.storage.clear();
 assert.equal(fallbackClearLocalStorage.getItem("llm-field-notes-progress"), null, "fallback clear should remove namespaced app state");
 assert.equal(fallbackClearLocalStorage.getItem("unrelated-site-state"), "preserve-me", "fallback clear must preserve unrelated origin storage");
 const durableClearDb = createFakeIndexedDB();
+durableClearDb.seed("llm-field-notes-hidden-invalid", { forged: true });
+const durableClearOverlongKey = `llm-field-notes-${"x".repeat(MAX_STORAGE_KEY_CHARS)}`;
+const durableClearLocalStorage = createLocalStorage({
+  "llm-field-notes-corrupt": "x".repeat(MAX_BROADCAST_VALUE_CHARS + 1),
+  [durableClearOverlongKey]: "overlong-key"
+});
 const durableClearPersistent = getBrowserStorage({
-  localStorage: createLocalStorage({ [PENDING_WRITES_KEY]: JSON.stringify({ "llm-field-notes-knowledge-graph": "stale-token" }) }),
+  localStorage: durableClearLocalStorage,
   indexedDB: durableClearDb
 });
 await durableClearPersistent.ready;
 durableClearPersistent.storage.clear();
 await durableClearPersistent.flush();
 assert.equal(durableClearPersistent.storage.getItem("llm-field-notes-knowledge-graph"), null, "durable clear should remove pending namespace keys even when their values are not hydrated");
+assert.equal(durableClearLocalStorage.getItem("llm-field-notes-corrupt"), null, "durable clear should remove oversized namespaced localStorage remnants");
+assert.equal(durableClearLocalStorage.getItem(durableClearOverlongKey), null, "durable clear should remove overlong namespaced localStorage keys");
+assert.equal(durableClearDb.has("llm-field-notes-hidden-invalid"), false, "durable clear should purge malformed IndexedDB namespace entries");
 const duplicatePendingLocalStorage = createLocalStorage({
   "llm-field-notes-knowledge-graph": "newer-local-mirror",
   [PENDING_WRITES_KEY]: '{"llm-field-notes-knowledge-graph":"older","llm-field-notes-knowledge-graph":"newer"}'
@@ -303,6 +349,23 @@ malformedTokenDb.seed("llm-field-notes-knowledge-graph", "stale-token-indexeddb-
 const malformedTokenStorage = getBrowserStorage({ localStorage: malformedTokenLocalStorage, indexedDB: malformedTokenDb });
 await malformedTokenStorage.ready;
 assert.equal(malformedTokenStorage.storage.getItem("llm-field-notes-knowledge-graph"), "newest-local-token-mirror", "invalid pending-write tokens should preserve the local mirror instead of selecting stale IndexedDB state");
+const oversizedMarkerLocalStorage = createLocalStorage({
+  "llm-field-notes-knowledge-graph": "bounded-marker-local"
+});
+for (let index = 0; index <= 100; index += 1) {
+  oversizedMarkerLocalStorage.setItem(
+    `${PENDING_WRITE_MARKER_PREFIX}llm-field-notes-marker-${index}`,
+    `marker-${index}`
+  );
+}
+const oversizedMarkerDb = createFakeIndexedDB();
+oversizedMarkerDb.seed("llm-field-notes-knowledge-graph", "bounded-marker-stale");
+const oversizedMarkerStorage = getBrowserStorage({ localStorage: oversizedMarkerLocalStorage, indexedDB: oversizedMarkerDb });
+await oversizedMarkerStorage.ready;
+assert.equal(oversizedMarkerStorage.storageFailure, true, "too many per-key pending markers should disclose degraded durability");
+assert.equal(oversizedMarkerStorage.storage.getItem("llm-field-notes-knowledge-graph"), "bounded-marker-local", "too many per-key pending markers should preserve the synchronous mirror");
+oversizedMarkerStorage.storage.setItem("llm-field-notes-marker-repair", "ordinary-write");
+assert.equal(oversizedMarkerStorage.storageFailure, true, "ordinary writes must not hide unresolved malformed marker metadata");
 
 const unavailable = getBrowserStorage({
   get localStorage() {
@@ -351,6 +414,12 @@ assert.equal(migratedAlongsideDurable.storage.getItem("llm-field-notes-progress"
 const migratedProgressReload = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: fakeIndexedDB });
 await migratedProgressReload.ready;
 assert.equal(migratedProgressReload.storage.getItem("llm-field-notes-progress"), "[1,2,3]", "preserved local keys should be written to IndexedDB");
+const disposableDurableDb = createFakeIndexedDB();
+const disposableDurable = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: disposableDurableDb });
+await disposableDurable.ready;
+await disposableDurable.dispose();
+await disposableDurable.dispose();
+assert.equal(disposableDurableDb.closeCalls(), 1, "durable storage disposal should close its IndexedDB connection exactly once");
 const removedBeforeHydration = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: fakeIndexedDB });
 removedBeforeHydration.storage.removeItem("llm-field-notes-progress");
 await removedBeforeHydration.ready;
@@ -415,6 +484,48 @@ await interruptedWrite.flush();
 const interruptedReload = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: fakeIndexedDB });
 await interruptedReload.ready;
 assert.equal(interruptedReload.storage.getItem("llm-field-notes-knowledge-graph"), "interrupted-write", "a recovered interrupted write should become durable after hydration");
+const staleDurableGraph = JSON.stringify({
+  schema: "llm-field-notes/graph@1",
+  version: 1,
+  committedAt: "2026-01-01T00:00:00.000Z",
+  documents: [],
+  nodes: [{ id: "durable-old", label: "Durable old" }],
+  edges: [],
+  revisions: []
+});
+const newerLocalGraph = JSON.stringify({
+  schema: "llm-field-notes/graph@1",
+  version: 2,
+  committedAt: "2026-01-02T00:00:00.000Z",
+  documents: [],
+  nodes: [{ id: "local-new", label: "Local new" }],
+  edges: [],
+  revisions: []
+});
+const freshnessDatabase = createFakeIndexedDB();
+freshnessDatabase.seed("llm-field-notes-knowledge-graph", staleDurableGraph);
+freshnessDatabase.seed("llm-field-notes-knowledge-graph-history", "[]");
+const freshnessStorage = getBrowserStorage({
+  localStorage: createLocalStorage({
+    "llm-field-notes-knowledge-graph": newerLocalGraph,
+    "llm-field-notes-knowledge-graph-history": "[]"
+  }),
+  indexedDB: freshnessDatabase
+});
+await freshnessStorage.ready;
+assert.equal(
+  freshnessStorage.storage.getItem("llm-field-notes-knowledge-graph"),
+  newerLocalGraph,
+  "hydration should preserve a newer synchronous graph mirror over stale durable state"
+);
+await freshnessStorage.flush();
+const freshnessReload = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: freshnessDatabase });
+await freshnessReload.ready;
+assert.equal(
+  freshnessReload.storage.getItem("llm-field-notes-knowledge-graph"),
+  newerLocalGraph,
+  "hydration should reconcile a newer synchronous graph mirror back into durable storage"
+);
 const preHydrationFlushDb = createFakeIndexedDB();
 const preHydrationFlush = getBrowserStorage({
   localStorage: createLocalStorage(),
@@ -428,6 +539,23 @@ const preHydrationFlushReload = getBrowserStorage({
 });
 await preHydrationFlushReload.ready;
 assert.equal(preHydrationFlushReload.storage.getItem("llm-field-notes-knowledge-graph"), "flushed-before-ready", "flush should wait for hydration before resolving");
+const preHydrationClearDb = createFakeIndexedDB();
+preHydrationClearDb.seed("llm-field-notes-stale", "stale-before-clear");
+const preHydrationClear = getBrowserStorage({
+  localStorage: createLocalStorage(),
+  indexedDB: preHydrationClearDb
+});
+preHydrationClear.storage.clear();
+preHydrationClear.storage.setItem("llm-field-notes-after-clear", "new-after-clear");
+await preHydrationClear.ready;
+await preHydrationClear.flush();
+const preHydrationClearReload = getBrowserStorage({
+  localStorage: createLocalStorage(),
+  indexedDB: preHydrationClearDb
+});
+await preHydrationClearReload.ready;
+assert.equal(preHydrationClearReload.storage.getItem("llm-field-notes-stale"), null, "pre-hydration clear should purge stale durable values");
+assert.equal(preHydrationClearReload.storage.getItem("llm-field-notes-after-clear"), "new-after-clear", "writes after a pre-hydration clear should survive");
 const controlledIndexedDB = createFakeIndexedDB(true);
 const controlledLocalStorage = createLocalStorage();
 const rapidWrites = getBrowserStorage({ localStorage: controlledLocalStorage, indexedDB: controlledIndexedDB });
@@ -436,13 +564,20 @@ rapidWrites.storage.setItem("llm-field-notes-knowledge-graph", "first-write");
 rapidWrites.storage.setItem("llm-field-notes-knowledge-graph", "second-write");
 for (let attempt = 0; attempt < 20 && controlledIndexedDB.pendingWriteCount() === 0; attempt += 1) await Promise.resolve();
 assert.equal(controlledIndexedDB.pendingWriteCount(), 1, "the first rapid write should reach the durable queue");
+let rapidFlushSettled = false;
+const rapidFlush = rapidWrites.flush().then(() => {
+  rapidFlushSettled = true;
+});
+await Promise.resolve();
+assert.equal(rapidFlushSettled, false, "flush should remain pending while an IndexedDB write is blocked");
 controlledIndexedDB.releaseNextWrite();
 for (let attempt = 0; attempt < 20 && controlledIndexedDB.pendingWriteCount() === 0; attempt += 1) await Promise.resolve();
 const pendingAfterOlderCommit = JSON.parse(controlledLocalStorage.getItem(PENDING_WRITES_KEY) || "{}");
 assert(pendingAfterOlderCommit["llm-field-notes-knowledge-graph"], "an older commit must not clear the newer pending-write generation");
 assert.equal(controlledIndexedDB.pendingWriteCount(), 1, "the second rapid write should remain queued after the first commit");
 controlledIndexedDB.releaseNextWrite();
-await rapidWrites.flush();
+await rapidFlush;
+assert.equal(rapidFlushSettled, true, "flush should resolve after all queued IndexedDB writes commit");
 assert.equal(controlledLocalStorage.getItem(PENDING_WRITES_KEY), null, "the newest successful commit should clear its pending-write generation");
 const rapidReload = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: controlledIndexedDB });
 await rapidReload.ready;
@@ -501,6 +636,42 @@ for (let attempt = 0; attempt < 100; attempt += 1) {
 }
 await Promise.all([crossTabWriterA.flush(), crossTabWriterB.flush()]);
 assert.equal(sharedPendingStorage.getItem(PENDING_WRITES_KEY), null, "cross-tab pending markers should clear only after all durable generations settle");
+const markerRaceStorage = createLocalStorage();
+const markerRaceDb = createFakeIndexedDB(true);
+const markerRaceWriterA = getBrowserStorage({ localStorage: markerRaceStorage, indexedDB: markerRaceDb });
+const markerRaceWriterB = getBrowserStorage({ localStorage: markerRaceStorage, indexedDB: markerRaceDb });
+await Promise.all([markerRaceWriterA.ready, markerRaceWriterB.ready]);
+markerRaceWriterA.storage.setItem("llm-field-notes-race-a", "a");
+markerRaceWriterB.storage.setItem("llm-field-notes-race-b", "b");
+const markerKeys = [];
+for (let index = 0; index < markerRaceStorage.length; index += 1) {
+  const key = markerRaceStorage.key(index);
+  if (key?.startsWith(PENDING_WRITE_MARKER_PREFIX)) markerKeys.push(key);
+}
+assert.equal(markerKeys.length, 2, "cross-tab writes should use independent per-key pending markers");
+assert(markerKeys.every((key) => markerRaceStorage.getItem(key)), "per-key pending markers should retain both concurrent generations");
+for (let attempt = 0; attempt < 100; attempt += 1) {
+  markerRaceDb.releaseNextWrite();
+  await Promise.resolve();
+}
+await Promise.all([markerRaceWriterA.flush(), markerRaceWriterB.flush()]);
+assert.equal(markerRaceStorage.getItem(PENDING_WRITES_KEY), null, "aggregate pending markers should clear after per-key generations settle");
+assert.equal(markerRaceStorage.length, 2, "per-key pending markers should be removed after successful durable commits");
+const entropyOwners = [
+  { localStorage: createLocalStorage(), indexedDB: createFakeIndexedDB(true), crypto: { getRandomValues(values) { values.fill(0xabcdef01); return values; } } },
+  { localStorage: createLocalStorage(), indexedDB: createFakeIndexedDB(true), crypto: { getRandomValues(values) { values.fill(0xabcdef02); return values; } } }
+];
+const entropyWriters = entropyOwners.map((owner) => getBrowserStorage(owner));
+await Promise.all(entropyWriters.map((writer) => writer.ready));
+entropyWriters[0].storage.setItem("llm-field-notes-entropy-a", "a");
+entropyWriters[1].storage.setItem("llm-field-notes-entropy-b", "b");
+const entropyTokens = entropyOwners.map((owner) => JSON.parse(owner.localStorage.getItem(PENDING_WRITES_KEY) || "{}"));
+assert.notEqual(
+  entropyTokens[0]["llm-field-notes-entropy-a"],
+  entropyTokens[1]["llm-field-notes-entropy-b"],
+  "durable write generations should use getRandomValues when randomUUID is unavailable"
+);
+await Promise.all(entropyWriters.map((writer) => writer.flush()));
 const failingOwner = {
   localStorage: createLocalStorage(),
   indexedDB: {

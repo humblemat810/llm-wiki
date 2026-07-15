@@ -6,6 +6,10 @@ export const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_MAX_RETRIES = 1;
 export const DEFAULT_RETRY_DELAY_MS = 250;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+export const retryBackoffDelay = (retryDelay, attemptNumber) => Math.min(
+  5000,
+  Math.max(0, Number(retryDelay) || 0) * (2 ** Math.max(0, Math.floor(Number(attemptNumber) || 0) - 1))
+);
 const FEEDBACK_HINT_KEYS = new Set([
   "kind",
   "id",
@@ -126,6 +130,10 @@ function responseLengthMismatch() {
   return new ExtractorAdapterError("Extractor response byte length does not match Content-Length.", { code: "INVALID_RESPONSE" });
 }
 
+function invalidResponseLength() {
+  return new ExtractorAdapterError("Extractor response Content-Length is invalid.", { code: "INVALID_RESPONSE" });
+}
+
 function asByteView(value) {
   if (!ArrayBuffer.isView(value)
     || !Number.isSafeInteger(value.byteLength)
@@ -160,7 +168,14 @@ async function readBoundedResponse(response, signal) {
   const declaredLength = /^\d+$/.test(normalizedDeclaredHeader)
     ? Number(normalizedDeclaredHeader)
     : Number.NaN;
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) throw responseTooLarge();
+  if (normalizedDeclaredHeader && (!Number.isSafeInteger(declaredLength))) {
+    await cancelResponseBody(response);
+    throw invalidResponseLength();
+  }
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    await cancelResponseBody(response);
+    throw responseTooLarge();
+  }
   if (response.body?.getReader) {
     const reader = response.body.getReader();
     const chunks = [];
@@ -351,7 +366,7 @@ export function createRemoteExtractor({
         reject(Object.assign(new Error("Extractor request timed out."), { name: "AbortError" }));
       }, requestTimeoutMs);
     });
-    const waitBeforeRetry = (response) => new Promise((resolve, reject) => {
+    const waitBeforeRetry = (response, attemptNumber) => new Promise((resolve, reject) => {
       const retryAfterHeader = response?.headers?.get?.("retry-after");
       const retryAfterSeconds = typeof retryAfterHeader === "string" ? Number(retryAfterHeader) : Number.NaN;
       const retryAfterDate = typeof retryAfterHeader === "string" ? Date.parse(retryAfterHeader) : Number.NaN;
@@ -360,9 +375,10 @@ export function createRemoteExtractor({
         : Number.isFinite(retryAfterDate)
           ? Math.max(0, retryAfterDate - Date.now())
           : Number.NaN;
+      const exponentialDelay = retryBackoffDelay(retryDelay, attemptNumber);
       const delay = Number.isFinite(retryAfterMs)
         ? Math.min(5000, retryAfterMs)
-        : retryDelay;
+        : exponentialDelay;
       let timer;
       const abort = () => {
         clearTimeout(timer);
@@ -416,13 +432,13 @@ export function createRemoteExtractor({
         } catch (error) {
           if (signal?.aborted || controller.signal.aborted || attempt >= retryCount || error?.code === "INVALID_RESPONSE") throw error;
           attempt += 1;
-          await waitBeforeRetry();
+          await waitBeforeRetry(null, attempt);
           continue;
         }
         if (response.ok || !RETRYABLE_STATUSES.has(Number(response.status)) || attempt >= retryCount) break;
         await cancelResponseBody(response);
         attempt += 1;
-        await waitBeforeRetry(response);
+        await waitBeforeRetry(response, attempt);
       }
       if (signal?.aborted) {
         await cancelResponseBody(response);

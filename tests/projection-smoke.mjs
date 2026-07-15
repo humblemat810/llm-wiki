@@ -1,8 +1,26 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import vm from "node:vm";
 import { defaultGraph, fingerprintBackup, GRAPH_SCHEMA, MAX_DOCUMENT_TITLE_CHARS, MAX_GRAPH_VERSION, normalizeGraph, VAULT_FORMAT } from "../graph-core.js";
 import { buildJsonLd } from "../jsonld-projection.js";
 import { MAX_FEEDBACK_NOTE_CHARS, MAX_VAULT_MANIFEST_CHARS, MAX_ZIP_FILES, applyObsidianFeedback, looksLikeObsidianFeedback, parseObsidianFeedback, parseObsidianVault, readStoredZip } from "../projection-adapter.js";
 import { MAX_GRAPH_DOCUMENTS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES } from "../graph-core.js";
+
+const appSource = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const projectionPathsStart = appSource.indexOf("function safeFileName(");
+const projectionPathsEnd = appSource.indexOf("\nfunction buildVaultFiles", projectionPathsStart);
+assert(projectionPathsStart >= 0 && projectionPathsEnd > projectionPathsStart, "projection path helpers should remain discoverable");
+const buildProjectionPaths = vm.runInNewContext(`(() => {
+  const slugify = ${String((value) => String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-"))};
+  ${appSource.slice(projectionPathsStart, projectionPathsEnd)}
+  return buildProjectionPaths;
+})()`);
+const clonedEdgePath = buildProjectionPaths({
+  nodes: [{ id: "attention" }],
+  documents: [],
+  edges: [{ id: "attention--context--uses", source: "attention", target: "context" }]
+}).relations.get("attention--context--uses");
+assert.equal(clonedEdgePath, "Relations/attention-context-uses.md", "relation projection paths should remain addressable by stable relation ID");
 
 function crc32(bytes) {
   let crc = 0xffffffff;
@@ -185,6 +203,8 @@ assert.equal(looksLikeObsidianFeedback("# ordinary note"), false, "ordinary Mark
 assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: __proto__\nstatus: accepted\n---\n\n# Safe fields`).id, "__proto__", "feedback fields should not inherit object prototype behavior");
 assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nstatus: accepted\nstatus: rejected\n---\n\n# Duplicate status`), null, "duplicate frontmatter keys should be rejected instead of silently taking the last value");
 assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nstatus: unknown\n---\n\n# Invalid status`), null, "invalid statuses should be rejected at the projection boundary");
+assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nlabel: "unterminated\n---\n\n# Malformed label`), null, "malformed JSON-shaped frontmatter values should fail closed instead of becoming plain strings");
+assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nlabel: 'unterminated\n---\n\n# Malformed single-quoted label`), null, "malformed single-quoted frontmatter values should fail closed instead of becoming plain strings");
 assert.equal(parseObsidianFeedback(`---\ntype: source\nid: doc-source\nquality: invalid\n---\n\n# Invalid quality`), null, "invalid source qualities should be rejected at the projection boundary");
 assert.equal(parseObsidianFeedback(`---\ntype: source\nid: doc-source\nlast_reviewed: not-a-date\n---\n\n# Invalid review date`), null, "invalid review dates should be rejected at the projection boundary");
 assert.equal(parseObsidianFeedback(`---\ntype: concept\nid: attention\nstatus: accepted\nunsupported_field: ignored\n---\n\n# Unknown field`), null, "unknown Obsidian frontmatter fields should fail closed instead of being silently ignored");
@@ -239,6 +259,48 @@ const futureReviewProjection = applyObsidianFeedback(normalizeGraph({
   lastReviewedAt: "2099-01-01T00:00:00.000Z"
 }]);
 assert.equal(futureReviewProjection.graph.nodes[0].lastReviewedAt, "2026-01-01T00:00:00.000Z", "future Obsidian timestamps must not overwrite trusted current review metadata");
+const futureInitialReviewProjection = applyObsidianFeedback(normalizeGraph({
+  ...defaultGraph(),
+  nodes: [{ id: "attention", label: "Attention", status: "inferred" }]
+}), [{
+  type: "concept",
+  id: "attention",
+  lastReviewedAt: "2099-01-01T00:00:00.000Z"
+}]);
+assert.equal(futureInitialReviewProjection.graph.nodes[0].lastReviewedAt, null, "future Obsidian timestamps must not create review history for an unreviewed concept");
+const clearedReviewProjection = applyObsidianFeedback(normalizeGraph({
+  ...defaultGraph(),
+  nodes: [{ id: "attention", label: "Attention", status: "accepted", lastReviewedAt: "2026-01-01T00:00:00.000Z" }]
+}), [{
+  type: "concept",
+  id: "attention",
+  status: "accepted",
+  hasLastReviewedAt: true,
+  lastReviewedAt: null
+}]);
+assert.equal(clearedReviewProjection.graph.nodes[0].lastReviewedAt, "2026-01-01T00:00:00.000Z", "empty Obsidian review timestamps must not erase a newer trusted review");
+const futureInitialSourceProjection = applyObsidianFeedback(normalizeGraph({
+  ...defaultGraph(),
+  documents: [{ id: "doc-source", title: "Source", text: "text", quality: "unknown" }]
+}), [{
+  type: "source",
+  id: "doc-source",
+  lastReviewedAt: "2099-01-01T00:00:00.000Z",
+  hasLastReviewedAt: true
+}]);
+assert.equal(futureInitialSourceProjection.graph.documents[0].lastReviewedAt, null, "future Obsidian timestamps must not create review history for an unreviewed source");
+const correctedFutureSourceProjection = applyObsidianFeedback(normalizeGraph({
+  ...defaultGraph(),
+  documents: [{ id: "doc-source", title: "Source", text: "text", quality: "unknown" }]
+}), [{
+  type: "source",
+  id: "doc-source",
+  quality: "primary",
+  lastReviewedAt: "2099-01-01T00:00:00.000Z",
+  hasLastReviewedAt: true
+}]);
+assert.equal(correctedFutureSourceProjection.graph.documents[0].quality, "primary");
+assert(Date.parse(correctedFutureSourceProjection.graph.documents[0].lastReviewedAt) > Date.now() - 5000, "substantive source edits should receive a fresh review timestamp when an imported timestamp is untrusted");
 const invalidDirectFeedback = applyObsidianFeedback(normalizeGraph({
   ...defaultGraph(),
   nodes: [{ id: "attention", label: "Attention", status: "inferred" }]
@@ -274,18 +336,20 @@ assert.equal(correctedNode.label, "Corrected attention label", "Obsidian label c
 assert(Date.parse(correctedNode.lastReviewedAt) > Date.now() - 5000, "a substantive Obsidian correction should refresh review time instead of preserving an old exported timestamp");
 assert(Date.parse(staleCorrection.graph.learning.examples[0].lastReviewedAt) > Date.now() - 5000, "refreshed Obsidian corrections should keep reusable learning memory fresh");
 const vault = parseObsidianVault(storedZip([
-  { name: "vault-manifest.json", text: JSON.stringify({ format: VAULT_FORMAT, graphSchema: GRAPH_SCHEMA, graphVersion: 1, graphFingerprint: "fnv64-0123456789abcdef-42", appVersion: "0.1.0", redacted: false, generatedAt: "2025-01-01T00:00:00.000Z" }) },
+  { name: "vault-manifest.json", text: JSON.stringify({ format: VAULT_FORMAT, graphSchema: GRAPH_SCHEMA, graphVersion: 1, graphFingerprint: "fnv64-0123456789abcdef-42", appVersion: "0.1.0", redacted: false, generatedAt: "2025-01-01T00:00:00.000Z", learning: { requested: 1, included: 1, unavailable: [], complete: true } }) },
   { name: "Concepts/attention.md", text: conceptMarkdown },
   { name: "Relations/attention--context--uses.md", text: relationMarkdown },
   { name: "Sources/doc-source.md", text: `---\ntype: source\nid: doc-source\nquality: primary\n---\n\n# Reviewed source` },
+  { name: "Learning/tokens.md", text: "# Tokens" },
   { name: "_index.md", text: "# Knowledge Graph" }
 ]));
-assert.equal(vault.files.length, 5);
+assert.equal(vault.files.length, 6);
 assert.equal(vault.feedbacks.length, 3);
 assert.equal(vault.feedbackFileCount, 3);
 assert.deepEqual(vault.invalidFeedbackFiles, []);
 assert.equal(vault.manifest.graphVersion, 1, "vault imports should expose valid manifest identity");
 assert.equal(vault.manifest.appVersion, "0.1.0", "vault imports should expose optional producer-version metadata");
+assert.deepEqual(vault.manifest.learning, { requested: 1, included: 1, unavailable: [], complete: true }, "vault imports should expose complete learning-projection status");
 assert.equal(vault.manifestError, null);
 assert.equal(vault.graphError, null);
 const embeddedGraph = defaultGraph();
@@ -297,6 +361,11 @@ const validEmbeddedVault = parseObsidianVault(storedZip([
 ]));
 assert.equal(validEmbeddedVault.graphError, null, "vault parsing should verify a matching embedded graph and manifest");
 assert.equal(validEmbeddedVault.jsonLdError, null, "vault parsing should verify a matching JSON-LD projection and manifest");
+const unanchoredJsonLdVault = parseObsidianVault(storedZip([
+  { name: "vault-manifest.json", text: JSON.stringify({ format: VAULT_FORMAT, graphSchema: GRAPH_SCHEMA, graphVersion: embeddedGraph.version, graphFingerprint: embeddedGraphFingerprint, redacted: false, generatedAt: "2025-01-01T00:00:00.000Z" }) },
+  { name: "graph.jsonld", text: JSON.stringify(buildJsonLd(embeddedGraph)) }
+]));
+assert.equal(unanchoredJsonLdVault.jsonLdError, "Embedded graph JSON is missing; JSON-LD cannot be verified against the authoritative graph.", "vault imports should disclose JSON-LD projections without an authoritative embedded graph");
 const currentConceptMarkdown = conceptMarkdown.replace(
   "id: attention",
   `id: attention\ngraph_version: ${embeddedGraph.version}\ngraph_fingerprint: ${embeddedGraphFingerprint}`
@@ -370,6 +439,71 @@ assert.deepEqual(invalidFeedbackVault.invalidFeedbackFiles, ["Relations/broken.m
 const invalidManifestVault = parseObsidianVault(storedZip([{ name: "vault-manifest.json", text: "{}" }]));
 assert.equal(invalidManifestVault.manifest, null);
 assert.equal(invalidManifestVault.manifestError, "Vault manifest metadata is invalid.", "invalid vault identity should be surfaced without blocking parsing");
+const unknownManifestFieldVault = parseObsidianVault(storedZip([{
+  name: "vault-manifest.json",
+  text: JSON.stringify({
+    format: VAULT_FORMAT,
+    graphSchema: GRAPH_SCHEMA,
+    graphVersion: 0,
+    graphFingerprint: "fnv64-0123456789abcdef-42",
+    redacted: false,
+    generatedAt: "2025-01-01T00:00:00.000Z",
+    unsupported: "must be rejected"
+  })
+}]));
+assert.equal(unknownManifestFieldVault.manifestError, "Vault manifest metadata is invalid.", "vault imports should reject manifest fields outside the closed schema");
+const unknownLearningFieldVault = parseObsidianVault(storedZip([{
+  name: "vault-manifest.json",
+  text: JSON.stringify({
+    format: VAULT_FORMAT,
+    graphSchema: GRAPH_SCHEMA,
+    graphVersion: 0,
+    graphFingerprint: "fnv64-0123456789abcdef-42",
+    redacted: false,
+    generatedAt: "2025-01-01T00:00:00.000Z",
+    learning: { requested: 0, included: 0, unavailable: [], complete: true, unsupported: true }
+  })
+}]));
+assert.equal(unknownLearningFieldVault.manifestError, "Vault manifest metadata is invalid.", "vault imports should reject unsupported nested learning metadata");
+const incompleteLearningManifestVault = parseObsidianVault(storedZip([{
+  name: "vault-manifest.json",
+  text: JSON.stringify({
+    format: VAULT_FORMAT,
+    graphSchema: GRAPH_SCHEMA,
+    graphVersion: 0,
+    graphFingerprint: "fnv64-0123456789abcdef-42",
+    redacted: false,
+    generatedAt: "2025-01-01T00:00:00.000Z",
+    learning: { requested: 1, included: 0, unavailable: ["tokens"], complete: false }
+  })
+}]));
+assert.equal(incompleteLearningManifestVault.manifestError, null, "vault imports should accept and expose bounded incomplete learning status");
+const mismatchedLearningManifestVault = parseObsidianVault(storedZip([{
+  name: "vault-manifest.json",
+  text: JSON.stringify({
+    format: VAULT_FORMAT,
+    graphSchema: GRAPH_SCHEMA,
+    graphVersion: 0,
+    graphFingerprint: "fnv64-0123456789abcdef-42",
+    redacted: false,
+    generatedAt: "2025-01-01T00:00:00.000Z",
+    learning: { requested: 1, included: 1, unavailable: [], complete: true }
+  })
+}]));
+assert.equal(mismatchedLearningManifestVault.manifestError, "Vault learning-projection status does not match its files.", "vault imports should reject learning completeness claims that do not match archive contents");
+const contradictoryLearningManifestVault = parseObsidianVault(storedZip([{
+  name: "vault-manifest.json",
+  text: JSON.stringify({
+    format: VAULT_FORMAT,
+    graphSchema: GRAPH_SCHEMA,
+    graphVersion: 0,
+    graphFingerprint: "fnv64-0123456789abcdef-42",
+    redacted: false,
+    generatedAt: "2025-01-01T00:00:00.000Z",
+    learning: { requested: 13, included: 13, unavailable: ["tokens"], complete: true }
+  })
+}]));
+assert.equal(contradictoryLearningManifestVault.manifestError, "Vault manifest metadata is invalid.", "vault imports should reject contradictory learning completeness metadata");
 const negativeManifestVault = parseObsidianVault(storedZip([{ name: "vault-manifest.json", text: JSON.stringify({ format: VAULT_FORMAT, graphSchema: GRAPH_SCHEMA, graphVersion: -1, graphFingerprint: "fnv64-0123456789abcdef-42", redacted: false, generatedAt: "2025-01-01T00:00:00.000Z" }) }]));
 assert.equal(negativeManifestVault.manifestError, "Vault manifest metadata is invalid.", "negative vault versions should be rejected");
 const oversizedManifestVault = parseObsidianVault(storedZip([{ name: "vault-manifest.json", text: "x".repeat(MAX_VAULT_MANIFEST_CHARS + 1) }]));
@@ -407,6 +541,24 @@ const overlappingSize = overlappingCentralOffset - overlappingDataStart + 1;
 overlappingView.setUint32(overlappingCentralOffset + 20, overlappingSize, true);
 overlappingView.setUint32(overlappingCentralOffset + 24, overlappingSize, true);
 assert.throws(() => readStoredZip(overlappingZip), /overlapping its central directory/, "ZIP imports should reject file data ranges that overlap the central directory");
+const aliasedZip = storedZip([
+  { name: "first.md", text: "a" },
+  { name: "second.md", text: "b" }
+]);
+const aliasedView = new DataView(aliasedZip.buffer);
+const aliasedEnd = aliasedZip.length - 22;
+const aliasedCentralOffset = aliasedView.getUint32(aliasedEnd + 16, true);
+const firstCentralOffset = aliasedCentralOffset;
+const secondCentralOffset = firstCentralOffset + 46 + new TextEncoder().encode("first.md").length;
+const firstDataStart = 30 + new TextEncoder().encode("first.md").length;
+const secondLocalOffset = aliasedView.getUint32(secondCentralOffset + 42, true);
+const secondDataStart = secondLocalOffset + 30 + new TextEncoder().encode("second.md").length;
+const aliasedSize = secondDataStart + 1 - firstDataStart;
+const aliasedBytes = aliasedZip.slice(firstDataStart, secondDataStart + 1);
+aliasedView.setUint32(firstCentralOffset + 16, crc32(aliasedBytes), true);
+aliasedView.setUint32(firstCentralOffset + 20, aliasedSize, true);
+aliasedView.setUint32(firstCentralOffset + 24, aliasedSize, true);
+assert.throws(() => readStoredZip(aliasedZip), /file data overlapping/, "ZIP imports should reject aliased file data ranges");
 
 const graph = {
   ...defaultGraph(),
@@ -468,6 +620,23 @@ const mismatchedRelationResult = applyObsidianFeedback(graph, [parseObsidianFeed
   .replace("source: attention", "source: unrelated")
   .replace("target: context", "target: concept"))]);
 assert.equal(mismatchedRelationResult.skipped, 1, "Obsidian relation feedback should still reject unrelated endpoint pairs");
+const ambiguousProjectionGraph = normalizeGraph({
+  ...graph,
+  edges: [
+    { ...graph.edges[0], id: "ambiguous-edge", label: "uses" },
+    { ...graph.edges[0], id: "ambiguous-edge", target: "attention", label: "supports" }
+  ]
+});
+const ambiguousProjectionFeedback = applyObsidianFeedback(ambiguousProjectionGraph, [{
+  type: "relation",
+  id: "ambiguous-edge",
+  source: "attention",
+  target: "context",
+  label: "uses",
+  status: "accepted"
+}]);
+assert.equal(ambiguousProjectionFeedback.changed, false, "Obsidian feedback must refuse ambiguous imported relation IDs");
+assert.equal(ambiguousProjectionFeedback.skipped, 1, "ambiguous Obsidian relation feedback should be disclosed as skipped");
 assert(result.graph.nodes[0].aliases.includes("Attention"));
 assert.equal(result.graph.edges[0].status, "rejected");
 assert.equal(result.graph.edges[0].feedback, -1);

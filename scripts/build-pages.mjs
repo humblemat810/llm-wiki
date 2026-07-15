@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { resolve, relative, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MAX_DOCUMENT_TITLE_CHARS, parseJsonWithUniqueKeys } from "../graph-core.js";
@@ -23,13 +24,14 @@ const learningNoteAssetCount = PUBLIC_FILES.filter((asset) => asset.startsWith("
 if (learningNoteAssetCount > MAX_LEARNING_NOTE_ASSETS) throw new Error(`The Pages manifest contains more than ${MAX_LEARNING_NOTE_ASSETS} learning notes.`);
 const MAX_BUILD_CONCURRENCY = 16;
 const lexicalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
+const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
 
 const rootRealPath = await realpath(root);
 const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN);
 
 async function readBoundedUtf8(filePath, maxBytes) {
   const byteLimit = Math.max(1, Math.floor(maxBytes));
-  const handle = await open(filePath, "r");
+  const handle = await open(filePath, READ_ONLY_NOFOLLOW_FLAGS);
   const chunks = [];
   let total = 0;
   try {
@@ -45,6 +47,37 @@ async function readBoundedUtf8(filePath, maxBytes) {
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
   } finally {
     await handle.close();
+  }
+}
+
+async function copyBoundedFile(sourcePath, destinationPath, maxBytes) {
+  const sourceHandle = await open(sourcePath, READ_ONLY_NOFOLLOW_FLAGS);
+  let destinationHandle = null;
+  let total = 0;
+  try {
+    destinationHandle = await open(
+      destinationPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC,
+      0o644
+    );
+    while (total <= maxBytes) {
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes - total + 1));
+      const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, total);
+      if (!bytesRead) break;
+      total += bytesRead;
+      if (total > maxBytes) throw new Error(`file exceeds the ${maxBytes} byte safety limit`);
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await destinationHandle.write(buffer, written, bytesRead - written);
+        if (!result.bytesWritten) throw new Error("Pages asset copy made no progress.");
+        written += result.bytesWritten;
+      }
+    }
+  } finally {
+    await Promise.allSettled([
+      sourceHandle.close(),
+      destinationHandle?.close()
+    ]);
   }
 }
 const overlappingAsset = PUBLIC_FILES.find((asset) => {
@@ -72,7 +105,7 @@ async function copyPublicFile(asset) {
   if (metadata.size > MAX_STATIC_ASSET_BYTES) throw new Error(`public asset exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit: ${asset}`);
   const destination = resolve(buildOutput, asset);
   await mkdir(dirname(destination), { recursive: true });
-  await cp(sourceRealPath, destination);
+  await copyBoundedFile(sourceRealPath, destination, MAX_STATIC_ASSET_BYTES);
 }
 
 async function preflightPublicAssetBudget() {

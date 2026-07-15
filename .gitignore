@@ -3,6 +3,8 @@ Thumbs.db
 .idea/
 .vscode/
 node_modules/
+.llm-field-notes-pages-build-*
+*.previous-*
 llm-field-notes-*.json
 llm-field-notes-*.zip
 knowledge-graph.json

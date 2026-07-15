@@ -4,7 +4,7 @@ const NETWORK_TIMEOUT_MS = 3000;
 const CACHE_OPERATION_TIMEOUT_MS = 3000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const PRECACHE_CONCURRENCY = 4;
-const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./curriculum.js", "./graph-core.js", "./graph-store.js", "./extractor-adapter.js", "./rebuild-adapter.js", "./projection-adapter.js", "./jsonld-projection.js", "./storage-adapter.js", "./evaluation.js", "./manifest.webmanifest", "./icon.svg", "./social-card.svg", "./LICENSE", "./README.md", "./ARCHITECTURE.md", "./CHANGELOG.md", "./llms.txt", "./SECURITY.md", "./CONTRIBUTING.md", "./ARTIFACTS.md", "./ARTIFACT_SUBMISSION.md", "./artifacts.html", "./examples/sample-graph.json", "./CODE_OF_CONDUCT.md", "./version.json", "./experiments/README.md", "./experiments/bounded-file.mjs", "./experiments/compare-evaluations.mjs", "./experiments/diff-graphs.mjs", "./experiments/evaluate-feedback.mjs", "./experiments/graph-input.mjs", "./experiments/inspect-graph.mjs", "./experiments/learning-loop.mjs", "./experiments/tiny-bpe.mjs", "./experiments/tiny-attention.mjs", "./experiments/tiny-training.mjs", "./experiments/tiny-transformer.mjs", "./experiments/project-jsonld.mjs", "./experiments/verify-jsonld.mjs", "./experiments/verify-graph.mjs", "./experiments/verify-diff.mjs", "./schema/graph.schema.json", "./schema/feedback.schema.json", "./schema/backup.schema.json", "./schema/diff.schema.json", "./schema/extractor-request.schema.json", "./schema/evaluation.schema.json", "./schema/evaluation-comparison.schema.json", "./schema/health.schema.json", "./schema/jsonld.schema.json", "./schema/learning-loop.schema.json", "./schema/vault-manifest.schema.json", "./notes/README.md", "./notes/tokens.md", "./notes/embeddings.md", "./notes/attention.md", "./notes/training.md", "./notes/transformers.md", "./notes/scaling.md", "./notes/inference.md", "./notes/evaluation.md", "./notes/rag.md", "./notes/finetuning.md", "./notes/agents.md", "./notes/production.md", "./notes/knowledge-graphs.md"];
+const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./curriculum.js", "./graph-core.js", "./graph-store.js", "./extractor-adapter.js", "./rebuild-adapter.js", "./projection-adapter.js", "./jsonld-projection.js", "./storage-adapter.js", "./backup-crypto.js", "./evaluation.js", "./manifest.webmanifest", "./icon.svg", "./social-card.svg", "./LICENSE", "./README.md", "./ARCHITECTURE.md", "./CHANGELOG.md", "./llms.txt", "./SECURITY.md", "./RUNBOOK.md", "./PRODUCTION_STATUS.md", "./CONTRIBUTING.md", "./ARTIFACTS.md", "./ARTIFACT_SUBMISSION.md", "./artifacts.html", "./examples/sample-graph.json", "./CODE_OF_CONDUCT.md", "./.well-known/security.txt", "./version.json", "./experiments/README.md", "./experiments/bounded-file.mjs", "./experiments/compare-evaluations.mjs", "./experiments/diff-graphs.mjs", "./experiments/evaluate-feedback.mjs", "./experiments/graph-input.mjs", "./experiments/inspect-graph.mjs", "./experiments/learning-loop.mjs", "./experiments/tiny-bpe.mjs", "./experiments/tiny-attention.mjs", "./experiments/tiny-training.mjs", "./experiments/tiny-transformer.mjs", "./experiments/project-jsonld.mjs", "./experiments/verify-jsonld.mjs", "./experiments/verify-graph.mjs", "./experiments/verify-backup.mjs", "./experiments/verify-diff.mjs", "./schema/graph.schema.json", "./schema/feedback.schema.json", "./schema/backup.schema.json", "./schema/encrypted-backup.schema.json", "./schema/diff.schema.json", "./schema/extractor-request.schema.json", "./schema/evaluation.schema.json", "./schema/evaluation-comparison.schema.json", "./schema/health.schema.json", "./schema/jsonld.schema.json", "./schema/learning-loop.schema.json", "./schema/vault-manifest.schema.json", "./notes/README.md", "./notes/tokens.md", "./notes/embeddings.md", "./notes/attention.md", "./notes/training.md", "./notes/transformers.md", "./notes/scaling.md", "./notes/inference.md", "./notes/evaluation.md", "./notes/rag.md", "./notes/finetuning.md", "./notes/agents.md", "./notes/production.md", "./notes/knowledge-graphs.md"];
 const SHELL_PATHS = new Set(APP_SHELL.map((asset) => new URL(asset, self.location).pathname));
 
 function isShellRequest(request) {
@@ -38,6 +38,14 @@ function withCacheTimeout(operation) {
   ]).finally(() => clearTimeout(timeout));
 }
 
+function cancelResponseBody(response) {
+  try {
+    Promise.resolve(response?.body?.cancel?.()).catch(() => {});
+  } catch {
+    // Early response validation must not be blocked by a non-conforming body.
+  }
+}
+
 async function matchShellCache(request) {
   try {
     const cache = await withCacheTimeout(() => caches.open(CACHE));
@@ -54,36 +62,43 @@ async function fetchFresh(request) {
   const timeout = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
   try {
     const response = await fetch(request, { cache: "no-cache", signal: controller.signal });
+    const rejectResponse = (error) => {
+      cancelResponseBody(response);
+      throw error;
+    };
     if (response.type === "opaque" || response.type === "opaqueredirect") {
-      throw new Error("Opaque shell responses are not cacheable.");
+      return rejectResponse(new Error("Opaque shell responses are not cacheable."));
+    }
+    if (response.status >= 200 && response.status < 300 && response.status !== 200) {
+      return rejectResponse(new Error("Partial or empty successful shell responses are not cacheable."));
     }
     if (response.url) {
       let responseOrigin;
       try {
         responseOrigin = new URL(response.url).origin;
       } catch {
-        throw new Error("Network response URL is invalid.");
+        return rejectResponse(new Error("Network response URL is invalid."));
       }
       if (responseOrigin !== self.location.origin) {
-        throw new Error("Network response crossed the shell origin boundary.");
+        return rejectResponse(new Error("Network response crossed the shell origin boundary."));
       }
     }
     const contentType = response.headers?.get?.("content-type") || "";
     if (!isHtmlShellPath(request) && /^text\/html(?:\s*;|$)/i.test(contentType)) {
-      throw new Error("HTML response received for a non-HTML shell asset.");
+      return rejectResponse(new Error("HTML response received for a non-HTML shell asset."));
     }
     const declaredHeader = response.headers?.get?.("content-length");
     const normalizedDeclaredHeader = typeof declaredHeader === "string" ? declaredHeader.trim() : "";
     const declaredLength = /^\d+$/.test(normalizedDeclaredHeader) ? Number(normalizedDeclaredHeader) : Number.NaN;
     if (normalizedDeclaredHeader && !Number.isSafeInteger(declaredLength)) {
-      throw new Error("Network response Content-Length is invalid.");
+      return rejectResponse(new Error("Network response Content-Length is invalid."));
     }
     if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-      throw new Error("Network response body exceeded the safety limit.");
+      return rejectResponse(new Error("Network response body exceeded the safety limit."));
     }
     if ((!response.body || typeof response.body.getReader !== "function")
       && !(response.status >= 400 && response.status < 500)) {
-      throw new Error("Network response body is unavailable for bounded validation.");
+      return rejectResponse(new Error("Network response body is unavailable for bounded validation."));
     }
     if (response.body && typeof response.body.getReader === "function") {
       const reader = response.clone().body.getReader();
@@ -205,13 +220,19 @@ self.addEventListener("fetch", (event) => {
       // A transport failure should use the cached shell when available.
     }
     const cached = await matchShellCache(event.request);
-    if (cached) return cached;
+    if (cached) {
+      if (networkResponse) cancelResponseBody(networkResponse);
+      return cached;
+    }
     if (networkResponse && networkResponse.status >= 400 && networkResponse.status < 500) {
       return networkResponse;
     }
     if (event.request.mode === "navigate") {
       const offlineShell = await matchShellCache({ url: new URL("./index.html", self.location).toString() });
-      if (offlineShell) return offlineShell;
+      if (offlineShell) {
+        if (networkResponse) cancelResponseBody(networkResponse);
+        return offlineShell;
+      }
     }
     if (networkResponse) return networkResponse;
     return Response.error();

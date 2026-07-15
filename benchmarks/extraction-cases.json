@@ -1,0 +1,68 @@
+{
+  "format": "llm-field-notes/extraction-cases@1",
+  "cases": [
+    {
+      "id": "technical-phrases",
+      "title": "Attention sample",
+      "text": "Attention mixes information across tokens. Queries, keys, and values create a weighted lookup over context. Positional encoding gives the sequence an order.",
+      "feedback": [
+        { "kind": "concept", "id": "weighted-lookup", "label": "Weighted lookup", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "positional-encoding", "label": "Positional encoding", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "mixes-information", "label": "mixes information", "status": "rejected", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "encoding-gives", "label": "encoding gives", "status": "rejected", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1,
+        "rejectedSuppressionRate": 1
+      }
+    },
+    {
+      "id": "sparse-title",
+      "title": "Transformer architecture",
+      "text": "A short note.",
+      "feedback": [
+        { "kind": "concept", "id": "transformer-architecture", "label": "Transformer architecture", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 0
+      }
+    },
+    {
+      "id": "non-latin",
+      "title": "Multilingual notes",
+      "text": "注意 机制 保留 上下文 信息，并且 注意 机制 使用 上下文。",
+      "feedback": [
+        { "kind": "concept", "id": "注意", "label": "注意", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "上下文", "label": "上下文", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "并且", "label": "并且", "status": "rejected", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1,
+        "rejectedSuppressionRate": 1
+      }
+    },
+    {
+      "id": "tool-safety",
+      "title": "Tool safety",
+      "text": "A sandbox limits tool access. A policy blocks unsafe actions and preserves audit logs.",
+      "feedback": [
+        { "kind": "concept", "id": "sandbox-limits", "label": "sandbox limits", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "audit-logs", "label": "audit logs", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "unsafe-actions--audit-logs--preserves", "source": "unsafe-actions", "target": "audit-logs", "label": "preserves", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "sandbox", "label": "sandbox", "status": "rejected", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1,
+        "rejectedSuppressionRate": 1
+      }
+    }
+  ]
+}

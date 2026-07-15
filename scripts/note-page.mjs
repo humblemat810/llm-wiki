@@ -10,6 +10,7 @@ export const sliceTextAtCodePointBoundary = (value, limit) => {
 };
 
 const escapeHtml = (value) => String(value)
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
   .replace(/&/g, "&amp;")
   .replace(/</g, "&lt;")
   .replace(/>/g, "&gt;")
@@ -33,12 +34,13 @@ function renderLearningNoteMarkdown(content, title = "") {
 
   const inline = (value) => {
     const links = [];
-    const linkTokenPrefix = "\u0000LLMNOTELINK";
+    let linkTokenPrefix = "LLMNOTELINK";
+    while (String(value).includes(linkTokenPrefix)) linkTokenPrefix += "X";
     const tokenized = String(value).replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, (match, label, href) => {
       try {
         const parsed = new URL(href);
         if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return match;
-        const token = `${linkTokenPrefix}${links.length}\u0000`;
+        const token = `${linkTokenPrefix}${links.length}END`;
         links.push(`<a href="${escapeHtml(parsed.toString())}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
         return token;
       } catch {
@@ -51,7 +53,7 @@ function renderLearningNoteMarkdown(content, title = "") {
       .replace(/__([^_]+)__/g, "<strong>$1</strong>")
       .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>")
       .replace(/(?<!_)_([^_]+)_(?!_)/g, "<em>$1</em>")
-      .replace(new RegExp(`${linkTokenPrefix}(\\d+)\\u0000`, "g"), (_, index) => links[Number(index)] || "");
+      .replace(new RegExp(`${linkTokenPrefix}(\\d+)END`, "g"), (_, index) => links[Number(index)] || "");
   };
   const flushParagraph = () => {
     if (!paragraph.length) return;

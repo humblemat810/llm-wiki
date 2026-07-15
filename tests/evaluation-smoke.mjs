@@ -67,6 +67,13 @@ assert.equal(report.feedback.relations.accepted.reviewedPrecision, 1);
 assert.equal(report.overall.accepted.recall, .6667);
 assert.equal(report.overall.accepted.evidenceCoverage, 0);
 assert.equal(report.overall.accepted.reviewedPrecision, .6667);
+const deterministicFreshness = evaluateExtraction(
+  extraction,
+  [{ kind: "concept", id: "attention", label: "Attention", status: "accepted", lastReviewedAt: "2026-07-14T00:00:00.000Z" }],
+  { now: Date.parse("2026-07-15T00:00:00.000Z") }
+);
+assert.equal(deterministicFreshness.feedback.freshExamples, 1, "evaluation should support an explicit reference time for deterministic benchmark freshness");
+assert.equal(deterministicFreshness.feedback.untrustedExamples, 0, "explicit benchmark reference times should not rewrite or misclassify dated review examples");
 const selfComparison = compareEvaluations(report, report);
 assert.equal(selfComparison.metrics.length, 12, "evaluation comparisons should emit every supported metric");
 assert.equal(selfComparison.regressions.length, 0, "identical evaluation reports should not regress");
@@ -90,6 +97,11 @@ assert.throws(
   () => validateEvaluationReport({ ...report, evaluatedAt: "x".repeat(129) }),
   /evaluatedAt must be a valid bounded date-time/,
   "evaluation validation should bound provenance timestamp strings"
+);
+assert.throws(
+  () => validateEvaluationReport({ ...report, evaluatedAt: "2099-01-01T00:00:00.000Z" }),
+  /evaluatedAt must be a valid bounded date-time/,
+  "future-dated evaluation reports should not enter promotion comparisons"
 );
 assert.throws(
   () => validateEvaluationReport({ ...report, unexpected: true }),

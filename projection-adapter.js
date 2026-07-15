@@ -7,6 +7,7 @@ export const MAX_ZIP_FILES = MAX_GRAPH_DOCUMENTS + MAX_GRAPH_NODES + MAX_GRAPH_E
 export const MAX_ZIP_BYTES = 50 * 1024 * 1024;
 export const MAX_VAULT_MANIFEST_CHARS = 64 * 1024;
 export const MAX_FEEDBACK_NOTE_CHARS = 1 * 1024 * 1024;
+export const MAX_LEARNING_EXPORT_NOTES = 1000;
 const MAX_DIRECT_FEEDBACK_ITEMS = MAX_ZIP_FILES;
 const OBSIDIAN_FRONTMATTER_FIELDS = new Set([
   "type",
@@ -46,6 +47,7 @@ const validFeedbackAliases = (value) => Array.isArray(value)
   && value.length <= MAX_ALIASES
   && value.every((alias) => typeof alias === "string" && canonicalFeedbackAlias(alias).length <= MAX_CONCEPT_LABEL_CHARS)
   && new Set(value.map(canonicalFeedbackAlias)).size === value.length;
+const INVALID_FRONTMATTER_VALUE = Symbol("invalid-frontmatter-value");
 function normalizeFeedbackTimestamp(value, present) {
   if (!present) return { valid: true, value: null };
   if (value === "") return { valid: true, value: null };
@@ -55,15 +57,17 @@ function normalizeFeedbackTimestamp(value, present) {
   return { valid: true, value: new Date(parseTimestamp(value)).toISOString() };
 }
 function shouldApplyReviewTimestamp(current, incoming) {
-  if (incoming === null) return current !== null;
-  if (!current) return true;
+  // An empty timestamp carries no chronology that can prove it is newer than
+  // an existing trusted review. Preserve the current review rather than
+  // allowing an older projection to roll review history backward.
+  if (incoming === null) return false;
   const currentTime = parseTimestamp(current);
   const incomingTime = parseTimestamp(incoming);
   const now = Date.now();
   const currentIsTrusted = !Number.isNaN(currentTime) && currentTime <= now;
   const incomingIsTrusted = !Number.isNaN(incomingTime) && incomingTime <= now;
-  if (incomingIsTrusted && !currentIsTrusted) return true;
-  if (!incomingIsTrusted && currentIsTrusted) return false;
+  if (!incomingIsTrusted) return false;
+  if (!currentIsTrusted) return true;
   return Number.isNaN(currentTime) || (!Number.isNaN(incomingTime) && incomingTime >= currentTime);
 }
 function boundFeedbackMutation(value) {
@@ -127,6 +131,9 @@ function parseValue(value) {
   try {
     return parseJsonWithUniqueKeys(trimmed, "Obsidian frontmatter value");
   } catch {
+    if (/^["[{]/.test(trimmed) || (trimmed.startsWith("'") && !trimmed.endsWith("'"))) {
+      return INVALID_FRONTMATTER_VALUE;
+    }
     return trimmed.replace(/^["']|["']$/g, "");
   }
 }
@@ -153,7 +160,7 @@ export function parseObsidianFeedback(markdown) {
     }
     fields[key] = parseValue(line.slice(separator + 1));
   });
-  if (duplicateField) return null;
+  if (duplicateField || Object.values(fields).some((value) => value === INVALID_FRONTMATTER_VALUE)) return null;
   if (Object.keys(fields).some((key) => !OBSIDIAN_FRONTMATTER_FIELDS.has(key))) return null;
   if (!["concept", "relation", "source"].includes(fields.type) || typeof fields.id !== "string" || !fields.id.trim() || fields.id.trim().length > MAX_ID_CHARS) return null;
   if (Object.keys(fields).some((key) => !OBSIDIAN_FIELDS_BY_TYPE[fields.type].has(key))) return null;
@@ -315,6 +322,10 @@ export function applyObsidianFeedback(value, feedbacks) {
     if (group.fingerprints.size > 1) continue;
     const feedback = group.feedback;
     if (feedback.type === "source") {
+      if (graph.integrity.ambiguousSourceIds.includes(feedback.id)) {
+        skipped += 1;
+        continue;
+      }
       const source = graph.documents.find((candidate) => candidate.id === feedback.id);
       if (!source) continue;
       const hasUri = feedback.hasUri === true
@@ -343,13 +354,19 @@ export function applyObsidianFeedback(value, feedbacks) {
         ? new Date(parseTimestamp(feedback.lastReviewedAt)).toISOString()
         : null;
       const reviewDateChanged = feedback.hasLastReviewedAt && normalizedReviewedAt !== source.lastReviewedAt;
+      let reviewDateApplied = false;
       if (feedback.hasLastReviewedAt
         && reviewDateChanged
         && shouldApplyReviewTimestamp(source.lastReviewedAt, normalizedReviewedAt)) {
         source.lastReviewedAt = normalizedReviewedAt;
         changed += 1;
+        reviewDateApplied = true;
       }
-      if (sourceMetadataChanged && !reviewDateChanged) source.lastReviewedAt = new Date().toISOString();
+      if (sourceMetadataChanged && (!reviewDateChanged || !reviewDateApplied)) source.lastReviewedAt = new Date().toISOString();
+      continue;
+    }
+    if (feedback.type === "relation" && graph.integrity.ambiguousEdgeIds.includes(feedback.id)) {
+      skipped += 1;
       continue;
     }
     const collection = feedback.type === "concept" ? graph.nodes : graph.edges;
@@ -497,6 +514,7 @@ export function readStoredZip(input, { maxUncompressedBytes = MAX_ZIP_BYTES } = 
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const files = [];
   const names = new Set();
+  const dataRanges = [];
   let totalUncompressedBytes = 0;
   const centralEnd = centralOffset + centralSize;
   let cursor = centralOffset;
@@ -534,13 +552,26 @@ export function readStoredZip(input, { maxUncompressedBytes = MAX_ZIP_BYTES } = 
     if (dataStart > centralOffset || uncompressedSize > centralOffset - dataStart) throw new Error("The vault archive contains file data overlapping its central directory.");
     if (uncompressedSize > uncompressedLimit - totalUncompressedBytes) throw new Error("The vault archive contains too much uncompressed data.");
     const dataEnd = dataStart + uncompressedSize;
+    let insertionIndex = 0;
+    let insertionEnd = dataRanges.length;
+    while (insertionIndex < insertionEnd) {
+      const midpoint = Math.floor((insertionIndex + insertionEnd) / 2);
+      if (dataRanges[midpoint].start < dataStart) insertionIndex = midpoint + 1;
+      else insertionEnd = midpoint;
+    }
+    if ((insertionIndex > 0 && dataRanges[insertionIndex - 1].end > dataStart)
+      || (insertionIndex < dataRanges.length && dataEnd > dataRanges[insertionIndex].start)) {
+      const previous = dataRanges[insertionIndex - 1] || dataRanges[insertionIndex];
+      throw new Error(`The vault archive contains file data overlapping "${previous.name}" and "${name}".`);
+    }
+    dataRanges.splice(insertionIndex, 0, { start: dataStart, end: dataEnd, name });
     const content = bytes.slice(dataStart, dataEnd);
     if (crc32(content) !== readU32(view, cursor + 16)) throw new Error(`The vault file "${name}" failed its integrity check.`);
     totalUncompressedBytes += uncompressedSize;
-    files.push({ name, bytes: content, text: decoder.decode(content) });
+    files.push({ name, bytes: content });
     cursor = nameEnd + extraLength + commentLength;
   }
-  return files;
+  return files.map((file) => ({ ...file, text: decoder.decode(file.bytes) }));
 }
 
 export function parseObsidianVault(input) {
@@ -558,7 +589,48 @@ export function parseObsidianVault(input) {
     } else {
       try {
         const candidate = parseJsonWithUniqueKeys(manifestFile.text, "Vault manifest");
-        const valid = candidate
+        const validManifestKeys = new Set([
+          "format",
+          "graphSchema",
+          "graphVersion",
+          "graphFingerprint",
+          "appVersion",
+          "redacted",
+          "generatedAt",
+          "learning"
+        ]);
+        const hasOnlyManifestKeys = candidate
+          && typeof candidate === "object"
+          && !Array.isArray(candidate)
+          && Object.keys(candidate).every((key) => validManifestKeys.has(key));
+        const learning = candidate?.learning;
+        const hasOnlyLearningKeys = learning === undefined
+          || (
+            learning
+            && typeof learning === "object"
+            && !Array.isArray(learning)
+            && Object.keys(learning).every((key) => ["requested", "included", "unavailable", "complete"].includes(key))
+          );
+        const validLearning = learning === undefined
+          || (hasOnlyLearningKeys
+            && learning
+            && typeof learning === "object"
+            && !Array.isArray(learning)
+            && Number.isSafeInteger(learning.requested)
+            && learning.requested >= 0
+            && learning.requested <= MAX_LEARNING_EXPORT_NOTES
+            && Number.isSafeInteger(learning.included)
+            && learning.included >= 0
+            && learning.included <= learning.requested
+            && Array.isArray(learning.unavailable)
+            && learning.unavailable.length <= MAX_LEARNING_EXPORT_NOTES
+            && learning.unavailable.every((id) => typeof id === "string" && id.length > 0 && id.length <= MAX_ID_CHARS)
+            && new Set(learning.unavailable).size === learning.unavailable.length
+            && typeof learning.complete === "boolean"
+            && learning.requested === learning.included + learning.unavailable.length
+            && learning.complete === (learning.unavailable.length === 0 && learning.included === learning.requested)
+          );
+        const valid = hasOnlyManifestKeys
           && candidate.format === VAULT_FORMAT
           && candidate.graphSchema === GRAPH_SCHEMA
           && Number.isSafeInteger(candidate.graphVersion)
@@ -573,12 +645,23 @@ export function parseObsidianVault(input) {
           && typeof candidate.redacted === "boolean"
           && typeof candidate.generatedAt === "string"
           && candidate.generatedAt.length <= MAX_TIMESTAMP_CHARS
-          && !Number.isNaN(parseTimestamp(candidate.generatedAt));
+          && !Number.isNaN(parseTimestamp(candidate.generatedAt))
+          && validLearning;
         if (valid) manifest = candidate;
         else manifestError = "Vault manifest metadata is invalid.";
       } catch {
         manifestError = "Vault manifest JSON could not be parsed.";
       }
+    }
+  }
+  if (manifest?.learning) {
+    const learningNoteIds = new Set(files
+      .filter((file) => /^Learning\/[^/]+\.md$/i.test(file.name) && file.name !== "Learning/review-ledger.md")
+      .map((file) => file.name.slice("Learning/".length, -".md".length)));
+    if (learningNoteIds.size !== manifest.learning.included
+      || manifest.learning.unavailable.some((id) => learningNoteIds.has(id))) {
+      manifest = null;
+      manifestError = "Vault learning-projection status does not match its files.";
     }
   }
   const graphFile = files.find((file) => file.name === "graph.json");
@@ -619,7 +702,9 @@ export function parseObsidianVault(input) {
   const jsonLdFile = files.find((file) => file.name === "graph.jsonld");
   let jsonLdError = null;
   if (jsonLdFile) {
-    try {
+    if (!embeddedGraph) {
+      jsonLdError = "Embedded graph JSON is missing; JSON-LD cannot be verified against the authoritative graph.";
+    } else try {
       const projection = parseJsonWithUniqueKeys(jsonLdFile.text, "JSON-LD projection");
       if (!projection
         || projection.format !== JSONLD_FORMAT

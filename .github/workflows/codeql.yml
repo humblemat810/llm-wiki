@@ -9,7 +9,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
+  pull-requests: read
   security-events: write
 
 concurrency:
@@ -35,3 +37,4 @@ jobs:
         uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
           category: /language:javascript-typescript
+          upload: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'never' || 'always' }}

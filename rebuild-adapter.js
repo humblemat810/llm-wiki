@@ -1,4 +1,4 @@
-import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_DOCUMENT_TITLE_CHARS, MAX_GRAPH_DOCUMENT_CHARS, MAX_GRAPH_DOCUMENTS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_ID_CHARS, replaceSource } from "./graph-core.js";
+import { GRAPH_SCHEMA, LEGACY_GRAPH_SCHEMAS, MAX_DOCUMENT_TITLE_CHARS, MAX_GRAPH_DOCUMENT_CHARS, MAX_GRAPH_DOCUMENTS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_ID_CHARS, normalizeGraph, replaceSource } from "./graph-core.js";
 
 export const MAX_REBUILD_FAILURE_CHARS = 240;
 
@@ -48,6 +48,57 @@ const hasPositiveDiagnostic = (value) => value
   && typeof value === "object"
   && Object.values(value).some((count) => Number.isSafeInteger(count) && count > 0);
 
+const hasIntegrityAmbiguity = (graph) => (
+  graph?.integrity?.ambiguousSourceIds?.length
+  || graph?.integrity?.ambiguousEdgeIds?.length
+  || graph?.integrity?.conflictingNodeIds?.length
+  || graph?.integrity?.conflictingEdgeIds?.length
+);
+
+const sourceRecordComparable = (source) => {
+  const record = {
+    id: source.id,
+    title: source.title,
+    text: source.text,
+    fingerprint: source.fingerprint,
+    addedAt: source.addedAt,
+    uri: source.uri,
+    quality: source.quality
+  };
+  record.lastReviewedAt = source.lastReviewedAt;
+  return JSON.stringify(record);
+};
+
+const savedSourceRecordsPreserved = (before, after, replacedSourceId) => before
+  .filter((source) => source.id !== replacedSourceId)
+  .every((source) => {
+  const replacement = after.find((candidate) => candidate.id === source.id);
+  if (!replacement) return false;
+  return sourceRecordComparable(source) === sourceRecordComparable(replacement);
+});
+
+const sourceContributionCounts = (graph, sourceId) => ({
+  nodes: graph.nodes.filter((node) => Array.isArray(node?.sources) && node.sources.includes(sourceId)).length,
+  edges: graph.edges.filter((edge) => Array.isArray(edge?.sources) && edge.sources.includes(sourceId)).length
+});
+
+const abortableExtract = (extract, source, graph, signal) => {
+  if (!signal) return Promise.resolve().then(() => extract(source, graph, signal));
+  if (signal.aborted) {
+    return Promise.reject(Object.assign(new Error("Rebuild extraction canceled."), { name: "AbortError", code: "CANCELED" }));
+  }
+  let abortHandler;
+  const abortPromise = new Promise((_, reject) => {
+    abortHandler = () => reject(Object.assign(new Error("Rebuild extraction canceled."), { name: "AbortError", code: "CANCELED" }));
+    signal.addEventListener("abort", abortHandler, { once: true });
+    if (signal.aborted) abortHandler();
+  });
+  const extractionPromise = Promise.resolve().then(() => extract(source, graph, signal));
+  return Promise.race([extractionPromise, abortPromise]).finally(() => {
+    signal.removeEventListener("abort", abortHandler);
+  });
+};
+
 export async function rebuildSources(
   initialGraph,
   {
@@ -96,6 +147,7 @@ export async function rebuildSources(
   let rebuilt = 0;
   let canceled = false;
   const failures = [];
+  const rebuildDetails = [];
   for (const [sourceIndex, source] of sources.entries()) {
     if (signal?.aborted) {
       canceled = true;
@@ -112,25 +164,71 @@ export async function rebuildSources(
       break;
     }
     try {
-      const extraction = await extract(source, graph, signal);
+      const previousContributionCounts = sourceContributionCounts(graph, source.id);
+      const extraction = await abortableExtract(extract, source, graph, signal);
       if (signal?.aborted) {
         canceled = true;
         break;
       }
-      const result = replace(graph, source.id, extraction, { revisionExtractor });
+      const result = replace(graph, source.id, extraction, {
+        revisionExtractor,
+        preserveSourceCategories: true
+      });
       if (result?.replaced) {
-        if (!hasValidGraphCollections(result.graph, sourceIds)) {
+        const normalizedReplacement = normalizeGraph(result.graph);
+        if (!hasValidGraphCollections(normalizedReplacement, sourceIds)
+          || hasPositiveDiagnostic(normalizedReplacement.integrity?.truncated)
+          || hasPositiveDiagnostic(normalizedReplacement.integrity?.dropped)) {
           failures.push(`${source.title}: replacement returned an invalid graph`);
           continue;
         }
-        graph = result.graph;
+        if (hasIntegrityAmbiguity(normalizedReplacement)) {
+          failures.push(`${source.title}: replacement returned an ambiguous graph`);
+          continue;
+        }
+        if (!savedSourceRecordsPreserved(graph.documents, normalizedReplacement.documents, source.id)) {
+          failures.push(`${source.title}: replacement changed saved source records`);
+          continue;
+        }
+        const replacementContributionCounts = sourceContributionCounts(normalizedReplacement, source.id);
+        const degradedCategories = [
+          previousContributionCounts.nodes > 0 && replacementContributionCounts.nodes === 0 ? "concepts" : null,
+          previousContributionCounts.edges > 0 && replacementContributionCounts.edges === 0 ? "relations" : null
+        ].filter(Boolean);
+        if (degradedCategories.length) {
+          const categories = degradedCategories.length === 2
+            ? "source-linked knowledge"
+            : degradedCategories[0] === "relations"
+              ? "source-linked relations"
+              : "source-linked concepts";
+          failures.push(`${source.title}: replacement removed all ${categories}`);
+          continue;
+        }
+        graph = normalizedReplacement;
         rebuilt += 1;
+        rebuildDetails.push({
+          sourceId: source.id,
+          title: source.title,
+          beforeNodes: previousContributionCounts.nodes,
+          afterNodes: replacementContributionCounts.nodes,
+          beforeEdges: previousContributionCounts.edges,
+          afterEdges: replacementContributionCounts.edges,
+          removedNodes: Number.isSafeInteger(result.removedNodes) ? result.removedNodes : 0,
+          removedEdges: Number.isSafeInteger(result.removedEdges) ? result.removedEdges : 0
+        });
       } else if (result?.limited) {
         failures.push(`${source.title}: graph ${result.limited} limit reached`);
       } else if (result?.ambiguous) {
         failures.push(`${source.title}: source ID is ambiguous`);
       } else if (result?.duplicate) {
         failures.push(`${source.title}: duplicate source content`);
+      } else if (result?.empty || result?.degraded?.length) {
+        const categories = result.degraded?.length === 2
+          ? "source-linked knowledge"
+          : result.degraded?.[0] === "relations"
+            ? "source-linked relations"
+            : "source-linked concepts";
+        failures.push(`${source.title}: replacement removed all ${categories}`);
       } else {
         failures.push(`${source.title}: source could not be replaced`);
       }
@@ -142,5 +240,5 @@ export async function rebuildSources(
       failures.push(boundedFailure(source, error));
     }
   }
-  return { graph, rebuilt, failures, canceled };
+  return { graph, rebuilt, rebuildDetails, failures, canceled };
 }

@@ -6,6 +6,8 @@ LABEL org.opencontainers.image.title="LLM Field Notes" \
       org.opencontainers.image.description="A document-to-knowledge-graph workspace with inspectable evidence and Obsidian projections." \
       org.opencontainers.image.version="$APP_VERSION" \
       org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.source="https://github.com/humblemat810/llm-wiki" \
+      org.opencontainers.image.documentation="https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md" \
       org.opencontainers.image.licenses="CC-BY-4.0"
 
 WORKDIR /app
@@ -15,7 +17,7 @@ ENV PORT=8000
 ENV BUILD_REVISION=$VCS_REF
 STOPSIGNAL SIGTERM
 
-COPY . .
+COPY --chown=node:node . .
 
 USER node
 

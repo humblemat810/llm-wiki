@@ -12,6 +12,22 @@
     "graphFingerprint": { "type": "string", "maxLength": 128, "pattern": "^fnv64-[0-9a-f]{16}-[0-9]+$" },
     "appVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
     "redacted": { "type": "boolean" },
-    "generatedAt": { "type": "string", "format": "date-time", "maxLength": 128 }
+    "generatedAt": { "type": "string", "format": "date-time", "maxLength": 128 },
+    "learning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "included", "unavailable", "complete"],
+      "properties": {
+        "requested": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "included": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "unavailable": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "complete": { "type": "boolean" }
+      }
+    }
   }
 }

@@ -1,0 +1,56 @@
+import { readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join, relative } from "node:path";
+
+const IGNORED_DIRECTORIES = new Set([".git", ".codex", "dist", "node_modules"]);
+function collectJavaScriptFiles(directory, output = []) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (!IGNORED_DIRECTORIES.has(entry.name) && !entry.name.startsWith(".llm-field-notes-pages-build-")) {
+        collectJavaScriptFiles(path, output);
+      }
+    } else if (entry.isFile() && /\.(?:cjs|js|mjs)$/i.test(entry.name)) {
+      output.push(relative(process.cwd(), path));
+    }
+  }
+  return output;
+}
+
+const sourceFiles = collectJavaScriptFiles(".").sort();
+
+const testFiles = readdirSync("tests")
+  .filter((file) => file.endsWith(".mjs"))
+  .sort()
+  .map((file) => join("tests", file));
+
+function run(label, args) {
+  console.log(`\n==> ${label}`);
+  const result = spawnSync(process.execPath, args, {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: "inherit",
+    timeout: 120000
+  });
+  if (result.error) {
+    console.error(`${label} could not start: ${result.error.message}`);
+    process.exit(1);
+  }
+  if (result.status !== 0) {
+    const reason = result.signal ? `signal ${result.signal}` : `exit ${result.status ?? 1}`;
+    console.error(`${label} failed (${reason}).`);
+    process.exit(result.status ?? 1);
+  }
+}
+
+for (const file of sourceFiles) {
+  run(`Syntax check: ${file}`, ["--check", file]);
+}
+
+run("Release contract: scripts/check-release.mjs", ["scripts/check-release.mjs"]);
+
+for (const file of testFiles) {
+  run(`Behavioral test: ${file}`, [file]);
+}
+
+console.log(`\nTest suite passed: ${sourceFiles.length} syntax checks, release contracts, and ${testFiles.length} behavioral tests.`);

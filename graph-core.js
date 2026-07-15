@@ -12,6 +12,7 @@ export const MAX_GRAPH_DOCUMENTS = 1000;
 export const MAX_GRAPH_NODES = 5000;
 export const MAX_GRAPH_EDGES = 10000;
 export const MAX_GRAPH_REVISIONS = 20;
+export const MAX_BACKUP_HISTORY = 3;
 export const REVISION_OPERATIONS = new Set(["unknown", "migration", "ingest", "rebuild", "feedback", "learning", "manual", "projection", "source-removal"]);
 export const REVISION_EXTRACTORS = new Set(["unknown", "local", "remote"]);
 export const MAX_EVIDENCE_CHARS = 12000;
@@ -109,6 +110,37 @@ The model learns through gradient descent on a prediction loss.`
 };
 
 const stopWords = new Set("a an and are as at be because been being based before between by can could catch catches caught create creates depends different during entirely each for from gather gathers gives has have here how if improve improves improved increases in into is it its itself learn learns lets make makes may means measures more need needs needed of on or other our over preserve preserves preserved reduces removes report reports reported represent represents represented requires same show shows showing supports than that the their them these this then there through to use uses using until was what when which while with without within you your allow allows after become becomes became control controls controlled guide guides guided map maps mapped reveal reveals revealed remain remains".split(" "));
+const phraseBoundaryWords = new Set(["also", "connects"]);
+const phraseNoiseWords = new Set([
+  ...stopWords,
+  "across",
+  "among",
+  "around",
+  "connects",
+  "creates",
+  "gives",
+  "mixes",
+  "through",
+  "toward",
+  "using",
+  "add",
+  "adds",
+  "carry",
+  "carries",
+  "combine",
+  "combines",
+  "connect",
+  "link",
+  "links",
+  "keep",
+  "keeps",
+  "produce",
+  "produces",
+  "provide",
+  "provides",
+  "retrieve",
+  "retrieves"
+]);
 
 export const defaultGraph = () => ({
   schema: GRAPH_SCHEMA,
@@ -735,6 +767,42 @@ export function matchesGraphFingerprint(graph, graphFingerprint, history = []) {
     || graphFingerprint === legacyFingerprintBackup(graph, history);
 }
 
+export function validateBackupEnvelope(value, { label = "Backup" } = {}) {
+  const allowedKeys = new Set(["format", "exportedAt", "appVersion", "graph", "history", "graphFingerprint"]);
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw new Error(`${label} contains unsupported fields.`);
+  }
+  if (value.format !== BACKUP_FORMAT) {
+    throw new Error(`${label} format is unsupported.`);
+  }
+  if (typeof value.exportedAt !== "string"
+    || Number.isNaN(parseTimestamp(value.exportedAt))
+    || Number.isNaN(trustedPastTimestamp(value.exportedAt))) {
+    throw new Error(`${label} exportedAt must be a valid past timestamp.`);
+  }
+  if (!value.graph || ![GRAPH_SCHEMA, ...LEGACY_GRAPH_SCHEMAS].includes(value.graph.schema)) {
+    throw new Error(`${label} must contain ${GRAPH_SCHEMA}.`);
+  }
+  if (!Array.isArray(value.history)
+    || value.history.length > MAX_BACKUP_HISTORY
+    || value.history.some((snapshot) => !snapshot || ![GRAPH_SCHEMA, ...LEGACY_GRAPH_SCHEMAS].includes(snapshot.schema))) {
+    throw new Error(`${label} history must contain at most ${MAX_BACKUP_HISTORY} compatible graph snapshots.`);
+  }
+  if (value.appVersion !== undefined
+    && (typeof value.appVersion !== "string"
+      || !value.appVersion.trim()
+      || value.appVersion.length > MAX_PRODUCER_VERSION_CHARS)) {
+    throw new Error(`${label} producer metadata is invalid.`);
+  }
+  if (value.graphFingerprint !== undefined
+    && (typeof value.graphFingerprint !== "string"
+      || !matchesGraphFingerprint(value.graph, value.graphFingerprint, value.history))) {
+    throw new Error(`${label} fingerprint does not match its graph and history.`);
+  }
+  return true;
+}
+
 function normalizeEvidence(value, fallbackSources = []) {
   const boundedFallbackSources = normalizeSourceIds(fallbackSources);
   const normalized = asBoundedArray(value, MAX_EVIDENCE_INPUT_ITEMS).map((item) => {
@@ -1097,6 +1165,96 @@ export function normalizeExtractionForDocument(value, { title, text, uri, feedba
     }
   }, boundedTitle, boundedText);
   const sourceId = normalized.source.id;
+  const searchable = (value) => String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const sourceUnits = [...new Set(
+    boundedText
+      .split(/\r?\n+/)
+      .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+      .map((unit) => unit.trim())
+      .filter(Boolean)
+  )].slice(0, MAX_EXTRACTION_UNITS);
+  const evidenceForTerms = (terms, requireAll = true) => {
+    const normalizedTerms = terms.map(searchable).filter(Boolean);
+    return sourceUnits.find((unit) => {
+      const candidate = searchable(unit);
+      const contains = (term) => ` ${candidate} `.includes(` ${term} `);
+      return requireAll
+        ? normalizedTerms.every(contains)
+        : normalizedTerms.some(contains);
+    }) || null;
+  };
+  const acceptedHints = feedbackHints(feedback);
+  const nodeMatchesHint = (node, hint, labelKey = "label") => {
+    const keys = new Set([
+      node.id,
+      node.label,
+      ...(node.aliases || [])
+    ].map((value) => slugify(value)).filter(Boolean));
+    return keys.has(slugify(hint.id)) || keys.has(slugify(hint[labelKey] || ""));
+  };
+  const acceptedConcepts = [...acceptedHints.concepts.values()]
+    .filter((hint, index, values) => hint.status === "accepted"
+      && values.findIndex((candidate) => candidate.id === hint.id) === index);
+  acceptedConcepts.forEach((hint) => {
+    if (normalized.nodes.length >= MAX_GRAPH_NODES) return;
+    if (normalized.nodes.some((node) => nodeMatchesHint(node, hint))) return;
+    const evidenceText = evidenceForTerms([hint.label, ...hint.aliases], false);
+    if (!evidenceText) return;
+    normalized.nodes.push({
+      id: hint.id,
+      label: hint.label,
+      aliases: hint.aliases,
+      type: "concept",
+      confidence: .74,
+      mentions: 1,
+      feedback: 0,
+      status: "inferred",
+      sources: [sourceId],
+      evidence: [{ text: evidenceText, sources: [sourceId] }],
+      createdAt: normalized.source.addedAt,
+      updatedAt: normalized.source.addedAt,
+      lastReviewedAt: null
+    });
+  });
+  acceptedHints.relations
+    .filter((hint) => hint.status === "accepted")
+    .forEach((hint) => {
+      if (normalized.edges.length >= MAX_GRAPH_EDGES) return;
+      const sourceNode = normalized.nodes.find((node) => node.id === hint.source
+        || slugify(node.label) === hint.sourceLabel
+        || (node.aliases || []).some((alias) => slugify(alias) === hint.sourceLabel));
+      const targetNode = normalized.nodes.find((node) => node.id === hint.target
+        || slugify(node.label) === hint.targetLabel
+        || (node.aliases || []).some((alias) => slugify(alias) === hint.targetLabel));
+      if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) return;
+      const edgeKey = relationSemanticKey(sourceNode.id, targetNode.id, hint.label);
+      if (normalized.edges.some((edge) => relationSemanticKey(edge.source, edge.target, edge.label) === edgeKey)) return;
+      const evidenceText = sourceUnits.find((unit) => {
+        const candidate = searchable(unit);
+        const contains = (term) => ` ${candidate} `.includes(` ${term} `);
+        const sourceTerms = [sourceNode.label, ...(sourceNode.aliases || [])].map(searchable).filter(Boolean);
+        const targetTerms = [targetNode.label, ...(targetNode.aliases || [])].map(searchable).filter(Boolean);
+        return sourceTerms.some(contains) && targetTerms.some(contains);
+      }) || null;
+      if (!evidenceText) return;
+      normalized.edges.push({
+        id: makeEdgeId(sourceNode.id, targetNode.id, hint.label),
+        source: sourceNode.id,
+        target: targetNode.id,
+        label: hint.label,
+        confidence: .72,
+        feedback: 0,
+        evidence: [{ text: evidenceText, sources: [sourceId] }],
+        sources: [sourceId],
+        status: "inferred",
+        lastReviewedAt: null
+      });
+    });
   const rebindProvenance = (item) => ({
     ...item,
     sources: [sourceId],
@@ -1574,10 +1732,12 @@ export function canonicalizeGraphForExport(value) {
 }
 
 export function buildBackupEnvelope(value, history = [], { appVersion = "unknown" } = {}) {
+  if (!Array.isArray(history)) throw new TypeError("Backup history must be an array.");
+  if (history.length > MAX_BACKUP_HISTORY) {
+    throw new RangeError(`Backup history cannot contain more than ${MAX_BACKUP_HISTORY} snapshots.`);
+  }
   const graph = canonicalizeGraphForExport(value);
-  const canonicalHistory = Array.isArray(history)
-    ? history.map(canonicalizeGraphForExport)
-    : [];
+  const canonicalHistory = history.map(canonicalizeGraphForExport);
   const normalizedVersion = typeof appVersion === "string" && appVersion.trim()
     ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS)
     : "unknown";
@@ -1793,33 +1953,49 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
           break;
         }
       }
-    });
+  });
   boundedText.split("\n").map((line) => line.trim()).filter(Boolean).forEach((line) => {
-    if (/^#{1,3}\s+/.test(line)) addCandidate(line, "heading");
-    (line.match(/`([^`]+)`/g) || []).forEach((term) => addCandidate(term, "quoted"));
+    if (/^#{1,3}\s+/.test(line)) addCandidate(line, "heading", line);
+    (line.match(/`([^`]+)`/g) || []).forEach((term) => addCandidate(term, "quoted", line));
   });
   sentences.forEach((sentence) => {
     (sentence.match(/\b[A-Z][a-zA-Z0-9-]*(?:\s+[A-Z][a-zA-Z0-9-]*){0,3}\b/g) || []).forEach((term) => addCandidate(term, "phrase", sentence));
     wordsIn(sentence).forEach((word) => addCandidate(word, "term", sentence));
-    const phraseWords = [...sentence.normalize("NFKC").matchAll(/\p{Letter}[\p{Letter}\p{Number}_-]*/gu)]
-      .map((match) => match[0]);
+    const normalizedSentence = sentence.normalize("NFKC");
+    const phraseWords = [...normalizedSentence.matchAll(/\p{Letter}[\p{Letter}\p{Number}_-]*/gu)];
     let phraseCount = 0;
     for (let index = 0; index < phraseWords.length - 1 && phraseCount < MAX_PHRASE_CANDIDATES_PER_UNIT; index += 1) {
-      const left = phraseWords[index];
-      const right = phraseWords[index + 1];
+      const left = phraseWords[index][0];
+      const right = phraseWords[index + 1][0];
+      const between = normalizedSentence.slice(
+        phraseWords[index].index + left.length,
+        phraseWords[index + 1].index
+      );
       const sentenceInitialCapital = index === 0 && left !== left.toLowerCase();
       if (
         left.length < 3
         || right.length < 3
+        || !/^\s+$/.test(between)
         || (left !== left.toLowerCase() && !sentenceInitialCapital)
         || right !== right.toLowerCase()
-        || stopWords.has(left.toLowerCase())
-        || stopWords.has(right.toLowerCase())
+        || phraseNoiseWords.has(left.toLowerCase())
+        || phraseNoiseWords.has(right.toLowerCase())
+        || phraseBoundaryWords.has(left.toLowerCase())
+        || phraseBoundaryWords.has(right.toLowerCase())
       ) continue;
       addCandidate(`${left} ${right}`, "phrase", sentence);
       phraseCount += 1;
     }
   });
+  const boundedTitle = cleanPhrase(asLine(title));
+  if (!candidates.size
+    && boundedTitle
+    && boundedTitle.toLowerCase() !== "untitled document") {
+    // A title is useful topic metadata for genuinely sparse documents, but it
+    // is not source evidence: leave the evidence list empty instead of
+    // pretending the title appeared in the document body.
+    addCandidate(boundedTitle, "heading");
+  }
   const allCandidates = [...candidates.values()];
   const reviewedEndpointKeys = new Set(
     hints.relations
@@ -1947,6 +2123,8 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
         || (matchesHintEndpoint(hint, left, "target") && matchesHintEndpoint(hint, right, "source"))
       ));
       const acceptedRelation = relationHints.find((hint) => hint.status === "accepted");
+      const multilingualSentence = present.some((item) => /[^\x00-\x7F]/.test(item.label));
+      if (present.length > 2 && !acceptedRelation && !relationMatch && !multilingualSentence) continue;
       const label = acceptedRelation?.label || (relationMatch ? relationMatch[1].toLowerCase() : "co-mentioned with");
       const rejectedRelation = relationHints.find((hint) => hint.status === "rejected" && slugify(hint.label) === slugify(label));
       if (rejectedRelation) continue;
@@ -2138,28 +2316,41 @@ export function mergeExtraction(graph, extraction, { revisionReason, revisionOpe
   return { graph, duplicate: false };
 }
 
-export function replaceSource(value, sourceId, extraction, { revisionExtractor = "unknown" } = {}) {
+export function replaceSource(value, sourceId, extraction, {
+  revisionExtractor = "unknown",
+  preserveSourceCategories = false
+} = {}) {
   const graph = normalizeGraph(value);
   const importLimit = importIntegrityLimit(graph);
   if (importLimit) return { graph, replaced: false, limited: importLimit };
-  if (graph.integrity.ambiguousSourceIds.includes(normalizeId(sourceId))) {
+  const normalizedSourceId = normalizeId(sourceId);
+  if (graph.integrity.ambiguousSourceIds.includes(normalizedSourceId)) {
     return { graph, replaced: false, ambiguous: true };
   }
-  const source = graph.documents.find((document) => document.id === sourceId);
+  const source = graph.documents.find((document) => document.id === normalizedSourceId);
   if (!source) return { graph, replaced: false };
   if (!canAdvanceGraphVersion(graph)) return { graph, replaced: false, limited: "version" };
   let normalizedExtraction = normalizeExtraction(extraction);
-  const duplicate = graph.documents.some((document) => document.id !== sourceId && (
+  const duplicate = graph.documents.some((document) => document.id !== normalizedSourceId && (
     sameDocumentContent(document, normalizedExtraction.source)
   ));
   if (duplicate) return { graph, replaced: false, duplicate: true };
+  const sourceContributionCounts = (candidate) => ({
+    nodes: candidate.nodes.filter((node) => (
+      Array.isArray(node.sources) && node.sources.includes(normalizedSourceId)
+    )).length,
+    edges: candidate.edges.filter((edge) => (
+      Array.isArray(edge.sources) && edge.sources.includes(normalizedSourceId)
+    )).length
+  });
+  const previousSourceContributionCounts = sourceContributionCounts(graph);
   const incomingSourceId = normalizedExtraction.source.id;
-  const rebindSource = (candidate) => candidate === incomingSourceId ? sourceId : candidate;
+  const rebindSource = (candidate) => candidate === incomingSourceId ? normalizedSourceId : candidate;
   normalizedExtraction = {
     ...normalizedExtraction,
     source: {
       ...normalizedExtraction.source,
-      id: sourceId,
+      id: normalizedSourceId,
       addedAt: source.addedAt,
       uri: normalizedExtraction.source.uri || source.uri || null,
       quality: source.quality,
@@ -2176,14 +2367,14 @@ export function replaceSource(value, sourceId, extraction, { revisionExtractor =
       evidence: edge.evidence.map((evidence) => ({ ...evidence, sources: evidence.sources.map(rebindSource) }))
     }))
   };
-  const acceptedNodeIds = new Set(graph.nodes.filter((node) => node.status === "accepted" && node.sources.includes(sourceId)).map((node) => node.id));
-  const acceptedEdgeIds = new Set(graph.edges.filter((edge) => edge.status === "accepted" && edge.sources.includes(sourceId)).map((edge) => edge.id));
-  const removed = removeSource(graph, sourceId, { recordRevision: false });
+  const acceptedNodeIds = new Set(graph.nodes.filter((node) => node.status === "accepted" && node.sources.includes(normalizedSourceId)).map((node) => node.id));
+  const acceptedEdgeIds = new Set(graph.edges.filter((edge) => edge.status === "accepted" && edge.sources.includes(normalizedSourceId)).map((edge) => edge.id));
+  const removed = removeSource(graph, normalizedSourceId, { recordRevision: false });
   removed.graph.nodes = removed.graph.nodes.map((node) => acceptedNodeIds.has(node.id)
-    ? { ...node, sources: mergeSourceIds(node.sources, [sourceId]) }
+    ? { ...node, sources: mergeSourceIds(node.sources, [normalizedSourceId]) }
     : node);
   removed.graph.edges = removed.graph.edges.map((edge) => acceptedEdgeIds.has(edge.id)
-    ? { ...edge, sources: mergeSourceIds(edge.sources, [sourceId]) }
+    ? { ...edge, sources: mergeSourceIds(edge.sources, [normalizedSourceId]) }
     : edge);
   const merged = mergeExtraction(removed.graph, normalizedExtraction, {
     revisionReason: `Replaced ${source.title} with ${normalizedExtraction.source.title}`,
@@ -2191,10 +2382,25 @@ export function replaceSource(value, sourceId, extraction, { revisionExtractor =
     revisionExtractor
   });
   if (merged.limited || merged.duplicate) return { graph, replaced: false, limited: merged.limited, duplicate: merged.duplicate };
+  const replacementSourceContributionCounts = sourceContributionCounts(merged.graph);
+  const degradedCategories = [
+    previousSourceContributionCounts.nodes > 0 && replacementSourceContributionCounts.nodes === 0 ? "concepts" : null,
+    previousSourceContributionCounts.edges > 0 && replacementSourceContributionCounts.edges === 0 ? "relations" : null
+  ].filter(Boolean);
+  if (degradedCategories.length === 2 || (preserveSourceCategories && degradedCategories.length)) {
+    return {
+      graph,
+      replaced: false,
+      empty: degradedCategories.length === 2,
+      degraded: degradedCategories,
+      removedNodes: removed.removedNodes,
+      removedEdges: removed.removedEdges
+    };
+  }
   return {
     ...merged,
     replaced: true,
-    replacedSourceId: sourceId,
+    replacedSourceId: normalizedSourceId,
     removedNodes: removed.removedNodes,
     removedEdges: removed.removedEdges
   };
@@ -2349,6 +2555,7 @@ export function redactGraph(value) {
   const graph = normalizeGraph(value);
   graph.documents = graph.documents.map((document) => ({
     ...document,
+    title: "Redacted source",
     text: "",
     uri: null
   }));
@@ -2373,7 +2580,11 @@ export function applyFeedback(value, kind, id, action) {
   if (!collection || !["restore", "up", "down"].includes(action)) {
     return { graph, changed: false };
   }
-  const item = collection.find((candidate) => candidate.id === id);
+  const normalizedId = normalizeId(id);
+  if (kind === "edge" && graph.integrity.ambiguousEdgeIds.includes(normalizedId)) {
+    return { graph, changed: false, ambiguous: true };
+  }
+  const item = collection.find((candidate) => candidate.id === normalizedId);
   if (!item) return { graph, changed: false };
   if (!canAdvanceGraphVersion(graph)) return { graph, changed: false, limited: "version" };
   const subject = kind === "node" ? item.label : `relation ${item.label}`;
@@ -2395,7 +2606,11 @@ export function markSourceReviewed(value, sourceId) {
   const source = graph.documents.find((document) => document.id === normalizedSourceId);
   if (!source) return { graph, changed: false };
   const today = new Date().toISOString().slice(0, 10);
-  if (typeof source.lastReviewedAt === "string" && source.lastReviewedAt.slice(0, 10) === today) {
+  const existingReviewedAt = parseTimestamp(source.lastReviewedAt);
+  if (typeof source.lastReviewedAt === "string"
+    && source.lastReviewedAt.slice(0, 10) === today
+    && Number.isFinite(existingReviewedAt)
+    && existingReviewedAt <= Date.now()) {
     return { graph, changed: false, alreadyReviewed: true };
   }
   if (!canAdvanceGraphVersion(graph)) return { graph, changed: false, limited: "version" };
@@ -2408,11 +2623,13 @@ export function mergeConcepts(value, sourceId, targetId) {
   const graph = normalizeGraph(value);
   const importLimit = importIntegrityLimit(graph);
   if (importLimit) return { graph, changed: false, limited: importLimit };
-  if (typeof sourceId !== "string" || typeof targetId !== "string" || sourceId === targetId) {
+  const normalizedSourceId = normalizeId(sourceId);
+  const normalizedTargetId = normalizeId(targetId);
+  if (!normalizedSourceId || !normalizedTargetId || normalizedSourceId === normalizedTargetId) {
     return { graph, changed: false };
   }
-  const source = graph.nodes.find((node) => node.id === sourceId);
-  const target = graph.nodes.find((node) => node.id === targetId);
+  const source = graph.nodes.find((node) => node.id === normalizedSourceId);
+  const target = graph.nodes.find((node) => node.id === normalizedTargetId);
   if (!source || !target) return { graph, changed: false };
   if (!canAdvanceGraphVersion(graph)) return { graph, changed: false, limited: "version" };
 
@@ -2441,8 +2658,8 @@ export function mergeConcepts(value, sourceId, targetId) {
 
   const mergedEdges = new Map();
   graph.edges.forEach((edge) => {
-    const nextSource = edge.source === sourceId ? targetId : edge.source;
-    const nextTarget = edge.target === sourceId ? targetId : edge.target;
+    const nextSource = edge.source === normalizedSourceId ? normalizedTargetId : edge.source;
+    const nextTarget = edge.target === normalizedSourceId ? normalizedTargetId : edge.target;
     if (nextSource === nextTarget) return;
     const nextEdge = {
       ...edge,
@@ -2465,7 +2682,7 @@ export function mergeConcepts(value, sourceId, targetId) {
     existing.lastReviewedAt = newestTimestamp(existing.lastReviewedAt, nextEdge.lastReviewedAt);
   });
 
-  graph.nodes = graph.nodes.filter((node) => node.id !== sourceId);
+  graph.nodes = graph.nodes.filter((node) => node.id !== normalizedSourceId);
   graph.edges = makeUniqueEdgeIds([...mergedEdges.values()]);
   const remappedLearning = new Map();
   const setRemappedLearning = (example) => {
@@ -2476,12 +2693,12 @@ export function mergeConcepts(value, sourceId, targetId) {
   };
   graph.learning.examples.forEach((example) => {
     if (example.kind === "concept") {
-      if (example.id === sourceId || example.id === targetId) return;
+      if (example.id === normalizedSourceId || example.id === normalizedTargetId) return;
       setRemappedLearning(example);
       return;
     }
-    const nextSource = example.source === sourceId ? targetId : example.source;
-    const nextTarget = example.target === sourceId ? targetId : example.target;
+    const nextSource = example.source === normalizedSourceId ? normalizedTargetId : example.source;
+    const nextTarget = example.target === normalizedSourceId ? normalizedTargetId : example.target;
     if (nextSource === nextTarget) return;
     const endpointChanged = nextSource !== example.source || nextTarget !== example.target;
     const matchingEdge = graph.edges.find((edge) => (
@@ -2503,7 +2720,7 @@ export function mergeConcepts(value, sourceId, targetId) {
   graph.learning.examples = [...remappedLearning.values()].slice(-MAX_FEEDBACK_EXAMPLES);
   rememberLearningItem(graph, "node", target);
   appendRevision(graph, `Merged concept ${source.label} into ${target.label}`, "manual");
-  return { graph, changed: true, mergedId: targetId };
+  return { graph, changed: true, mergedId: normalizedTargetId };
 }
 
 function mutateFeedbackItem(item, action) {
@@ -2713,6 +2930,11 @@ export function applyFeedbackDataset(value, examples) {
       skipped += 1;
       return;
     }
+    if (normalizedExample.kind === "relation"
+      && graph.integrity.ambiguousEdgeIds.includes(normalizedExample.id)) {
+      skipped += 1;
+      return;
+    }
     const canonicalized = canonicalizeFeedbackExample(normalizedExample);
     const canonical = canonicalized.example;
     const memoryKey = canonicalized.item ? learningExampleKey(canonical) : portableFeedbackKey(canonical);
@@ -2854,6 +3076,7 @@ export function applyFeedbackDataset(value, examples) {
 export function buildExtractorFeedback(value, { includeStale = false, now = Date.now() } = {}) {
   const graph = normalizeGraph(value);
   const nodeLabels = new Map(graph.nodes.map((node) => [node.id, node.label]));
+  const ambiguousEdgeIds = new Set(graph.integrity.ambiguousEdgeIds);
   const concepts = graph.nodes
       .filter((node) => (node.status === "accepted" || node.status === "rejected") && includeGuidanceItem(node, includeStale, now))
       .map((node) => ({
@@ -2866,7 +3089,9 @@ export function buildExtractorFeedback(value, { includeStale = false, now = Date
       }))
       .sort((left, right) => lexicalCompare(`${left.id}\u0000${slugify(left.label)}`, `${right.id}\u0000${slugify(right.label)}`));
   const relations = graph.edges
-      .filter((edge) => (edge.status === "accepted" || edge.status === "rejected") && includeGuidanceItem(edge, includeStale, now))
+      .filter((edge) => !ambiguousEdgeIds.has(edge.id)
+        && (edge.status === "accepted" || edge.status === "rejected")
+        && includeGuidanceItem(edge, includeStale, now))
       .map((edge) => ({
         kind: "relation",
         id: edge.id,
@@ -2896,7 +3121,8 @@ export function buildExtractorFeedback(value, { includeStale = false, now = Date
     feedback.push(example);
   };
   const learningExamples = graph.learning.examples
-    .filter((example) => includeGuidanceItem(example, includeStale, now))
+    .filter((example) => !(example.kind === "relation" && ambiguousEdgeIds.has(example.id))
+      && includeGuidanceItem(example, includeStale, now))
     .map((example, index) => ({
       example,
       index,
@@ -2963,25 +3189,26 @@ export function removeSource(value, sourceId, { recordRevision = true } = {}) {
   const graph = normalizeGraph(value);
   const importLimit = importIntegrityLimit(graph);
   if (importLimit) return { graph, removed: false, removedNodes: 0, removedEdges: 0, limited: importLimit };
-  if (graph.integrity.ambiguousSourceIds.includes(normalizeId(sourceId))) {
+  const normalizedSourceId = normalizeId(sourceId);
+  if (graph.integrity.ambiguousSourceIds.includes(normalizedSourceId)) {
     return { graph, removed: false, removedNodes: 0, removedEdges: 0, ambiguous: true };
   }
-  const source = graph.documents.find((document) => document.id === sourceId);
+  const source = graph.documents.find((document) => document.id === normalizedSourceId);
   if (!source) return { graph, removed: false, removedNodes: 0, removedEdges: 0 };
   if (recordRevision && !canAdvanceGraphVersion(graph)) {
     return { graph, removed: false, removedNodes: 0, removedEdges: 0, limited: "version" };
   }
-  graph.documents = graph.documents.filter((document) => document.id !== sourceId);
+  graph.documents = graph.documents.filter((document) => document.id !== normalizedSourceId);
   const invalidatedNodeIds = new Set(graph.nodes
-    .filter((node) => node.sources.includes(sourceId) || node.evidence.some((evidence) => evidence.sources.includes(sourceId)))
+    .filter((node) => node.sources.includes(normalizedSourceId) || node.evidence.some((evidence) => evidence.sources.includes(normalizedSourceId)))
     .map((node) => node.id));
   const previousNodeIds = new Set(graph.nodes.map((node) => node.id));
   const previousNodeCount = graph.nodes.length;
   graph.nodes = graph.nodes.map((node) => {
-    const sources = node.sources.filter((id) => id !== sourceId);
+    const sources = node.sources.filter((id) => id !== normalizedSourceId);
     const evidence = node.evidence.map((item) => ({
       text: item.text,
-      sources: item.sources.filter((id) => id !== sourceId)
+      sources: item.sources.filter((id) => id !== normalizedSourceId)
     })).filter((item) => item.sources.length > 0);
     if (!sources.length && !evidence.length && node.status !== "accepted") return null;
     return { ...node, sources, evidence, updatedAt: new Date().toISOString(), lastReviewedAt: invalidatedNodeIds.has(node.id) ? null : node.lastReviewedAt };
@@ -2989,16 +3216,16 @@ export function removeSource(value, sourceId, { recordRevision = true } = {}) {
   const nodeIds = new Set(graph.nodes.map((node) => node.id));
   const removedNodeIds = new Set([...previousNodeIds].filter((id) => !nodeIds.has(id)));
   const invalidatedEdgeIds = new Set(graph.edges
-    .filter((edge) => edge.sources.includes(sourceId) || edge.evidence.some((evidence) => evidence.sources.includes(sourceId)))
+    .filter((edge) => edge.sources.includes(normalizedSourceId) || edge.evidence.some((evidence) => evidence.sources.includes(normalizedSourceId)))
     .map((edge) => edge.id));
   const previousEdgeIds = new Set(graph.edges.map((edge) => edge.id));
   const previousEdgeCount = graph.edges.length;
   graph.edges = graph.edges.map((edge) => {
     if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) return null;
-    const sources = edge.sources.filter((id) => id !== sourceId);
+    const sources = edge.sources.filter((id) => id !== normalizedSourceId);
     const evidence = edge.evidence.map((item) => ({
       text: item.text,
-      sources: item.sources.filter((id) => id !== sourceId)
+      sources: item.sources.filter((id) => id !== normalizedSourceId)
     })).filter((item) => item.sources.length > 0);
     if (!sources.length && !evidence.length && edge.status !== "accepted") return null;
     return { ...edge, sources, evidence, lastReviewedAt: invalidatedEdgeIds.has(edge.id) ? null : edge.lastReviewedAt };
@@ -3267,6 +3494,7 @@ function buildReviewQueue(graph, limit = 20, now = Date.now(), unanchoredByItem 
   const documentIds = new Set(graph.documents.map((document) => document.id));
   const documentsById = new Map(graph.documents.map((document) => [document.id, document]));
   const ambiguousSourceIds = new Set(graph.integrity.ambiguousSourceIds);
+  const ambiguousEdgeIds = new Set(graph.integrity.ambiguousEdgeIds);
   const hasValidSource = (item) => item.sources.some((sourceId) => documentIds.has(sourceId) && !ambiguousSourceIds.has(sourceId))
     || item.evidence.some((evidence) => evidence.sources.some((sourceId) => documentIds.has(sourceId) && !ambiguousSourceIds.has(sourceId)));
   const reviewAgeDays = (item) => {
@@ -3318,7 +3546,7 @@ function buildReviewQueue(graph, limit = 20, now = Date.now(), unanchoredByItem 
       supported: hasValidSource(node),
       unanchoredEvidence: unanchoredEvidenceFor("node", node)
     })),
-    ...graph.edges.filter((edge) => edge.status === "inferred").map((edge) => ({
+    ...graph.edges.filter((edge) => edge.status === "inferred" && !ambiguousEdgeIds.has(edge.id)).map((edge) => ({
       kind: "edge",
       id: edge.id,
       label: edge.label,
@@ -3339,7 +3567,9 @@ function buildReviewQueue(graph, limit = 20, now = Date.now(), unanchoredByItem 
       newEvidence: hasNewEvidenceSinceReview(node),
       staleReason: staleReason(node)
     })),
-    ...graph.edges.filter((edge) => edge.status !== "inferred" && (isStaleReview(edge) || hasNewEvidenceSinceReview(edge) || unanchoredEvidenceFor("edge", edge) > 0)).map((edge) => ({
+    ...graph.edges.filter((edge) => !ambiguousEdgeIds.has(edge.id)
+      && edge.status !== "inferred"
+      && (isStaleReview(edge) || hasNewEvidenceSinceReview(edge) || unanchoredEvidenceFor("edge", edge) > 0)).map((edge) => ({
       kind: "edge",
       id: edge.id,
       label: edge.label,
@@ -3352,7 +3582,8 @@ function buildReviewQueue(graph, limit = 20, now = Date.now(), unanchoredByItem 
       staleReason: staleReason(edge)
     })),
     ...graph.documents
-      .filter((document) => document.quality === "unknown" || isStaleSourceReview(document))
+      .filter((document) => !ambiguousSourceIds.has(document.id)
+        && (document.quality === "unknown" || isStaleSourceReview(document)))
       .map((document) => ({
         kind: "source",
         id: document.id,

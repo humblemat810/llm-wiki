@@ -85,8 +85,8 @@ Open an issue or pull request with the smallest coherent change. The project
 maintains a friendly bar: clarity, reproducibility, and intellectual honesty
 matter more than polish.
 
-Every pull request runs the dependency-free verification matrix across Node 18,
-20, 22, and 24, plus the Node and Docker runtime smoke checks. Keep changes
+Every pull request runs the dependency-free verification matrix across Node 22
+and 24, plus the Node and Docker runtime smoke checks. Keep changes
 bounded enough to complete within the repository’s 20-minute CI job limit.
 The release check also rejects mutable GitHub Action references; CodeQL and
 OpenSSF Scorecard run as separate repository-security workflows, so review

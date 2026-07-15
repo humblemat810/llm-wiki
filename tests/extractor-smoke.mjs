@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
-import { createRemoteExtractor, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_MS, ExtractorAdapterError, MAX_FEEDBACK_CHARS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES } from "../extractor-adapter.js";
+import { createRemoteExtractor, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_MS, ExtractorAdapterError, MAX_FEEDBACK_CHARS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, retryBackoffDelay } from "../extractor-adapter.js";
 import { extractGraph, MAX_EVIDENCE_CHARS, MAX_EVIDENCE_RECORDS, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_SOURCE_REFERENCES, normalizeExtractionForDocument } from "../graph-core.js";
+
+const localQualityGraph = extractGraph(
+  "Attention sample",
+  "Attention mixes information across tokens. Queries, keys, and values create a weighted lookup over context. Positional encoding gives the sequence an order."
+);
+const localQualityLabels = new Set(localQualityGraph.nodes.map((node) => node.label.toLowerCase()));
+assert(localQualityLabels.has("weighted lookup"), "local extraction should retain meaningful multi-word concepts");
+assert(localQualityLabels.has("positional encoding"), "local extraction should retain technical noun phrases");
+assert(!localQualityLabels.has("mixes information"), "local extraction should reject verb-led phrase fragments");
+assert(!localQualityLabels.has("information across"), "local extraction should reject preposition-led phrase fragments");
+assert(!localQualityLabels.has("across tokens"), "local extraction should reject preposition-led phrase fragments");
+assert(!localQualityLabels.has("encoding gives"), "local extraction should reject relation-verb phrase fragments");
+assert(!localQualityLabels.has("gives sequence"), "local extraction should reject relation-verb phrase fragments");
+assert(localQualityGraph.edges.length < localQualityGraph.nodes.length, "local extraction should avoid quadratic co-mention edge noise");
 
 const boundedJsonHeaders = { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "64" : null };
 const jsonResponse = (payload, headers = null) => {
@@ -75,6 +89,52 @@ const rejectedConceptResult = await rejectedConceptExtractor(
 );
 assert.deepEqual(rejectedConceptResult.nodes.map((node) => node.label), ["Attention"], "remote normalization must enforce rejected concept guidance even when a provider ignores it");
 assert.equal(rejectedConceptResult.edges.length, 0, "relations attached to a rejected concept must be removed at the shared extraction boundary");
+const acceptedFallback = normalizeExtractionForDocument(
+  { nodes: [], edges: [] },
+  {
+    title: "Accepted fallback",
+    text: "The latent bridge organizes signals for review and connects them to context.",
+    feedback: [
+      { kind: "concept", id: "latent-bridge", label: "Latent bridge", status: "accepted" },
+      { kind: "concept", id: "context", label: "Context", status: "accepted" },
+      { kind: "relation", id: "latent-bridge--context--connects", source: "latent-bridge", target: "context", sourceLabel: "Latent bridge", targetLabel: "Context", label: "connects", status: "accepted" }
+    ]
+  }
+);
+assert(acceptedFallback.nodes.some((node) => node.id === "latent-bridge"), "remote normalization should retain accepted concepts that the provider omitted when the submitted source contains them");
+assert(acceptedFallback.edges.some((edge) => edge.id === "latent-bridge--context--connects"), "remote normalization should retain accepted relations when both reviewed endpoints are grounded in the submitted source");
+assert(acceptedFallback.nodes.find((node) => node.id === "latent-bridge").evidence.some((evidence) => evidence.text.includes("latent bridge")), "accepted fallback concepts should carry grounded source evidence");
+const aliasAcceptedFallback = normalizeExtractionForDocument(
+  { nodes: [], edges: [] },
+  {
+    title: "Alias fallback",
+    text: "The bridge organizes signals and links them to context for review.",
+    feedback: [
+      { kind: "concept", id: "latent-bridge", label: "Latent bridge", aliases: ["bridge"], status: "accepted" },
+      { kind: "concept", id: "context", label: "Context", status: "accepted" },
+      { kind: "relation", id: "latent-bridge--context--links", source: "latent-bridge", target: "context", sourceLabel: "Latent bridge", targetLabel: "Context", label: "links", status: "accepted" }
+    ]
+  }
+);
+assert(aliasAcceptedFallback.edges.some((edge) => edge.id === "latent-bridge--context--links"), "accepted relations should ground through reviewed endpoint aliases");
+const absentAcceptedFallback = normalizeExtractionForDocument(
+  { nodes: [], edges: [] },
+  {
+    title: "Absent accepted concept",
+    text: "This source discusses unrelated material without the reviewed topic.",
+    feedback: [{ kind: "concept", id: "missing-topic", label: "Missing topic", status: "accepted" }]
+  }
+);
+assert(!absentAcceptedFallback.nodes.some((node) => node.id === "missing-topic"), "accepted fallback concepts must not be fabricated when their labels are absent from the source");
+const substringAcceptedFallback = normalizeExtractionForDocument(
+  { nodes: [], edges: [] },
+  {
+    title: "Substring boundary",
+    text: "This source contains topical discussion but no matching concept label.",
+    feedback: [{ kind: "concept", id: "topic", label: "topic", status: "accepted" }]
+  }
+);
+assert(!substringAcceptedFallback.nodes.some((node) => node.id === "topic"), "accepted fallback concepts should require token boundaries instead of matching substrings inside larger words");
 const rejectedRelationExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/rejected-relation",
   fetchImpl: async () => jsonResponse({
@@ -164,6 +224,17 @@ await assert.rejects(
   () => invalidArrayBufferExtractor({ title: "Invalid provider bytes", text: "Attention uses context to make a useful knowledge representation." }),
   (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE",
   "remote extraction must reject arrayBuffer results that are not byte data"
+);
+const invalidLengthExtractor = createRemoteExtractor({
+  endpoint: "https://extractor.example.test/invalid-content-length",
+  fetchImpl: async () => rawJsonResponse('{"nodes":[],"edges":[]}', {
+    get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "not-a-byte-count" : null
+  })
+});
+await assert.rejects(
+  () => invalidLengthExtractor({ title: "Invalid content length", text: "Attention uses context to make a useful knowledge representation." }),
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE" && error.message.includes("Content-Length is invalid"),
+  "remote extraction must reject malformed Content-Length headers"
 );
 const boundedNodes = Array.from({ length: MAX_GRAPH_NODES + 1 }, (_, index) => ({
   id: `node-${index}`,
@@ -452,6 +523,9 @@ assert.equal(MAX_FEEDBACK_CHARS, 500000, "feedback request bounds should have on
 assert.equal(MAX_REQUEST_BYTES, 2 * 1024 * 1024);
 assert.equal(DEFAULT_MAX_RETRIES, 1);
 assert.equal(DEFAULT_RETRY_DELAY_MS, 250);
+assert.equal(retryBackoffDelay(DEFAULT_RETRY_DELAY_MS, 1), 250, "first retry should use the configured base delay");
+assert.equal(retryBackoffDelay(DEFAULT_RETRY_DELAY_MS, 3), 1000, "later retries should use bounded exponential backoff");
+assert.equal(retryBackoffDelay(5000, 4), 5000, "retry backoff should remain capped at five seconds");
 let transientAttempts = 0;
 const transientExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/transient",
@@ -856,12 +930,14 @@ await assert.rejects(
   "remote streamed response readers should reject truncated bodies"
 );
 let malformedLengthJsonCalled = false;
+let malformedLengthBodyCancelCalls = 0;
 const malformedLengthExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/malformed-length",
   fetchImpl: async () => ({
     ok: true,
     status: 200,
     headers: { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "-1" : null },
+    body: { cancel: () => { malformedLengthBodyCancelCalls += 1; } },
     json: async () => {
       malformedLengthJsonCalled = true;
       return { nodes: [], edges: [] };
@@ -870,9 +946,10 @@ const malformedLengthExtractor = createRemoteExtractor({
 });
 await assert.rejects(
   () => malformedLengthExtractor({ title: "Malformed length", text: "This document is long enough to exercise malformed size metadata." }),
-  (error) => error instanceof ExtractorAdapterError && error.code === "RESPONSE_TOO_LARGE"
+  (error) => error instanceof ExtractorAdapterError && error.code === "INVALID_RESPONSE" && error.message.includes("Content-Length is invalid")
 );
 assert.equal(malformedLengthJsonCalled, false, "malformed response sizes should be rejected before JSON parsing");
+assert.equal(malformedLengthBodyCancelCalls, 1, "malformed response sizes should cancel unread response bodies");
 const unicodeOversizedResponseExtractor = createRemoteExtractor({
   endpoint: "https://extractor.example.test/unicode-oversized",
   fetchImpl: async () => {

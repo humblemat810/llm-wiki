@@ -90,6 +90,25 @@ const valid = await helper({
   arrayBuffer: async () => new TextEncoder().encode("ok").buffer
 }, 10);
 assert.equal(valid, "ok", "browser bounded response reads should preserve valid fallback data");
+let htmlResponseCancelCalls = 0;
+await assert.rejects(
+  helper({
+    headers: { get: (name) => name === "content-type" ? "text/html; charset=utf-8" : "2" },
+    body: { cancel: () => { htmlResponseCancelCalls += 1; } },
+    arrayBuffer: async () => new TextEncoder().encode("ok").buffer
+  }, 10, "HTML response"),
+  /HTML document instead of text data/,
+  "browser bounded text reads should reject same-origin HTML gateway responses"
+);
+assert.equal(htmlResponseCancelCalls, 1, "browser bounded text reads should cancel rejected HTML response bodies");
+await assert.rejects(
+  helper({
+    headers: { get: () => "not-a-byte-count" },
+    arrayBuffer: async () => new TextEncoder().encode("ok").buffer
+  }, 10, "invalid content length"),
+  /Content-Length is invalid/,
+  "browser bounded response reads should reject malformed Content-Length headers"
+);
 await assert.rejects(
   helper({
     headers: { get: () => "3" },

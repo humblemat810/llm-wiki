@@ -27,6 +27,7 @@ import {
   normalizeGraph,
   canonicalizeGraphForExport,
   buildBackupEnvelope,
+  validateBackupEnvelope,
   buildGraphExport,
   compareGraphFreshness,
   extractGraph,
@@ -51,20 +52,21 @@ import {
   syncLearningRelationLabels,
   slugify,
   makeEdgeId,
-  asArray,
   normalizeSourceUri,
   SOURCE_QUALITIES,
   DEFAULT_GRAPH_TIMESTAMP,
   parseJsonWithUniqueKeys,
   parseTimestamp,
-  sliceTextAtCodePointBoundary
+  sliceTextAtCodePointBoundary,
+  relationSemanticKey
 } from "./graph-core.js";
-import { GRAPH_KEY, createGraphStore } from "./graph-store.js";
-import { MAX_FEEDBACK_NOTE_CHARS, MAX_ZIP_BYTES, MAX_ZIP_FILES, applyObsidianFeedback, looksLikeObsidianFeedback, parseObsidianFeedback, parseObsidianVault } from "./projection-adapter.js";
+import { GRAPH_KEY, HISTORY_KEY, createGraphStore } from "./graph-store.js";
+import { MAX_FEEDBACK_NOTE_CHARS, MAX_LEARNING_EXPORT_NOTES, MAX_ZIP_BYTES, MAX_ZIP_FILES, applyObsidianFeedback, looksLikeObsidianFeedback, parseObsidianFeedback, parseObsidianVault } from "./projection-adapter.js";
 import { createRemoteExtractor } from "./extractor-adapter.js";
 import { rebuildSources } from "./rebuild-adapter.js";
 import { getBrowserStorage, isExternalStorageRemoval } from "./storage-adapter.js";
 import { buildJsonLd } from "./jsonld-projection.js";
+import { decryptBackup, encryptBackup, isEncryptedBackup, ENCRYPTED_BACKUP_FORMAT, MAX_ENCRYPTED_BACKUP_BYTES, MIN_BACKUP_PASSWORD_CHARS } from "./backup-crypto.js";
 import { notes, noteDetails } from "./curriculum.js";
 
 const path = [
@@ -127,21 +129,62 @@ async function copyText(value) {
   if (!copied) throw new Error("Copy is unavailable in this browser.");
 }
 
+async function tryShareFile({ filename, content, type, title, text }) {
+  let file = null;
+  if (typeof File === "function") {
+    try {
+      file = new File([content], filename, { type });
+    } catch {
+      return { shared: false, canceled: false };
+    }
+  }
+  let canShareFile = Boolean(file && typeof navigator.share === "function");
+  if (canShareFile && typeof navigator.canShare === "function") {
+    try {
+      canShareFile = navigator.canShare({ files: [file] }) === true;
+    } catch {
+      canShareFile = false;
+    }
+  }
+  if (!canShareFile) return { shared: false, canceled: false };
+  try {
+    await navigator.share({ title, text, files: [file] });
+    return { shared: true, canceled: false };
+  } catch (error) {
+    return { shared: false, canceled: error?.name === "AbortError" };
+  }
+}
+
 const browserStorage = getBrowserStorage();
 await browserStorage.ready;
 const flushBrowserStorage = () => {
   void browserStorage.flush?.();
 };
-window.addEventListener("pagehide", flushBrowserStorage);
+window.addEventListener("pagehide", () => {
+  flushBrowserStorage();
+  revokeAllObjectUrls();
+});
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") flushBrowserStorage();
 });
+document.addEventListener("freeze", flushBrowserStorage);
 const RELEASE_METADATA_TIMEOUT_MS = 5000;
 const MAX_RELEASE_METADATA_CHARS = 4096;
 const declaredResponseBytes = (response) => {
   const header = response.headers?.get?.("content-length");
   const normalized = typeof header === "string" ? header.trim() : "";
-  return /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
+  if (!normalized) return Number.NaN;
+  if (!/^\d+$/.test(normalized) || !Number.isSafeInteger(Number(normalized))) {
+    throw new Error("The response Content-Length is invalid.");
+  }
+  return Number(normalized);
+};
+const cancelTextResponseBody = (response) => {
+  try {
+    Promise.resolve(response?.body?.cancel?.()).catch(() => {});
+  } catch {
+    // A non-conforming response body must not suppress bounded failure handling.
+  }
 };
 const isReadableSameOriginResponse = (response) => {
   if (response?.type === "opaque" || response?.type === "opaqueredirect") return false;
@@ -255,8 +298,21 @@ const restoreStoredDocumentDraft = () => {
   }
 };
 const commitDocumentDraft = () => {
+  if (draftSaveTimer) {
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = null;
+  }
   committedDocumentDraft = readDocumentDraft();
   clearStoredDocumentDraft();
+};
+const flushDocumentDraft = () => {
+  if (draftSaveTimer) {
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = null;
+  }
+  if (hasUnsavedDocumentDraft()) saveDocumentDraft();
+  else clearStoredDocumentDraft();
+  flushBrowserStorage();
 };
 const updateConnectionStatus = () => {
   if (!connectionStatus) return;
@@ -274,6 +330,11 @@ const updateConnectionStatus = () => {
     if (message) message.textContent = "The local graph and cached wiki remain available; remote extraction will resume when you reconnect.";
   }
 };
+window.addEventListener("pagehide", flushDocumentDraft);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushDocumentDraft();
+});
+document.addEventListener("freeze", flushDocumentDraft);
 window.addEventListener("online", updateConnectionStatus);
 window.addEventListener("offline", updateConnectionStatus);
 updateConnectionStatus();
@@ -296,7 +357,7 @@ const graphHasContent = (graph) => Boolean(
 window.addEventListener("beforeunload", (event) => {
   const queuedFiles = pendingFiles.length > 0;
   const unsavedDocumentDraft = hasUnsavedDocumentDraft();
-  if (!queuedFiles && !unsavedDocumentDraft && hasPersistentStorage && !storageDurabilityFailure) return;
+  if (!queuedFiles && !unsavedDocumentDraft && hasPersistentStorage && hasDurableStorage && !storageDurabilityFailure) return;
   let graph;
   try {
     graph = graphStore.read();
@@ -445,8 +506,8 @@ function renderNotes() {
         <span>${escapeHtml(note.meta)}</span>
         <div>
           <a class="open-note" href="#note=${encodeURIComponent(note.id)}" data-open-note="${escapeHtml(note.id)}">open note <span>↗</span></a>
-          <a class="note-source" href="./notes/${encodeURIComponent(note.id)}.html" target="_blank" rel="noopener">viewer</a>
-          <a class="note-source" href="./notes/${encodeURIComponent(note.id)}.md" target="_blank" rel="noopener">markdown</a>
+          <a class="note-source" href="./notes/${encodeURIComponent(note.id)}.html" target="_blank" rel="noopener noreferrer">viewer</a>
+          <a class="note-source" href="./notes/${encodeURIComponent(note.id)}.md" target="_blank" rel="noopener noreferrer">markdown</a>
           <button type="button" class="copy-note" data-copy-note="${escapeHtml(note.id)}" aria-label="Copy link to ${escapeHtml(note.title)}">copy link</button>
           <button type="button" class="mark-done" data-note="${escapeHtml(note.id)}" aria-label="Mark ${escapeHtml(note.title)} as read">
             ${done.includes(note.id) ? "✓ read" : "mark read"}
@@ -636,6 +697,7 @@ const MAX_SEARCH_EVIDENCE_CHARS = 2000;
 const MAX_RENDERED_GRAPH_NODES = 250;
 const MAX_RENDERED_GRAPH_EDGES = 500;
 const MAX_EXPORT_BYTES = 50 * 1024 * 1024;
+const MAX_BACKUP_IMPORT_BYTES = MAX_ENCRYPTED_BACKUP_BYTES;
 const graphStore = createGraphStore(appStorage);
 const hasImportIntegrityLoss = (graph) => [
   ...Object.values(graph?.integrity?.truncated || {}),
@@ -753,7 +815,12 @@ browserStorage.subscribe((event) => {
     updatePrivacyNote();
     return;
   }
-  if (!event.external || event.key !== GRAPH_KEY) return;
+  if (!event.external || ![GRAPH_KEY, HISTORY_KEY].includes(event.key)) return;
+  if (event.key === HISTORY_KEY) {
+    renderWorkbench();
+    document.querySelector("#ingest-status").textContent = "Undo history updated in another tab; this view was refreshed.";
+    return;
+  }
   if (isExternalStorageRemoval(event, GRAPH_KEY)) {
     lastRenderedGraphState = null;
     renderWorkbench();
@@ -820,7 +887,7 @@ function updatePrivacyNote() {
     : hasPersistentStorage
     ? hasDurableStorage
       ? "The graph remains in durable browser storage; do not configure secrets in this page."
-      : "The graph remains in browser storage; do not configure secrets in this page."
+    : "The graph remains in synchronous browser storage only; export a backup before leaving this tab and do not configure secrets in this page."
     : "Browser storage is unavailable, so this graph will last only until this tab is reloaded.";
   privacyNote.textContent = extractorState === "INVALID"
     ? `The extractor endpoint is invalid; no document will be sent remotely until it is corrected. ${storageNote}`
@@ -897,7 +964,8 @@ function createGraphSearchIndex(graph) {
     .map((item) => sliceTextAtCodePointBoundary(item.text, MAX_SEARCH_EVIDENCE_CHARS))
     .join(" ");
   const sourceSearchText = (document) => {
-    if (sourceSearchTextCache.has(document)) return sourceSearchTextCache.get(document);
+    const cacheKey = document.id;
+    if (sourceSearchTextCache.has(cacheKey)) return sourceSearchTextCache.get(cacheKey);
     const parts = [
       document.title || document.id,
       document.uri || "",
@@ -906,7 +974,7 @@ function createGraphSearchIndex(graph) {
       sliceTextAtCodePointBoundary(document.text, MAX_SEARCH_TEXT_CHARS)
     ];
     const text = sliceTextAtCodePointBoundary(parts.join(" "), MAX_SEARCH_TEXT_CHARS).toLowerCase();
-    sourceSearchTextCache.set(document, text);
+    sourceSearchTextCache.set(cacheKey, text);
     return text;
   };
   const sourceTitles = (sources) => sources.map((sourceId) => {
@@ -914,7 +982,7 @@ function createGraphSearchIndex(graph) {
     return document ? sourceSearchText(document) : sourceId;
   }).join(" ");
   const nodeText = (node) => {
-    if (nodeTextCache.has(node)) return nodeTextCache.get(node);
+    if (nodeTextCache.has(node.id)) return nodeTextCache.get(node.id);
     const text = sliceTextAtCodePointBoundary([
       node.label,
       ...(node.aliases || []),
@@ -922,11 +990,11 @@ function createGraphSearchIndex(graph) {
       sourceTitles(node.sources),
       evidenceText(node.evidence)
     ].join(" "), MAX_SEARCH_TEXT_CHARS).toLowerCase();
-    nodeTextCache.set(node, text);
+    nodeTextCache.set(node.id, text);
     return text;
   };
   const edgeText = (edge, nodeName) => {
-    if (edgeTextCache.has(edge)) return edgeTextCache.get(edge);
+    if (edgeTextCache.has(edge.id)) return edgeTextCache.get(edge.id);
     const text = sliceTextAtCodePointBoundary([
       nodeName(edge.source),
       edge.label,
@@ -935,7 +1003,7 @@ function createGraphSearchIndex(graph) {
       sourceTitles(edge.sources),
       evidenceText(edge.evidence)
     ].join(" "), MAX_SEARCH_TEXT_CHARS).toLowerCase();
-    edgeTextCache.set(edge, text);
+    edgeTextCache.set(edge.id, text);
     return text;
   };
   return { documentTitleMap, nodeText, edgeText, sourceText: sourceSearchText };
@@ -960,7 +1028,51 @@ function fitGraphPositions(graph, visibleNodes = getVisibleNodes(graph)) {
   }));
 }
 
+const GRAPH_ITEM_HASH_PATTERN = /^#item=([^&]+)$/;
+const parseGraphItemHash = (hash = location.hash) => {
+  const match = String(hash || "").match(GRAPH_ITEM_HASH_PATTERN);
+  if (!match) return null;
+  try {
+    const encoded = decodeURIComponent(match[1]);
+    const separator = encoded.indexOf(":");
+    if (separator < 1) return null;
+    const kind = encoded.slice(0, separator);
+    const id = encoded.slice(separator + 1);
+    return ["node", "edge", "source"].includes(kind) && id ? { kind, id } : null;
+  } catch {
+    return null;
+  }
+};
+const buildGraphItemHash = (kind, id) => `#item=${encodeURIComponent(`${kind}:${id}`)}`;
+const buildGraphItemUrl = (kind, id) => {
+  const shareUrl = new URL(location.href);
+  shareUrl.username = "";
+  shareUrl.password = "";
+  shareUrl.search = "";
+  shareUrl.hash = buildGraphItemHash(kind, id);
+  return shareUrl.toString();
+};
+const buildGraphItemShareData = (kind, id) => ({
+  title: "LLM Field Notes local graph item",
+  text: "Inspect this local graph item in LLM Field Notes.",
+  url: buildGraphItemUrl(kind, id)
+});
+async function shareGraphItem(kind, id) {
+  const shareData = buildGraphItemShareData(kind, id);
+  if (typeof navigator.share === "function") {
+    try {
+      await navigator.share(shareData);
+      return { mode: "shared", shareData };
+    } catch (error) {
+      if (error?.name === "AbortError") return { mode: "canceled", shareData };
+      throw error;
+    }
+  }
+  await copyText(shareData.url);
+  return { mode: "copied", shareData };
+}
 let selectedGraphItem = null;
+let graphItemSelectionFromLocation = false;
 let lastRenderedGraphState = null;
 const workbenchDerivedCache = {
   fingerprint: null,
@@ -968,6 +1080,10 @@ const workbenchDerivedCache = {
   health: null,
   reviews: null,
   markdown: null
+};
+const workbenchSearchCache = {
+  fingerprint: null,
+  index: null
 };
 function renderInspector(graph) {
   const panel = document.querySelector("#inspector-panel");
@@ -996,7 +1112,7 @@ function renderInspector(graph) {
       ? `<button type="button" data-inspector-feedback="restore" data-node-id="${escapeHtml(node.id)}">↺ restore</button>`
       : `<button type="button" data-inspector-feedback="up" data-node-id="${escapeHtml(node.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-node-id="${escapeHtml(node.id)}">− dismiss</button>`;
     panel.innerHTML = `
-      <div class="inspector-header"><span>CONCEPT / ${escapeHtml(node.status.toUpperCase())}</span><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback${node.feedback === 1 ? "" : "s"}${node.lastReviewedAt ? ` · reviewed ${escapeHtml(node.lastReviewedAt)}` : ""}${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</small></div>
+      <div class="inspector-header"><span>CONCEPT / ${escapeHtml(node.status.toUpperCase())}</span><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback${node.feedback === 1 ? "" : "s"}${node.lastReviewedAt ? ` · reviewed ${escapeHtml(node.lastReviewedAt)}` : ""}${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">share item</button></div>
       <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
       <div class="inspector-edit"><label for="inspector-node-label">EDIT LABEL</label><div><input id="inspector-node-label" class="inspector-edit-input" value="${escapeHtml(node.label)}" maxlength="120" /><button type="button" data-edit-node="${escapeHtml(node.id)}">save</button></div></div>
       ${mergeTargets.length ? `<div class="inspector-merge"><label for="inspector-merge-target">MERGE INTO</label><div><select id="inspector-merge-target" class="inspector-edit-input">${mergeTargets.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.label)}</option>`).join("")}</select><button type="button" data-merge-node="${escapeHtml(node.id)}">merge</button></div><small>Keep the selected concept as the stable ID; evidence, aliases, and relations will be combined. This can be undone.</small></div>` : ""}
@@ -1023,10 +1139,11 @@ function renderInspector(graph) {
     const relatedNodes = graph.nodes.filter((node) => node.sources.includes(source.id));
     const qualityOptions = [...SOURCE_QUALITIES].map((quality) => `<option value="${escapeHtml(quality)}"${source.quality === quality ? " selected" : ""}>${escapeHtml(quality)}</option>`).join("");
     const reviewedDate = source.lastReviewedAt ? source.lastReviewedAt.slice(0, 10) : "";
+    const maximumReviewDate = new Date().toISOString().slice(0, 10);
     panel.innerHTML = `
-      <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small></div>
-      <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="${MAX_DOCUMENT_TITLE_CHARS}" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" /><button type="button" data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
-      <button type="button" class="text-button" data-review-source="${escapeHtml(source.id)}">mark reviewed today</button>
+      <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">share item</button></div>
+      <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="${MAX_DOCUMENT_TITLE_CHARS}" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" max="${maximumReviewDate}" /><button type="button" data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
+      <button type="button" class="text-button" data-review-source="${escapeHtml(source.id)}">mark reviewed today (UTC)</button>
       <button type="button" class="replace-source" data-replace-source="${escapeHtml(source.id)}">Replace source with a newer file</button>
       <button type="button" class="remove-source" data-remove-source="${escapeHtml(source.id)}">Remove source from graph</button>
       <div class="inspector-source-actions"><span class="inspector-label">CONCEPTS FOUND</span>${relatedNodes.length ? relatedNodes.map((node) => `<button type="button" class="inspector-link" data-select-node="${escapeHtml(node.id)}">${escapeHtml(node.label)} <small>${escapeHtml(node.status)}</small></button>`).join("") : "<p class=\"inspector-muted\">No concepts attached.</p>"}</div>
@@ -1045,7 +1162,7 @@ function renderInspector(graph) {
     ? `<button type="button" data-inspector-feedback="restore" data-edge-id="${escapeHtml(edge.id)}">↺ restore</button>`
     : `<button type="button" data-inspector-feedback="up" data-edge-id="${escapeHtml(edge.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-edge-id="${escapeHtml(edge.id)}">− dismiss</button>`;
   panel.innerHTML = `
-  <div class="inspector-header"><span>RELATION / ${escapeHtml(edge.status.toUpperCase())}</span><strong>${escapeHtml(source?.label || edge.source)} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(target?.label || edge.target)}</strong><small>${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback${edge.feedback === 1 ? "" : "s"} · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}${edge.lastReviewedAt ? ` · reviewed ${escapeHtml(edge.lastReviewedAt)}` : ""}</small></div>
+  <div class="inspector-header"><span>RELATION / ${escapeHtml(edge.status.toUpperCase())}</span><strong>${escapeHtml(source?.label || edge.source)} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(target?.label || edge.target)}</strong><small>${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback${edge.feedback === 1 ? "" : "s"} · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}${edge.lastReviewedAt ? ` · reviewed ${escapeHtml(edge.lastReviewedAt)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">share item</button></div>
     <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
     <div class="inspector-edit"><label for="inspector-edge-label">EDIT RELATION</label><div><input id="inspector-edge-label" class="inspector-edit-input" value="${escapeHtml(edge.label)}" maxlength="80" /><button type="button" data-edit-edge="${escapeHtml(edge.id)}">save</button></div></div>
     <div class="inspector-evidence"><span class="inspector-label">EVIDENCE</span>${edge.evidence.length ? `<ul>${edge.evidence.map(evidenceMarkup).join("")}</ul>` : "<p class=\"inspector-muted\">No evidence captured.</p>"}</div>`;
@@ -1061,7 +1178,11 @@ function renderWorkbenchUnsafe() {
   const inspectionTime = Date.now();
   const derivedCacheHit = workbenchDerivedCache.fingerprint === graphFingerprint
     && workbenchDerivedCache.expiresAt > inspectionTime;
-  const searchIndex = createGraphSearchIndex(graph);
+  const searchIndex = workbenchSearchCache.fingerprint === graphFingerprint && workbenchSearchCache.index
+    ? workbenchSearchCache.index
+    : createGraphSearchIndex(graph);
+  workbenchSearchCache.fingerprint = graphFingerprint;
+  workbenchSearchCache.index = searchIndex;
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
   const matchingNodes = getVisibleNodes(graph, searchIndex);
   const visibleNodes = matchingNodes.slice(0, MAX_RENDERED_GRAPH_NODES);
@@ -1105,11 +1226,13 @@ function renderWorkbenchUnsafe() {
   const storageMode = graphStore.getLastWriteMode();
   const reducedHistory = storageMode === "without-history" || storageMode === "without-new-history";
   const ephemeralStorage = !hasPersistentStorage;
+  const fallbackStorage = hasPersistentStorage && !hasDurableStorage;
   const storageWarning = [
     ephemeralStorage ? "<small class=\"storage-warning\">Browser storage unavailable; changes last only this tab</small>" : "",
+    fallbackStorage ? "<small class=\"storage-warning\">Durable IndexedDB unavailable; browser storage may be evicted</small>" : "",
     reducedHistory ? "<small class=\"storage-warning\">Saved with reduced undo history</small>" : "",
     storageDurabilityFailure ? "<small class=\"storage-warning\">Durable storage unavailable</small>" : "",
-    ephemeralStorage || reducedHistory || storageDurabilityFailure ? `<button type="button" data-storage-action="backup">download backup</button>` : ""
+    ephemeralStorage || fallbackStorage || reducedHistory || storageDurabilityFailure ? `<button type="button" data-storage-action="backup">download backup</button>` : ""
   ].filter(Boolean).join("");
   const truncationDetails = [
     health.truncatedDocumentTitle ? `${health.truncatedDocumentTitle} document title${health.truncatedDocumentTitle === 1 ? "" : "s"} clipped` : "",
@@ -1444,6 +1567,91 @@ function buildRedactedMarkdownProjection() {
   return markdown;
 }
 
+function buildRedactedHtmlProjection() {
+  const graph = redactGraph(graphStore.read());
+  assertGraphTextExportBudget([graph]);
+  const health = inspectGraph(graph);
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const labelFor = (id) => nodeById.get(id)?.label || id;
+  const reviewedItems = [...graph.nodes, ...graph.edges].filter((item) => item.status !== "inferred" || item.feedback !== 0);
+  const card = (label, value) => `<div class="stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+  const sourceItems = graph.documents.length
+    ? graph.documents.map((document, index) => `<li><strong>Source ${index + 1}</strong><span>${escapeHtml(document.quality)} quality${document.lastReviewedAt ? ` · reviewed ${escapeHtml(document.lastReviewedAt.slice(0, 10))}` : ""}</span></li>`).join("")
+    : "<li>No source documents.</li>";
+  const conceptItems = graph.nodes.length
+    ? graph.nodes.map((node) => `<li><strong>${escapeHtml(node.label)}</strong><span>${escapeHtml(node.status)} · ${(node.confidence * 100).toFixed(0)}% confidence${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</span></li>`).join("")
+    : "<li>No concepts.</li>";
+  const relationItems = graph.edges.length
+    ? graph.edges.map((edge) => `<li><strong>${escapeHtml(labelFor(edge.source))} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(labelFor(edge.target))}</strong><span>${escapeHtml(edge.status)} · ${(edge.confidence * 100).toFixed(0)}% confidence</span></li>`).join("")
+    : "<li>No relations.</li>";
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'unsafe-inline'">
+  <title>Redacted knowledge graph · LLM Field Notes</title>
+  <style>
+    :root { color-scheme: light; --ink: #171513; --muted: #6d655e; --line: #ded8d0; --paper: #f7f4ef; --accent: #b84b32; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font: 16px/1.55 system-ui, sans-serif; }
+    main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0 72px; }
+    header { border-bottom: 2px solid var(--ink); padding-bottom: 28px; }
+    .eyebrow { color: var(--accent); font-size: .75rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { font: 700 clamp(2.4rem, 7vw, 5.5rem)/.95 Georgia, serif; letter-spacing: -.05em; margin: 12px 0; max-width: 760px; }
+    h2 { font: 700 2rem/1.05 Georgia, serif; margin: 0 0 18px; }
+    .lede { color: var(--muted); max-width: 680px; }
+    .notice { border-left: 4px solid var(--accent); margin: 28px 0; padding: 12px 16px; background: #fffaf5; }
+    .stats { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); margin: 28px 0 48px; }
+    .stat, section { border: 1px solid var(--line); background: #fffdf9; }
+    .stat { padding: 16px; }
+    .stat span, li span { color: var(--muted); display: block; font-size: .86rem; }
+    .stat strong { display: block; font-size: 1.6rem; }
+    section { margin: 18px 0; padding: 24px; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li { border-top: 1px solid var(--line); padding: 12px 0; }
+    li:first-child { border-top: 0; padding-top: 0; }
+    em { color: var(--accent); font-style: normal; }
+    footer { color: var(--muted); font-size: .85rem; margin-top: 36px; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">LLM Field Notes · public snapshot</div>
+      <h1>Redacted knowledge graph</h1>
+      <p class="lede">A readable projection of an inspectable, evolving internal representation.</p>
+      <div class="notice"><strong>Privacy boundary:</strong> source text, evidence quotes, and source URIs were removed before this file was generated.</div>
+    </header>
+    <div class="stats">
+      ${card("Concepts", graph.nodes.length)}
+      ${card("Relations", graph.edges.length)}
+      ${card("Sources", graph.documents.length)}
+      ${card("Reviewed", reviewedItems.length)}
+      ${card("Provenance", `${health.provenanceCoverage}%`)}
+      ${card("Review queue", health.reviewCandidates)}
+    </div>
+    <section><h2>Sources</h2><ul>${sourceItems}</ul></section>
+    <section><h2>Concepts</h2><ul>${conceptItems}</ul></section>
+    <section><h2>Relations</h2><ul>${relationItems}</ul></section>
+    <section><h2>Health</h2><ul>
+      <li><strong>Provenance coverage</strong><span>${health.provenanceCoverage}% of active concepts and relations have source support.</span></li>
+      <li><strong>Source review coverage</strong><span>${health.sourceReviewCoverage}% historical · ${health.freshSourceReviewCoverage}% fresh.</span></li>
+      <li><strong>Evidence grounding</strong><span>${health.evidenceGroundingAvailable ? `${health.evidenceGroundingCoverage}% anchored${health.unanchoredEvidenceRecords ? ` · ${health.unanchoredEvidenceRecords} unanchored` : ""}` : "Unavailable in this redacted projection."}</span></li>
+      <li><strong>Graph fingerprint</strong><span><code>${escapeHtml(fingerprintBackup(graph))}</code></span></li>
+    </ul></section>
+    <footer>Generated by LLM Field Notes. This static file contains no scripts and no source-bearing graph fields.</footer>
+  </main>
+</body>
+</html>`;
+  if (textEncoder.encode(html).byteLength > MAX_EXPORT_BYTES) {
+    throw new Error("This redacted HTML projection exceeds the 50 MB safety limit; use a bounded graph.");
+  }
+  return html;
+}
+
 function buildFeedbackDataset(graph) {
   const trustedFeedbackTime = (value) => {
     const timestamp = parseTimestamp(value);
@@ -1620,7 +1828,7 @@ function buildProjectionPaths(graph) {
     .forEach((doc) => sources.set(doc.id, allocate("Sources", doc.id, "source")));
   [...graph.edges]
     .sort((left, right) => compare(`${left.id}\u0000${left.source}\u0000${left.target}`, `${right.id}\u0000${right.source}\u0000${right.target}`))
-    .forEach((edge) => relations.set(edge, allocate("Relations", edge.id, "relation")));
+    .forEach((edge) => relations.set(edge.id, allocate("Relations", edge.id, "relation")));
   return { nodes, sources, relations };
 }
 
@@ -1653,6 +1861,27 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
   const sourceById = new Map(projectedDocuments.map((doc) => [doc.id, doc]));
   const nodeDisplay = (id) => safeMarkdownLabel(nodeById.get(id)?.label || id);
   const sourceDisplay = (id) => safeMarkdownLabel(sourceById.get(id)?.title || id);
+  const canvasNodes = projectedNodes.map((node, index) => ({
+    id: `concept-${index}`,
+    type: "file",
+    file: paths.nodes.get(node.id),
+    x: (index % 4) * 360,
+    y: Math.floor(index / 4) * 240,
+    width: 300,
+    height: 180,
+    color: node.status === "accepted" ? "4" : node.status === "rejected" ? "1" : "5"
+  }));
+  const canvasNodeIds = new Map(projectedNodes.map((node, index) => [node.id, canvasNodes[index].id]));
+  const canvasEdges = projectedEdges
+    .filter((edge) => canvasNodeIds.has(edge.source) && canvasNodeIds.has(edge.target))
+    .map((edge, index) => ({
+      id: `relation-${index}`,
+      fromNode: canvasNodeIds.get(edge.source),
+      toNode: canvasNodeIds.get(edge.target),
+      fromSide: "right",
+      toSide: "left",
+      label: safeMarkdownLabel(edge.label)
+    }));
   const relatedByNode = new Map(projectedNodes.map((node) => [node.id, []]));
   projectedEdges.forEach((edge) => {
     relatedByNode.get(edge.source)?.push(edge);
@@ -1689,6 +1918,7 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
       "## Contents",
       "",
       "- [[_index]] — graph overview, evidence, learning ledger, and revision history.",
+      "- [[Graph.canvas]] — native Obsidian Canvas view of concept cards and relations.",
       "- [[Learning/review-ledger]] — reusable reviewed decisions that guide future extraction.",
       "- [[Relations]] — relation-oriented browse view.",
       "- `Concepts/` — one editable note per concept.",
@@ -1701,7 +1931,12 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
     ].join("\n")
   });
   addVaultFile({ name: "_index.md", content: buildMarkdown(projectedGraph, { graphFingerprint }) });
-  const learningDecisionLines = projectedGraph.learning.examples.map((example) => {
+  addVaultFile({
+    name: "Graph.canvas",
+    content: JSON.stringify({ nodes: canvasNodes, edges: canvasEdges }, null, 2)
+  });
+  const learningDecisionExamples = buildFeedbackDataset(projectedGraph).examples;
+  const learningDecisionLines = learningDecisionExamples.map((example) => {
     const reviewedAt = example.lastReviewedAt ? ` · reviewed ${safeMarkdownLabel(example.lastReviewedAt)}` : "";
     if (example.kind === "concept") {
       const path = paths.nodes.get(example.id);
@@ -1710,7 +1945,7 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
       return `- concept: ${link} — ${example.status}${reviewedAt}`;
     }
     const edge = projectedEdges.find((candidate) => candidate.id === example.id);
-    const path = edge ? paths.relations.get(edge) : null;
+    const path = edge ? paths.relations.get(edge.id) : null;
     const label = safeMarkdownLabel(example.label);
     const relation = `${safeMarkdownLabel(example.sourceLabel || example.source)} ${label} ${safeMarkdownLabel(example.targetLabel || example.target)}`;
     const link = path ? `[[${path}|${relation}]]` : relation;
@@ -1810,7 +2045,7 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
   });
   projectedEdges.forEach((edge) => {
     addVaultFile({
-      name: paths.relations.get(edge),
+      name: paths.relations.get(edge.id),
       content: [
         "---",
         "type: relation",
@@ -1849,12 +2084,14 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
 async function buildLearningVaultFiles({ estimatedArchiveBytes = 22 } = {}) {
   const files = [];
   const failures = [];
+  const unavailableNotes = [];
   let totalChars = 0;
   const exportDeadline = Date.now() + MAX_LEARNING_VAULT_EXPORT_MS;
   for (const note of notes) {
     const remainingMs = exportDeadline - Date.now();
     if (remainingMs <= 0) {
       failures.push(`${note.id}: export timed out`);
+      unavailableNotes.push(note.id);
       continue;
     }
       const controller = new AbortController();
@@ -1877,11 +2114,35 @@ async function buildLearningVaultFiles({ estimatedArchiveBytes = 22 } = {}) {
     } catch (error) {
       if (error?.code === "VAULT_TOO_LARGE") throw error;
       failures.push(`${note.id}: ${error?.name === "AbortError" ? "request timed out" : boundedOperationDiagnostic(error, "could not load")}`);
+      unavailableNotes.push(note.id);
     } finally {
       clearTimeout(timeout);
     }
   }
-  return { files, failures };
+  return {
+    files,
+    failures,
+    requested: notes.length,
+    unavailableNotes: [...new Set(unavailableNotes)].slice(0, MAX_LEARNING_EXPORT_NOTES)
+  };
+}
+
+function stampLearningVaultStatus(files, learning) {
+  const manifestFile = files.find((file) => file.name === "vault-manifest.json");
+  if (!manifestFile) throw new Error("The Obsidian vault is missing its projection manifest.");
+  const manifest = parseJsonWithUniqueKeys(manifestFile.content, "Vault manifest");
+  const unavailable = Array.isArray(learning?.unavailableNotes)
+    ? learning.unavailableNotes.slice(0, MAX_LEARNING_EXPORT_NOTES)
+    : [];
+  const requested = Number.isSafeInteger(learning?.requested) ? learning.requested : 0;
+  const included = Array.isArray(learning?.files) ? learning.files.length : 0;
+  manifest.learning = {
+    requested,
+    included,
+    unavailable,
+    complete: unavailable.length === 0 && included === requested
+  };
+  manifestFile.content = JSON.stringify(manifest, null, 2);
 }
 
 let vaultExportInFlight = false;
@@ -1916,12 +2177,30 @@ const assertVaultGraphUnchanged = (fingerprint) => {
 async function readBoundedTextResponse(response, maxChars, errorMessage = "note exceeds the 1 MB safety limit", signal) {
   const maxBytes = maxChars * 4;
   if (signal?.aborted) throw Object.assign(new Error("The response read was aborted."), { name: "AbortError" });
-  const declaredLength = declaredResponseBytes(response);
+  const responseContentType = response.headers?.get?.("content-type");
+  const responseMediaType = typeof responseContentType === "string"
+    ? responseContentType.split(";", 1)[0].trim().toLowerCase()
+    : "";
+  if (responseMediaType === "text/html" || responseMediaType === "application/xhtml+xml") {
+    cancelTextResponseBody(response);
+    throw new Error("The response returned an HTML document instead of text data.");
+  }
+  let declaredLength;
+  try {
+    declaredLength = declaredResponseBytes(response);
+  } catch (error) {
+    cancelTextResponseBody(response);
+    throw error;
+  }
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    cancelTextResponseBody(response);
     throw new Error(errorMessage);
   }
   if (!response.body?.getReader) {
-    if (!Number.isFinite(declaredLength) || declaredLength > maxBytes) throw new Error(errorMessage);
+    if (!Number.isFinite(declaredLength) || declaredLength > maxBytes) {
+      cancelTextResponseBody(response);
+      throw new Error(errorMessage);
+    }
     if (typeof response.arrayBuffer === "function") {
       let abortHandler;
       const abortPromise = signal
@@ -1963,11 +2242,15 @@ async function readBoundedTextResponse(response, maxChars, errorMessage = "note 
         if (abortHandler) signal.removeEventListener("abort", abortHandler);
       }
     }
+    cancelTextResponseBody(response);
     throw new Error("This browser cannot validate response encoding safely.");
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
+  let readerCancellationRequested = false;
   const abortReader = () => {
+    if (readerCancellationRequested) return;
+    readerCancellationRequested = true;
     try {
       Promise.resolve(reader.cancel?.()).catch(() => {});
     } catch {
@@ -1977,6 +2260,8 @@ async function readBoundedTextResponse(response, maxChars, errorMessage = "note 
   if (signal?.aborted) abortReader();
   signal?.addEventListener?.("abort", abortReader, { once: true });
   const cancelReader = () => {
+    if (readerCancellationRequested) return;
+    readerCancellationRequested = true;
     try {
       Promise.resolve(reader.cancel?.()).catch(() => {});
     } catch {
@@ -2053,6 +2338,7 @@ async function readBoundedTextResponse(response, maxChars, errorMessage = "note 
   } finally {
     signal?.removeEventListener?.("abort", abortReader);
     if (pendingReadSettled) reader.releaseLock?.();
+    else cancelReader();
   }
 }
 
@@ -2158,17 +2444,30 @@ function zipStore(files, maxBytes = MAX_ZIP_BYTES) {
   return concatBytes([...localParts, centralDirectory, end]);
 }
 
+const activeObjectUrls = new Set();
+function revokeObjectUrl(url) {
+  if (!activeObjectUrls.delete(url)) return;
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    // URL cleanup is best effort in restricted or test environments.
+  }
+}
+function revokeAllObjectUrls() {
+  [...activeObjectUrls].forEach((url) => revokeObjectUrl(url));
+}
 function revokeObjectUrlLater(url) {
+  activeObjectUrls.add(url);
   setTimeout(() => {
-    try {
-      URL.revokeObjectURL(url);
-    } catch {
-      // URL cleanup is best effort in restricted or test environments.
-    }
+    revokeObjectUrl(url);
   }, 1000);
 }
-function downloadFile(filename, content, type) {
-  if (textEncoder.encode(content).byteLength > MAX_EXPORT_BYTES) throw new Error("This export exceeds the 50 MB safety limit.");
+function downloadFile(filename, content, type, maxBytes = MAX_EXPORT_BYTES) {
+  const numericMaxBytes = Number(maxBytes);
+  const byteLimit = Number.isSafeInteger(numericMaxBytes) && numericMaxBytes >= 1
+    ? Math.min(MAX_ENCRYPTED_BACKUP_BYTES, numericMaxBytes)
+    : MAX_EXPORT_BYTES;
+  if (textEncoder.encode(content).byteLength > byteLimit) throw new Error("This export exceeds the configured safety limit.");
   const blob = new Blob([content], { type });
   const link = document.createElement("a");
   const objectUrl = URL.createObjectURL(blob);
@@ -2215,7 +2514,9 @@ function downloadBytes(filename, bytes, type) {
 function exportBackupSnapshot() {
   const backup = buildBackupEnvelope(graphStore.read(), graphStore.readHistory(), { appVersion: releaseInfo.version });
   assertGraphTextExportBudget([backup.graph, ...backup.history]);
-  downloadFile("llm-field-notes-backup.json", JSON.stringify(backup, null, 2), "application/json");
+  const content = JSON.stringify(backup, null, 2);
+  if (textEncoder.encode(content).byteLength > MAX_BACKUP_IMPORT_BYTES) throw new Error("The backup exceeds the bounded safety limit after envelope overhead.");
+  downloadFile("llm-field-notes-backup.json", content, "application/json");
   return backup;
 }
 function downloadRuntimeRecovery() {
@@ -2379,9 +2680,10 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
       downloadFile("llm-field-notes-history-recovery.json", rawHistory, "application/json");
       document.querySelector("#ingest-status").textContent = "Undo history recovery downloaded. Inspect it before dismissing the warning.";
     } catch (error) {
-      document.querySelector("#ingest-status").textContent = error instanceof Error
-        ? error.message
-        : "The undo history recovery could not be downloaded.";
+      document.querySelector("#ingest-status").textContent = boundedOperationDiagnostic(
+        error,
+        "The undo history recovery could not be downloaded."
+      );
     }
     return;
   }
@@ -2397,9 +2699,10 @@ document.querySelector("#graph-health").addEventListener("click", (event) => {
     downloadFile("llm-field-notes-recovery.json", raw, "application/json");
     document.querySelector("#ingest-status").textContent = "Recovery snapshot downloaded. Inspect it before dismissing the warning.";
   } catch (error) {
-    document.querySelector("#ingest-status").textContent = error instanceof Error
-      ? error.message
-      : "The recovery snapshot could not be downloaded.";
+    document.querySelector("#ingest-status").textContent = boundedOperationDiagnostic(
+      error,
+      "The recovery snapshot could not be downloaded."
+    );
   }
 });
 document.querySelector("#review-queue").addEventListener("click", (event) => {
@@ -2479,12 +2782,33 @@ document.querySelector("#document-file").addEventListener("change", async (event
       if (files.some((file) => file.name.toLowerCase().endsWith(".json"))) {
         if (files.length !== 1) throw new Error("Import one graph JSON at a time.");
         const file = files[0];
-        if (Number.isFinite(file.size) && file.size > MAX_IMPORT_BYTES) throw new Error("That JSON import exceeds the 10 MB safety limit.");
+        let importLimit = MAX_IMPORT_BYTES;
+        if (Number.isFinite(file.size) && file.size > MAX_IMPORT_BYTES) {
+          if (file.size > MAX_BACKUP_IMPORT_BYTES || typeof file.slice !== "function") {
+            throw new Error(`That JSON import exceeds the ${Math.round(MAX_IMPORT_BYTES / 1000000)} MB safety limit.`);
+          }
+          const prefix = await readBrowserFileText(file.slice(0, 4096), 2048, "That JSON import could not be classified safely.");
+          if (!new RegExp(`"format"\\s*:\\s*"(?:${BACKUP_FORMAT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}|${ENCRYPTED_BACKUP_FORMAT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})"`).test(prefix)) {
+            throw new Error(`That JSON import exceeds the ${Math.round(MAX_IMPORT_BYTES / 1000000)} MB safety limit.`);
+          }
+          importLimit = MAX_BACKUP_IMPORT_BYTES;
+        }
         const expectedGraph = graphStore.read();
         const expectedVersion = expectedGraph.version;
         const expectedFingerprint = fingerprintBackup(expectedGraph);
-      const text = await readBrowserFileText(file, MAX_IMPORT_BYTES);
-      const imported = parseJsonWithUniqueKeys(text, "Imported graph");
+      const text = await readBrowserFileText(file, importLimit, `That JSON import exceeds the ${Math.round(importLimit / 1000000)} MB safety limit.`);
+      let imported = parseJsonWithUniqueKeys(text, "Imported graph");
+      if (isEncryptedBackup(imported)) {
+        const password = window.prompt(`Enter the backup password (${MIN_BACKUP_PASSWORD_CHARS}+ characters). It is never stored.`);
+        if (password === null) {
+          status.textContent = "Encrypted backup import canceled; the current graph was kept.";
+          pendingFiles = [];
+          event.target.value = "";
+          renderFileQueue();
+          return;
+        }
+        imported = await decryptBackup(imported, password);
+      }
       if (imported.format === FEEDBACK_FORMAT) {
         if (imported.graphSchema !== GRAPH_SCHEMA || !Array.isArray(imported.examples)) throw new Error("That feedback file is not compatible with this graph.");
         if (imported.truncatedExamples !== undefined
@@ -2535,13 +2859,9 @@ document.querySelector("#document-file").addEventListener("change", async (event
         return;
       }
       if (imported.format === BACKUP_FORMAT) {
-        if (!imported.graph || (imported.graph.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(imported.graph.schema))) throw new Error("That backup does not contain a valid graph.");
-        if (imported.graphFingerprint !== undefined
-          && !matchesGraphFingerprint(imported.graph, imported.graphFingerprint, imported.history)) {
-          throw new Error("That backup's fingerprint does not match its graph and history.");
-        }
+        validateBackupEnvelope(imported, { label: "That backup" });
         const importedGraph = normalizeGraph(imported.graph);
-        const importedHistory = asArray(imported.history);
+        const importedHistory = imported.history;
         if (hasImportIntegrityLoss(importedGraph)) graphStore.captureRecoverySnapshot(text);
         const currentGraph = graphStore.read();
         const currentHasContent = currentGraph.nodes.length
@@ -3065,7 +3385,7 @@ async function rebuildSavedSources() {
           : extractGraph(source.title, source.text, { feedback: rebuildFeedback, sourceUri: source.uri });
       }
     });
-    const { graph, rebuilt, failures, canceled } = result;
+    const { graph, rebuilt, rebuildDetails, failures, canceled } = result;
     if (rebuilt && !graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
       status.textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab while rebuilding. No rebuilt sources were written; reload and try again."
@@ -3074,8 +3394,20 @@ async function rebuildSavedSources() {
     }
     if (rebuilt) renderWorkbench();
     const failureSummary = sliceTextAtCodePointBoundary(failures.slice(0, 2).join(" · "), 360);
+    const prunedNodes = rebuildDetails.reduce((total, detail) => total + detail.removedNodes, 0);
+    const prunedEdges = rebuildDetails.reduce((total, detail) => total + detail.removedEdges, 0);
+    const sourceContributionBefore = rebuildDetails.reduce((total, detail) => total + detail.beforeNodes, 0);
+    const sourceContributionAfter = rebuildDetails.reduce((total, detail) => total + detail.afterNodes, 0);
+    const relationContributionBefore = rebuildDetails.reduce((total, detail) => total + detail.beforeEdges, 0);
+    const relationContributionAfter = rebuildDetails.reduce((total, detail) => total + detail.afterEdges, 0);
+    const contributionSummary = rebuildDetails.length
+      ? ` · source-linked knowledge ${sourceContributionBefore}→${sourceContributionAfter} concepts, ${relationContributionBefore}→${relationContributionAfter} relations`
+      : "";
+    const pruningSummary = prunedNodes || prunedEdges
+      ? ` · pruned ${prunedNodes} concept${prunedNodes === 1 ? "" : "s"} and ${prunedEdges} relation${prunedEdges === 1 ? "" : "s"} no longer supported`
+      : "";
     status.textContent = graphWriteSuccessMessage(
-      `${canceled ? "Rebuild canceled · " : ""}${rebuilt} source${rebuilt === 1 ? "" : "s"} rebuilt${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 2 ? " · …" : ""}` : ""}` : ""}.`
+      `${canceled ? "Rebuild canceled · " : ""}${rebuilt} source${rebuilt === 1 ? "" : "s"} rebuilt${contributionSummary}${pruningSummary}${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 2 ? " · …" : ""}` : ""}` : ""}.`
     );
   } catch (error) {
     status.textContent = `Rebuild failed; your saved graph was preserved. ${boundedOperationDiagnostic(error, "The rebuild could not be completed.")}`;
@@ -3197,7 +3529,8 @@ document.querySelector("#add-manual-edge").addEventListener("click", () => {
   }
   const edgeId = makeEdgeId(source, target, label);
   const graph = graphStore.read();
-  const existing = graph.edges.find((edge) => edge.id === edgeId);
+  const relationKey = relationSemanticKey(source, target, label);
+  const existing = graph.edges.find((edge) => relationSemanticKey(edge.source, edge.target, edge.label) === relationKey);
   if (existing) {
     existing.status = "accepted";
     existing.feedback += 1;
@@ -3214,8 +3547,35 @@ document.querySelector("#add-manual-edge").addEventListener("click", () => {
   }
   if (commitManualGraph(graph, `Added relation ${label}`)) document.querySelector("#manual-edge-label").value = "";
 });
-const selectGraphNode = (nodeId) => {
+const syncGraphItemFromLocation = () => {
+  const item = parseGraphItemHash();
+  if (!item) {
+    if (graphItemSelectionFromLocation) {
+      graphItemSelectionFromLocation = false;
+      selectedGraphItem = null;
+      renderWorkbench();
+    }
+    return;
+  }
+  const graph = graphStore.read();
+  const exists = item.kind === "node"
+    ? graph.nodes.some((node) => node.id === item.id)
+    : item.kind === "edge"
+      ? graph.edges.some((edge) => edge.id === item.id)
+      : graph.documents.some((document) => document.id === item.id);
+  graphItemSelectionFromLocation = true;
+  selectedGraphItem = exists ? item : null;
+  renderWorkbench();
+  if (!exists) {
+    document.querySelector("#ingest-status").textContent = "That graph item is not available in this browser's local workspace.";
+  }
+};
+const selectGraphNode = (nodeId, { updateUrl = true } = {}) => {
   selectedGraphItem = { kind: "node", id: nodeId };
+  if (updateUrl) {
+    graphItemSelectionFromLocation = true;
+    history.pushState({}, "", buildGraphItemHash("node", nodeId));
+  }
   let selectedRow = null;
   document.querySelectorAll(".node-row").forEach((row) => {
     const selected = row.dataset.nodeId === nodeId;
@@ -3226,8 +3586,12 @@ const selectGraphNode = (nodeId) => {
   if (row) row.scrollIntoView({ block: "nearest" });
   renderInspector(graphStore.read());
 };
-const selectGraphEdge = (edgeId) => {
+const selectGraphEdge = (edgeId, { updateUrl = true } = {}) => {
   selectedGraphItem = { kind: "edge", id: edgeId };
+  if (updateUrl) {
+    graphItemSelectionFromLocation = true;
+    history.pushState({}, "", buildGraphItemHash("edge", edgeId));
+  }
   let selectedRow = null;
   document.querySelectorAll(".relation-row").forEach((row) => {
     const selected = row.dataset.edgeId === edgeId;
@@ -3237,8 +3601,12 @@ const selectGraphEdge = (edgeId) => {
   if (selectedRow) selectedRow.scrollIntoView({ block: "nearest" });
   renderInspector(graphStore.read());
 };
-const selectSource = (sourceId) => {
+const selectSource = (sourceId, { updateUrl = true } = {}) => {
   selectedGraphItem = { kind: "source", id: sourceId };
+  if (updateUrl) {
+    graphItemSelectionFromLocation = true;
+    history.pushState({}, "", buildGraphItemHash("source", sourceId));
+  }
   let selectedRow = null;
   document.querySelectorAll(".source-row").forEach((row) => {
     const selected = row.dataset.sourceId === sourceId;
@@ -3248,6 +3616,7 @@ const selectSource = (sourceId) => {
   if (selectedRow) selectedRow.scrollIntoView({ block: "nearest" });
   renderInspector(graphStore.read());
 };
+window.addEventListener("hashchange", syncGraphItemFromLocation);
 document.querySelector("#graph-canvas").addEventListener("click", (event) => {
   const node = event.target.closest(".graph-node");
   if (!node) return;
@@ -3272,6 +3641,8 @@ function persistFeedbackDecision(kind, id, action) {
     status.textContent = mutationLimitMessage(result,
       result.limited === "version"
         ? `This graph has reached its revision limit. Export a backup before reviewing more ${kind === "node" ? "concepts" : "relations"}.`
+        : result.ambiguous
+          ? "This relation ID is ambiguous in the imported graph; repair the original export before reviewing it."
         : "That feedback could not be applied.");
     return false;
   }
@@ -3346,6 +3717,35 @@ document.querySelector("#source-list").addEventListener("keydown", (event) => {
   selectSource(row.dataset.sourceId);
 });
 document.querySelector("#inspector-panel").addEventListener("click", (event) => {
+  const shareGraphItemButton = event.target.closest("[data-share-graph-item]");
+  if (shareGraphItemButton) {
+    const feedback = document.querySelector("#ingest-status");
+    shareGraphItem(
+      shareGraphItemButton.dataset.shareGraphItem,
+      shareGraphItemButton.dataset.graphItemId
+    ).then((result) => {
+      feedback.textContent = result.mode === "shared"
+        ? "Share sheet opened; the link contains no graph content."
+        : result.mode === "copied"
+          ? "Local graph item link copied; it contains no graph content."
+          : "Share canceled; no graph content was sent.";
+    }).catch((error) => {
+      feedback.textContent = boundedOperationDiagnostic(error, "The graph item could not be shared.");
+    });
+    return;
+  }
+  const copyGraphItemButton = event.target.closest("[data-copy-graph-item]");
+  if (copyGraphItemButton) {
+    const feedback = document.querySelector("#ingest-status");
+    try {
+      copyText(buildGraphItemUrl(copyGraphItemButton.dataset.copyGraphItem, copyGraphItemButton.dataset.graphItemId))
+        .then(() => { feedback.textContent = "Local graph item link copied; it contains no graph content."; })
+        .catch((error) => { feedback.textContent = boundedOperationDiagnostic(error, "The graph item link could not be copied."); });
+    } catch (error) {
+      feedback.textContent = boundedOperationDiagnostic(error, "The graph item link could not be copied.");
+    }
+    return;
+  }
   const feedbackButton = event.target.closest("[data-inspector-feedback]");
   if (feedbackButton) {
     const kind = feedbackButton.dataset.nodeId ? "node" : "edge";
@@ -3365,7 +3765,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     const result = markSourceReviewed(currentGraph, reviewSourceButton.dataset.reviewSource);
     if (!result.changed) {
       if (result.alreadyReviewed) {
-        document.querySelector("#ingest-status").textContent = "Source was already marked reviewed today.";
+        document.querySelector("#ingest-status").textContent = "Source was already marked reviewed today (UTC).";
         return;
       }
       document.querySelector("#ingest-status").textContent = mutationLimitMessage(
@@ -3385,7 +3785,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     }
     renderWorkbench();
     selectSource(reviewSourceButton.dataset.reviewSource);
-    document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage("Source marked reviewed today. Undo is available.");
+    document.querySelector("#ingest-status").textContent = graphWriteSuccessMessage("Source marked reviewed today (UTC). Undo is available.");
     return;
   }
   const replaceSourceButton = event.target.closest("[data-replace-source]");
@@ -3451,6 +3851,10 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         });
         if (result.duplicate) {
           status.textContent = "That document is already represented by another source; the current source was kept.";
+          return;
+        }
+        if (result.empty) {
+          status.textContent = "The replacement produced no source-linked knowledge; the current source was kept. Try a fuller document or use remove/add if clearing it is intentional.";
           return;
         }
         if (result.ambiguous) {
@@ -3596,6 +4000,10 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
       document.querySelector("#ingest-status").textContent = "Use a valid review date.";
       return;
     }
+    if (reviewedDate && reviewedTimestamp > Date.now()) {
+      document.querySelector("#ingest-status").textContent = "Review dates cannot be in the future.";
+      return;
+    }
     const nextReviewedAt = reviewedDate ? new Date(reviewedTimestamp).toISOString() : null;
     const rawUri = uriInput?.value.trim() || "";
     const nextUri = rawUri ? normalizeSourceUri(rawUri) : null;
@@ -3657,6 +4065,35 @@ document.querySelector("#download-redacted-markdown").addEventListener("click", 
     document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted Markdown projection could not be exported.");
   }
 });
+document.querySelector("#download-redacted-html").addEventListener("click", () => {
+  try {
+    downloadFile("knowledge-graph-redacted.html", buildRedactedHtmlProjection(), "text/html");
+    document.querySelector("#projection-status").textContent = "Shareable HTML snapshot downloaded · source text, evidence, and URIs removed.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The shareable HTML snapshot could not be exported.");
+  }
+});
+document.querySelector("#share-redacted-html").addEventListener("click", async () => {
+  try {
+    const html = buildRedactedHtmlProjection();
+    const shareResult = await tryShareFile({
+      filename: "knowledge-graph-redacted.html",
+      content: html,
+      type: "text/html",
+      title: "LLM Field Notes · redacted graph",
+      text: "A script-free, privacy-safe HTML snapshot of an inspectable knowledge graph."
+    });
+    if (shareResult.canceled) return;
+    if (shareResult.shared) {
+      document.querySelector("#projection-status").textContent = "HTML snapshot shared; source text, evidence, and URIs were removed.";
+      return;
+    }
+    downloadFile("knowledge-graph-redacted.html", html, "text/html");
+    document.querySelector("#projection-status").textContent = "File sharing is unavailable; HTML snapshot downloaded instead.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The HTML snapshot could not be shared.");
+  }
+});
 document.querySelector("#copy-markdown").addEventListener("click", async () => {
   try {
     const graph = graphStore.read();
@@ -3681,29 +4118,17 @@ document.querySelector("#copy-redacted-markdown").addEventListener("click", asyn
 document.querySelector("#share-redacted-markdown").addEventListener("click", async () => {
   try {
     const markdown = buildRedactedMarkdownProjection();
-    const file = typeof File === "function"
-      ? new File([markdown], "knowledge-graph-redacted.md", { type: "text/markdown" })
-      : null;
-    let canShareFile = Boolean(file && typeof navigator.share === "function");
-    if (canShareFile && typeof navigator.canShare === "function") {
-      try {
-        canShareFile = navigator.canShare({ files: [file] });
-      } catch {
-        canShareFile = false;
-      }
-    }
-    if (canShareFile) {
-      try {
-        await navigator.share({
-          title: "LLM Field Notes · redacted graph",
-          text: "A privacy-safe Markdown projection of an inspectable knowledge graph.",
-          files: [file]
-        });
-        document.querySelector("#projection-status").textContent = "Redacted graph shared; source text, evidence, and URIs were removed.";
-        return;
-      } catch (error) {
-        if (error?.name === "AbortError") return;
-      }
+    const shareResult = await tryShareFile({
+      filename: "knowledge-graph-redacted.md",
+      content: markdown,
+      type: "text/markdown",
+      title: "LLM Field Notes · redacted graph",
+      text: "A privacy-safe Markdown projection of an inspectable knowledge graph."
+    });
+    if (shareResult.canceled) return;
+    if (shareResult.shared) {
+      document.querySelector("#projection-status").textContent = "Redacted graph shared; source text, evidence, and URIs were removed.";
+      return;
     }
     try {
       await copyText(markdown);
@@ -3715,7 +4140,6 @@ document.querySelector("#share-redacted-markdown").addEventListener("click", asy
     downloadFile("knowledge-graph-redacted.md", markdown, "text/markdown");
     document.querySelector("#projection-status").textContent = "File sharing is unavailable; redacted Markdown downloaded instead.";
   } catch (error) {
-    if (error?.name === "AbortError") return;
     document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted graph could not be shared.");
   }
 });
@@ -3726,6 +4150,7 @@ document.querySelector("#download-vault").addEventListener("click", async () => 
       const graphFingerprint = fingerprintBackup(graph);
       const graphFiles = buildVaultFiles(graph, { appVersion: releaseInfo.version });
       const learning = await buildLearningVaultFiles({ estimatedArchiveBytes: graphFiles.estimatedArchiveBytes });
+      stampLearningVaultStatus(graphFiles, learning);
       assertVaultGraphUnchanged(graphFingerprint);
       const files = [...graphFiles, ...learning.files];
       downloadBytes("llm-field-notes-vault.zip", zipStore(files), "application/zip");
@@ -3742,6 +4167,7 @@ document.querySelector("#download-redacted-vault").addEventListener("click", asy
       const graphFingerprint = fingerprintBackup(graph);
       const graphFiles = buildVaultFiles(redactGraph(graph), { appVersion: releaseInfo.version });
       const learning = await buildLearningVaultFiles({ estimatedArchiveBytes: graphFiles.estimatedArchiveBytes });
+      stampLearningVaultStatus(graphFiles, learning);
       assertVaultGraphUnchanged(graphFingerprint);
       const files = [...graphFiles, ...learning.files];
       downloadBytes("llm-field-notes-redacted-vault.zip", zipStore(files), "application/zip");
@@ -3807,6 +4233,24 @@ document.querySelector("#download-backup").addEventListener("click", () => {
     document.querySelector("#projection-status").textContent = `Full backup downloaded · ${backup.history.length} undo snapshot${backup.history.length === 1 ? "" : "s"}.`;
   } catch (error) {
     document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The full backup could not be exported.");
+  }
+});
+document.querySelector("#download-encrypted-backup").addEventListener("click", async () => {
+  try {
+    const password = window.prompt(`Choose a backup password (${MIN_BACKUP_PASSWORD_CHARS}+ characters). It is never stored.`);
+    if (password === null) return;
+    const confirmation = window.prompt("Re-enter the backup password to confirm.");
+    if (confirmation === null) return;
+    if (password !== confirmation) throw new Error("The backup passwords did not match.");
+    const backup = buildBackupEnvelope(graphStore.read(), graphStore.readHistory(), { appVersion: releaseInfo.version });
+    assertGraphTextExportBudget([backup.graph, ...backup.history]);
+    const encrypted = await encryptBackup(backup, password);
+    const content = JSON.stringify(encrypted, null, 2);
+    if (textEncoder.encode(content).byteLength > MAX_ENCRYPTED_BACKUP_BYTES) throw new Error("The encrypted backup exceeds the bounded safety limit after encryption overhead.");
+    downloadFile("llm-field-notes-encrypted-backup.json", content, "application/json", MAX_ENCRYPTED_BACKUP_BYTES);
+    document.querySelector("#projection-status").textContent = `Encrypted backup downloaded · ${backup.history.length} undo snapshot${backup.history.length === 1 ? "" : "s"}.`;
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The encrypted backup could not be exported.");
   }
 });
 document.querySelector("#download-feedback").addEventListener("click", () => {
@@ -3901,6 +4345,7 @@ const reportRuntimeError = (error) => {
 window.addEventListener("error", (event) => reportRuntimeError(event.error || new Error("Unexpected application error.")));
 window.addEventListener("unhandledrejection", (event) => reportRuntimeError(event.reason || new Error("Unexpected asynchronous error.")));
 renderWorkbench();
+syncGraphItemFromLocation();
 
 let serviceWorkerManager = null;
 try {

@@ -1,0 +1,32 @@
+name: Monitor published Pages
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-monitor
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Probe published Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Probe the deployed artifact
+        env:
+          PAGES_DEPLOYMENT_URL: ${{ vars.PUBLIC_ORIGIN || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+        run: npm run smoke:pages:deployment

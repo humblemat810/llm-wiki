@@ -46,6 +46,8 @@ id: security-check
 [A safe source](https://example.org/paper)
 [A hostile source](javascript:alert(1))
 [A credential source](https://user:password@example.org/private)
+LLMNOTELINK0
+${String.fromCharCode(0)}control${String.fromCharCode(1)}
 `
 });
 assert(hostilePage.includes("<h2>Rendered section</h2>"), "learning-note renderer should preserve Markdown structure");
@@ -55,6 +57,8 @@ assert.equal(hostileStructuredData.headline, "Security check", "Article structur
 assert(hostilePage.includes('type="application/atom+xml"') && hostilePage.includes('href="../feed.xml"'), "learning-note pages should advertise the curriculum feed");
 assert(!hostilePage.includes("</script><script>alert"), "structured note metadata should not allow HTML/script breakout");
 assert(hostilePage.includes('<a href="https://example.org/paper" target="_blank" rel="noopener noreferrer">A safe source</a>'), "learning-note renderer should preserve safe external links");
+assert.equal((hostilePage.match(/href="https:\/\/example\.org\/paper"/g) || []).length, 1, "learning-note link placeholders should not be forgeable by note content");
+assert(!hostilePage.includes("\u0000"), "learning-note HTML should remove unsafe control characters");
 assert(hostilePage.includes("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;"), "learning-note renderer should escape hostile HTML");
 assert(hostilePage.includes("&lt;img src=x onerror=alert(1)&gt;"), "learning-note renderer should escape hostile attributes");
 assert(!hostilePage.includes('href="javascript:'), "learning-note renderer should not emit executable URL schemes");

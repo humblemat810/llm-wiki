@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Agent, request as httpRequest } from "node:http";
@@ -6,9 +7,28 @@ import { connect as tcpConnect } from "node:net";
 import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { createAppServer, readBody, readBoundedFile, readBoundedUtf8 } from "../server.mjs";
+import { canWriteResponse, createAppServer, MIN_AUTH_TOKEN_CHARS, readBody, readBoundedFile, readBoundedUtf8 } from "../server.mjs";
 import { extractGraph, MAX_GRAPH_NODES } from "../graph-core.js";
 import { FIXED_PUBLIC_ASSETS, MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
+
+const sanitizedRevision = execFileSync(
+  process.execPath,
+  ["--input-type=module", "-e", "const { createAppServer } = await import('./server.mjs'); console.log(createAppServer().getMetrics().buildRevision);"],
+  {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, BUILD_REVISION: 'bad"\\nllm_field_notes_build_info{revision="forged"} 1' }
+  }
+).trim();
+assert.equal(sanitizedRevision, "unknown", "malformed build revisions must not reach logs or Prometheus labels");
+for (const state of [
+  { destroyed: true, headersSent: false, writableEnded: false },
+  { destroyed: false, headersSent: true, writableEnded: false },
+  { destroyed: false, headersSent: false, writableEnded: true }
+]) {
+  assert.equal(canWriteResponse(state), false, "response helpers must refuse writes after any terminal response state");
+}
+assert.equal(canWriteResponse({ destroyed: false, headersSent: false, writableEnded: false }), true, "response helpers should permit a fresh response");
 
 const logs = [];
 const server = createAppServer({ logger: (entry) => logs.push(entry) });
@@ -106,6 +126,20 @@ try {
     const boundedAstral = readBoundedUtf8(astralPrefixPath, 20000);
     assert.equal(boundedAstral, `a${"😀".repeat(9999)}`, "bounded UTF-8 reads should not split astral characters at the UTF-16 safety boundary");
     assert(!/[\uD800-\uDBFF]$/.test(boundedAstral), "bounded UTF-8 reads should never return a trailing high surrogate");
+    const symlinkedReadPath = join(boundedReadRoot, "symlinked-read.md");
+    await symlink(astralPrefixPath, symlinkedReadPath);
+    if (process.platform !== "win32") {
+      await assert.rejects(
+        () => readBoundedFile(symlinkedReadPath, 16),
+        (error) => error?.code === "ELOOP",
+        "bounded binary reads should refuse symlink paths when the platform supports O_NOFOLLOW"
+      );
+      assert.throws(
+        () => readBoundedUtf8(symlinkedReadPath, 16),
+        (error) => error?.code === "ELOOP",
+        "bounded UTF-8 reads should refuse symlink paths when the platform supports O_NOFOLLOW"
+      );
+    }
     const malformedUtf8Path = join(boundedReadRoot, "malformed.md");
     await writeFile(malformedUtf8Path, Buffer.from([0xff]));
     assert.throws(
@@ -116,11 +150,12 @@ try {
   } finally {
     await rm(boundedReadRoot, { recursive: true, force: true });
   }
-  assert.equal(server.requestTimeout, 120000);
+  assert.equal(server.requestTimeout, 30000, "request bodies should have a shorter bounded window than provider extraction work");
   assert.equal(server.headersTimeout, 15000);
   assert.equal(server.keepAliveTimeout, 5000);
   assert.equal(server.maxHeaderSize, 16 * 1024);
   assert(Number.isFinite(server.getMetrics().uptimeSeconds) && server.getMetrics().uptimeSeconds >= 0, "programmatic metrics should expose process uptime");
+  assert.equal(server.getMetrics().draining, false, "programmatic metrics should expose the initial non-draining state");
   const index = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(index.status, 200);
   assert((await index.text()).includes("LLM Field Notes"));
@@ -227,6 +262,9 @@ try {
   assert.equal(metrics.headers.get("x-robots-tag"), "noindex, nofollow", "metrics should not be indexed");
   const metricsText = await metrics.text();
   assert(metricsText.includes("llm_field_notes_http_requests_total")
+    && metricsText.includes("llm_field_notes_http_requests_in_flight")
+    && metricsText.includes("llm_field_notes_http_duration_ms_bucket{le=\"+Inf\"}")
+    && metricsText.includes("llm_field_notes_http_duration_ms_count")
     && metricsText.includes("llm_field_notes_extraction_duration_ms_bucket{le=\"+Inf\"}")
     && metricsText.includes("llm_field_notes_extraction_duration_ms_count")
     && metricsText.includes('llm_field_notes_http_responses_total{status="200"}')
@@ -235,9 +273,12 @@ try {
     && metricsText.includes("llm_field_notes_extractor_concurrency_limit 8")
     && metricsText.includes("llm_field_notes_extraction_client_aborts_total 0")
     && metricsText.includes("llm_field_notes_process_uptime_seconds ")
+    && metricsText.includes("llm_field_notes_draining 0")
     && metricsText.includes('llm_field_notes_build_info{version="0.1.0"} 1')
     && metricsText.includes('llm_field_notes_build_revision_info{revision="unknown"} 1'), "metrics should expose privacy-safe request, latency, version, and source-revision gauges");
   assert.equal(server.getMetrics().buildRevision, "unknown", "programmatic metrics should expose the sanitized source revision");
+  assert.equal(server.getMetrics().httpRequestsInFlight, 0, "completed HTTP requests should leave no request pressure behind");
+  assert(Number.isFinite(server.getMetrics().httpLatencyCount) && server.getMetrics().httpLatencyCount > 0, "programmatic metrics should record completed HTTP latency observations");
   assert(Number(server.getMetrics().responsesByStatus["200"]) > 0, "programmatic metrics should expose successful HTTP response counts");
   const metricsHead = await fetch(`http://127.0.0.1:${port}/metrics`, { method: "HEAD" });
   assert.equal(metricsHead.status, 200, "metrics should support HEAD probes");
@@ -272,6 +313,44 @@ try {
   assert.equal(drainingExtraction.status, 503, "draining servers should reject new extraction work");
   assert.equal(drainingExtraction.headers.get("retry-after"), "5");
   server.isDraining = false;
+  let parsingDrainExtractorCalls = 0;
+  const parsingDrainServer = createAppServer({
+    extractor: async () => {
+      parsingDrainExtractorCalls += 1;
+      return { schema: "llm-field-notes/graph@1", concepts: [], relations: [] };
+    }
+  });
+  await new Promise((resolve) => parsingDrainServer.listen(0, "127.0.0.1", resolve));
+  const parsingDrainResponse = await new Promise((resolve, reject) => {
+    let settled = false;
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: parsingDrainServer.address().port,
+      path: "/api/extract-graph",
+      method: "POST",
+      headers: { "content-type": "application/json", "transfer-encoding": "chunked" }
+    }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => {
+        settled = true;
+        resolve({ status: response.statusCode, body });
+      });
+    });
+    request.on("error", (error) => {
+      if (!settled) reject(error);
+    });
+    request.write('{"operation":"extract-graph","schema":"llm-field-notes/graph@1","feedbackFormat":"llm-field-notes/feedback@1","feedback":[],"document":{"title":"Drain');
+    setImmediate(() => {
+      parsingDrainServer.beginDrain();
+      request.end('ing","text":"Attention uses context to create a useful graph representation for review."}}');
+    });
+  });
+  assert.equal(parsingDrainResponse.status, 503, "requests still parsing when drain begins should be rejected before provider work starts");
+  assert.match(parsingDrainResponse.body, /Server is draining/);
+  assert.equal(parsingDrainExtractorCalls, 0, "drain-time parsing rejection must not invoke the extractor");
+  await new Promise((resolve) => parsingDrainServer.close(resolve));
   const chunkedOversizedUpload = await new Promise((resolve, reject) => {
     let settled = false;
     const request = httpRequest({
@@ -554,6 +633,21 @@ try {
       })
     });
     assert.equal(fetchMetadataRejected.status, 403, "cross-site fetch metadata should reject browser extraction without Origin");
+    const sameSiteFetchMetadataRejected = await fetch(`http://127.0.0.1:${httpsOriginServer.address().port}/api/extract-graph`, {
+      method: "POST",
+      headers: {
+        "sec-fetch-site": "same-site",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Same site metadata", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    assert.equal(sameSiteFetchMetadataRejected.status, 403, "same-site fetch metadata should reject sibling-origin browser extraction without Origin");
     const sameOriginExtraction = await fetch(`http://127.0.0.1:${httpsOriginServer.address().port}/api/extract-graph`, {
       method: "POST",
       headers: {
@@ -796,6 +890,10 @@ try {
     })
   });
   assert.equal(extraction.status, 200);
+  assert.equal(extraction.headers.get("ratelimit-limit"), "60", "extraction responses should expose the configured request budget");
+  const remainingRateLimit = Number(extraction.headers.get("ratelimit-remaining"));
+  assert(Number.isSafeInteger(remainingRateLimit) && remainingRateLimit >= 0 && remainingRateLimit < 60, "successful extraction responses should expose remaining request capacity");
+  assert.match(extraction.headers.get("ratelimit-reset") || "", /^\d+$/, "extraction responses should expose a bounded reset countdown");
   const payload = await extraction.json();
   assert.equal(payload.schema, "llm-field-notes/graph@1");
   assert.equal(payload.feedbackFormat, "llm-field-notes/feedback@1");
@@ -818,7 +916,7 @@ try {
     body: '{"operation":"extract-graph","operation":"extract-graph","schema":"llm-field-notes/graph@1","feedbackFormat":"llm-field-notes/feedback@1","feedback":[],"document":{"title":"Duplicate key","text":"Attention uses context to create a useful graph representation for review."}}'
   });
   assert.equal(duplicateKeyRequest.status, 400, "extraction requests with duplicate JSON keys should be rejected");
-  assert.match(await duplicateKeyRequest.text(), /duplicate object key/, "duplicate-key extraction failures should explain the contract violation");
+  assert.equal((await duplicateKeyRequest.json()).error, "Invalid extraction request body.", "extraction parser details should not be reflected to clients");
   const unsafeUriResponse = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1254,6 +1352,10 @@ try {
     await drainStarted;
     assert.equal(drainServer.beginDrain(), true, "programmatic shutdown should enter draining mode once");
     assert.equal(drainServer.beginDrain(), false, "shutdown entry should be idempotent");
+    assert.equal(drainServer.getMetrics().draining, true, "programmatic metrics should expose the active draining state");
+    const drainMetrics = await fetch(`http://127.0.0.1:${drainPort}/metrics`);
+    assert.equal(drainMetrics.status, 200, "metrics should remain available while the server drains");
+    assert((await drainMetrics.text()).includes("llm_field_notes_draining 1"), "Prometheus metrics should expose active draining state");
     const drainResponse = await drainRequest;
     assert.equal(drainResponse.status, 503, "aborted in-flight work should report a retryable draining response");
     assert.equal(drainResponse.headers.get("retry-after"), "5", "draining responses should advertise a bounded retry delay");
@@ -1387,6 +1489,9 @@ try {
     });
     assert.equal(limited.status, 429);
     assert.equal(limited.headers.get("retry-after"), "60");
+    assert.equal(limited.headers.get("ratelimit-limit"), "0", "rate-limited responses should expose the configured zero budget");
+    assert.equal(limited.headers.get("ratelimit-remaining"), "0", "rate-limited responses should expose no remaining capacity");
+    assert.match(limited.headers.get("ratelimit-reset") || "", /^\d+$/, "rate-limited responses should expose a bounded reset countdown");
   } finally {
     limitedServer.close();
   }
@@ -1414,6 +1519,9 @@ try {
   await new Promise((resolve) => publicDefaultServer.listen(0, "127.0.0.1", resolve));
   const publicDefaultPort = publicDefaultServer.address().port;
   try {
+    const unconfiguredReadiness = await fetch(`http://127.0.0.1:${publicDefaultPort}/readyz`);
+    assert.equal(unconfiguredReadiness.status, 503, "readiness should fail closed when required extraction authentication is not configured");
+    assert.equal((await unconfiguredReadiness.json()).error, "Extraction authentication is not configured.");
     const unconfiguredAuth = await fetch(`http://127.0.0.1:${publicDefaultPort}/api/extract-graph`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1430,10 +1538,48 @@ try {
   } finally {
     publicDefaultServer.close();
   }
+  for (const insecureOrigin of ["", "http://wiki.example.test"]) {
+    const insecureOriginServer = createAppServer({
+      publicOrigin: insecureOrigin,
+      requireSecurePublicOrigin: true
+    });
+    await new Promise((resolve) => insecureOriginServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const insecureOriginReady = await fetch(`http://127.0.0.1:${insecureOriginServer.address().port}/readyz`);
+      assert.equal(insecureOriginReady.status, 503, "non-loopback deployments should fail readiness without a trusted HTTPS public origin");
+      assert.equal((await insecureOriginReady.json()).error, "A trusted HTTPS public origin is not configured.");
+    } finally {
+      insecureOriginServer.close();
+    }
+  }
+  const secureOriginServer = createAppServer({
+    publicOrigin: "https://wiki.example.test",
+    requireSecurePublicOrigin: true
+  });
+  await new Promise((resolve) => secureOriginServer.listen(0, "127.0.0.1", resolve));
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${secureOriginServer.address().port}/readyz`)).status, 200, "non-loopback deployments should accept a configured HTTPS public origin");
+  } finally {
+    secureOriginServer.close();
+  }
+  for (const invalidToken of ["short", ` ${"x".repeat(MIN_AUTH_TOKEN_CHARS)} `, `x${String.fromCharCode(1)}${"x".repeat(MIN_AUTH_TOKEN_CHARS)}`]) {
+    const invalidTokenServer = createAppServer({ extractorAuthToken: invalidToken });
+    await new Promise((resolve) => invalidTokenServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const invalidTokenReady = await fetch(`http://127.0.0.1:${invalidTokenServer.address().port}/readyz`);
+      assert.equal(invalidTokenReady.status, 503, "invalid extraction bearer configuration should fail readiness closed");
+      assert.equal((await invalidTokenReady.json()).error, "Extraction authentication is not configured.");
+    } finally {
+      invalidTokenServer.close();
+    }
+  }
   const publicMetricsServer = createAppServer({ requireMetricsAuth: true });
   await new Promise((resolve) => publicMetricsServer.listen(0, "127.0.0.1", resolve));
   const publicMetricsPort = publicMetricsServer.address().port;
   try {
+    const unconfiguredMetricsReadiness = await fetch(`http://127.0.0.1:${publicMetricsPort}/readyz`);
+    assert.equal(unconfiguredMetricsReadiness.status, 503, "readiness should fail closed when required metrics authentication is not configured");
+    assert.equal((await unconfiguredMetricsReadiness.json()).error, "Metrics authentication is not configured.");
     const unconfiguredMetricsAuth = await fetch(`http://127.0.0.1:${publicMetricsPort}/metrics`);
     assert.equal(unconfiguredMetricsAuth.status, 503, "non-loopback metrics should fail closed when authentication is not configured");
     assert.equal(unconfiguredMetricsAuth.headers.get("retry-after"), "60");
@@ -1484,12 +1630,12 @@ try {
   await new Promise((resolve) => keepAliveServer.listen(0, "127.0.0.1", resolve));
   const keepAlivePort = keepAliveServer.address().port;
   const keepAliveAgent = new Agent({ keepAlive: true, maxSockets: 1 });
-  const keepAliveRequest = (headers, body) => new Promise((resolve, reject) => {
+  const keepAliveRequest = (method, path, headers, body) => new Promise((resolve, reject) => {
     const request = httpRequest({
       hostname: "127.0.0.1",
       port: keepAlivePort,
-      path: "/api/extract-graph",
-      method: "POST",
+      path,
+      method,
       agent: keepAliveAgent,
       headers: { "content-length": Buffer.byteLength(body), ...headers }
     }, (response) => {
@@ -1509,8 +1655,14 @@ try {
     document: { title: "Keep alive", text: "Attention uses context to create a useful graph representation for review." }
   });
   try {
-    assert.equal((await keepAliveRequest({ "content-type": "application/json" }, keepAlivePayload)).status, 401, "unauthorized keep-alive requests should still be rejected");
-    assert.equal((await keepAliveRequest({ "content-type": "application/json", authorization: "Bearer keep-alive-secret" }, keepAlivePayload)).status, 200, "a valid request should survive after an early rejection on the same keep-alive connection");
+    assert.equal((await keepAliveRequest("POST", "/api/extract-graph", { "content-type": "application/json" }, keepAlivePayload)).status, 401, "unauthorized keep-alive requests should still be rejected");
+    assert.equal((await keepAliveRequest("POST", "/api/extract-graph", { "content-type": "application/json", authorization: "Bearer keep-alive-secret" }, keepAlivePayload)).status, 200, "a valid request should survive after an early rejection on the same keep-alive connection");
+    assert.equal((await keepAliveRequest("GET", "/api/extract-graph", { "content-type": "text/plain" }, "ignored body")).status, 405, "body-bearing method errors should still report 405");
+    assert.equal((await keepAliveRequest("POST", "/api/extract-graph", { "content-type": "application/json", authorization: "Bearer keep-alive-secret" }, keepAlivePayload)).status, 200, "a valid request should survive after a body-bearing method error on the same keep-alive connection");
+    assert.equal((await keepAliveRequest("PUT", "/private", { "content-type": "text/plain" }, "ignored body")).status, 405, "unsupported body-bearing methods should still report 405");
+    assert.equal((await keepAliveRequest("POST", "/api/extract-graph", { "content-type": "application/json", authorization: "Bearer keep-alive-secret" }, keepAlivePayload)).status, 200, "a valid request should survive after an unsupported body-bearing method on the same keep-alive connection");
+    assert.equal((await keepAliveRequest("GET", "/private", { "content-type": "text/plain" }, "ignored body")).status, 404, "body-bearing unknown GET paths should still report 404");
+    assert.equal((await keepAliveRequest("POST", "/api/extract-graph", { "content-type": "application/json", authorization: "Bearer keep-alive-secret" }, keepAlivePayload)).status, 200, "a valid request should survive after a body-bearing unknown GET path on the same keep-alive connection");
   } finally {
     keepAliveAgent.destroy();
     keepAliveServer.close();

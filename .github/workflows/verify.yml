@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        node-version: ["18.x", "20.x", "22.x", "24.x"]
+        node-version: ["22.x", "24.x"]
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -28,83 +28,44 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Install locked package metadata
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify supported Node runtime
+        run: npm run runtime:check
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - name: Run smoke checks
         run: npm test
+      - name: Verify encrypted backup round trip
+        run: npm run backup:smoke
+      - name: Gate sample graph quality
+        run: npm run health:sample
+      - name: Run canonical production gate on the release runtime
+        if: matrix.node-version == '22.x'
+        run: npm run production:check
       - name: Smoke test standalone server lifecycle
-        run: |
-          set -e
-          PORT=18001 HOST=127.0.0.1 node server.mjs >/tmp/llm-field-notes-start.log 2>&1 &
-          pid=$!
-          cleanup() {
-            kill -TERM "$pid" >/dev/null 2>&1 || true
-            wait "$pid" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          ready=0
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18001/readyz >/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$ready" -ne 1 ]; then
-            cat /tmp/llm-field-notes-start.log
-            exit 1
-          fi
-          grep -q '"event":"server-ready"' /tmp/llm-field-notes-start.log
-          curl --fail --silent http://127.0.0.1:18001/metrics | grep llm_field_notes_http_requests_total
-          kill -TERM "$pid"
-          status=0
-          wait "$pid" || status=$?
-          test "$status" -eq 0
-          grep -q '"event":"server-draining"' /tmp/llm-field-notes-start.log
-          grep -q '"event":"server-stopped"' /tmp/llm-field-notes-start.log
-          trap - EXIT
+        run: npm run smoke:server
       - name: Build container
+        id: package
         run: |
           set -e
           version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           docker build --build-arg APP_VERSION="$version" --build-arg VCS_REF="$GITHUB_SHA" --tag llm-field-notes:ci .
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' llm-field-notes:ci)" = "$version"
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' llm-field-notes:ci)" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' llm-field-notes:ci)" = "https://github.com/humblemat810/llm-wiki"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.documentation"}}' llm-field-notes:ci)" = "https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md"
+          test "$(docker image inspect --format '{{.Config.User}}' llm-field-notes:ci)" = "node"
           test "$(docker image inspect --format '{{.Config.StopSignal}}' llm-field-notes:ci)" = "SIGTERM"
-      - name: Smoke test container readiness
-        run: |
-          trap 'docker rm --force llm-field-notes-smoke >/dev/null 2>&1 || true' EXIT
-          docker run --read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges --detach --name llm-field-notes-smoke --publish 18000:8000 llm-field-notes:ci
-          ready=0
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18000/readyz; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$ready" -ne 1 ]; then
-            docker logs llm-field-notes-smoke
-            exit 1
-          fi
-          status=$(curl --silent --output /tmp/llm-field-notes-auth-response.json --write-out '%{http_code}' \
-            --request POST \
-            --header 'content-type: application/json' \
-            --data '{"operation":"extract-graph","schema":"llm-field-notes/graph@1","feedbackFormat":"llm-field-notes/feedback@1","feedback":[],"document":{"title":"Auth smoke","text":"Attention uses context to create a useful graph representation for review."}}' \
-            http://127.0.0.1:18000/api/extract-graph)
-          test "$status" = "503"
-          metrics_status=$(curl --silent --output /tmp/llm-field-notes-metrics-response.txt --write-out '%{http_code}' \
-            http://127.0.0.1:18000/metrics)
-          test "$metrics_status" = "503"
-          healthy=0
-          for attempt in $(seq 1 30); do
-            if [ "$(docker inspect --format '{{.State.Health.Status}}' llm-field-notes-smoke)" = "healthy" ]; then
-              healthy=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$healthy" -ne 1 ]; then
-            docker inspect --format '{{json .State.Health}}' llm-field-notes-smoke
-            exit 1
-          fi
-          docker stop --time 5 llm-field-notes-smoke
-          test "$(docker inspect --format '{{.State.ExitCode}}' llm-field-notes-smoke)" = "0"
+          docker run --rm --entrypoint sh llm-field-notes:ci -c 'test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/scripts/check-runtime.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/experiments/verify-backup.mjs'
+      - name: Smoke test hardened container runtime
+        env:
+          CONTAINER_IMAGE: llm-field-notes:ci
+          CONTAINER_SKIP_BUILD: "1"
+          CONTAINER_EXPECTED_VERSION: ${{ steps.package.outputs.version }}
+          CONTAINER_EXPECTED_REVISION: ${{ github.sha }}
+          CONTAINER_PORT: "18000"
+          CONTAINER_EXTRACTOR_TOKEN: ci-extractor-token
+          CONTAINER_METRICS_TOKEN: ci-metrics-token
+        run: npm run smoke:container

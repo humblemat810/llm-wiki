@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { lstat, open, realpath, stat } from "node:fs/promises";
-import { closeSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_DOCUMENT_TITLE_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_FEEDBACK_LABEL_CHARS, MAX_ID_CHARS, MAX_SOURCE_URI_CHARS, extractGraph, normalizeExtractionForDocument, normalizeSourceUri, parseJsonWithUniqueKeys, relationSemanticKey, slugify } from "./graph-core.js";
@@ -24,14 +24,18 @@ const MAX_RATE_LIMIT_KEYS = 10000;
 const RATE_LIMIT_SWEEP_INTERVAL_MS = 1000;
 export const DEFAULT_MAX_CONCURRENT_EXTRACTORS = 8;
 const MAX_CONCURRENT_EXTRACTORS = 1024;
-const REQUEST_TIMEOUT_MS = 120000;
+const REQUEST_TIMEOUT_MS = 30000;
 const HEADERS_TIMEOUT_MS = 15000;
 const KEEP_ALIVE_TIMEOUT_MS = 5000;
 const MAX_HEADER_BYTES = 16 * 1024;
 const MAX_CRAWLER_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_RUNTIME_TEXT_CHARS = Math.floor(MAX_STATIC_ASSET_BYTES / 4);
+export const MIN_AUTH_TOKEN_CHARS = 16;
+const MAX_AUTH_TOKEN_CHARS = 4096;
+const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
 const DEFAULT_IDLE_WAIT_TIMEOUT_MS = 5000;
 const READINESS_CACHE_TTL_MS = 5000;
+const HTTP_LATENCY_BUCKETS_MS = [50, 100, 250, 500, 1000, 5000, 30000];
 const EXTRACTION_LATENCY_BUCKETS_MS = [100, 500, 1000, 5000, 30000, 120000];
 const root = fileURLToPath(new URL("./", import.meta.url));
 const types = {
@@ -105,9 +109,10 @@ export function readBoundedUtf8(filePath, maxChars) {
   }
   const characterLimit = Math.floor(numericLimit);
   const byteLimit = characterLimit * 4 + 4;
-  const file = openSync(filePath, "r");
+  const file = openSync(filePath, READ_ONLY_NOFOLLOW_FLAGS);
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  let content = "";
+  const textChunks = [];
+  let textLength = 0;
   let offset = 0;
   try {
     while (offset < byteLimit) {
@@ -115,10 +120,19 @@ export function readBoundedUtf8(filePath, maxChars) {
       const bytesRead = readSync(file, buffer, 0, buffer.length, offset);
       if (!bytesRead) break;
       offset += bytesRead;
-      content += decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
-      if (content.length >= characterLimit) return sliceTextAtCodePointBoundary(content, characterLimit);
+      const decoded = decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+      if (decoded) {
+        textChunks.push(decoded);
+        textLength += decoded.length;
+        if (textLength >= characterLimit) {
+          return sliceTextAtCodePointBoundary(textChunks.join(""), characterLimit);
+        }
+      }
     }
-    return sliceTextAtCodePointBoundary(`${content}${decoder.decode()}`, characterLimit);
+    const tail = decoder.decode();
+    if (tail) textChunks.push(tail);
+    const content = textChunks.join("");
+    return sliceTextAtCodePointBoundary(content, characterLimit);
   } finally {
     closeSync(file);
   }
@@ -130,7 +144,7 @@ export async function readBoundedFile(filePath, maxBytes) {
     throw new RangeError(`A finite file-size limit from 1 to ${MAX_STATIC_ASSET_BYTES} is required.`);
   }
   const byteLimit = Math.floor(numericLimit);
-  const handle = await open(filePath, "r");
+  const handle = await open(filePath, READ_ONLY_NOFOLLOW_FLAGS);
   const chunks = [];
   let total = 0;
   try {
@@ -208,8 +222,12 @@ const securityHeaders = {
 const learningNotePageCsp = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'none'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none'";
 const artifactPageCsp = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'none'; worker-src 'none'; manifest-src 'none'";
 
+export function canWriteResponse(response) {
+  return !(response?.destroyed || response?.headersSent || response?.writableEnded);
+}
+
 function sendJson(response, status, payload, extraHeaders = {}, head = false) {
-  if (response.destroyed || response.writableEnded) return false;
+  if (!canWriteResponse(response)) return false;
   const body = JSON.stringify(payload);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -225,7 +243,7 @@ function sendJson(response, status, payload, extraHeaders = {}, head = false) {
 }
 
 function sendEmpty(response, status, extraHeaders = {}) {
-  if (response.destroyed || response.writableEnded) return false;
+  if (!canWriteResponse(response)) return false;
   response.writeHead(status, {
     "content-length": "0",
     "cache-control": "no-store",
@@ -237,7 +255,7 @@ function sendEmpty(response, status, extraHeaders = {}) {
 }
 
 function sendText(response, status, body, extraHeaders = {}, head = false) {
-  if (response.destroyed || response.writableEnded) return false;
+  if (!canWriteResponse(response)) return false;
   response.writeHead(status, {
     "content-type": "text/plain; version=0.0.4; charset=utf-8",
     "content-length": Buffer.byteLength(body),
@@ -251,7 +269,7 @@ function sendText(response, status, body, extraHeaders = {}, head = false) {
 }
 
 function sendHtml(response, status, body, extraHeaders = {}, head = false) {
-  if (response.destroyed || response.writableEnded) return false;
+  if (!canWriteResponse(response)) return false;
   response.writeHead(status, {
     "content-type": "text/html; charset=utf-8",
     "content-length": Buffer.byteLength(body),
@@ -264,7 +282,7 @@ function sendHtml(response, status, body, extraHeaders = {}, head = false) {
 }
 
 function sendPlainText(response, status, body, extraHeaders = {}, head = false) {
-  if (response.destroyed || response.writableEnded) return false;
+  if (!canWriteResponse(response)) return false;
   response.writeHead(status, {
     "content-type": "text/plain; charset=utf-8",
     "content-length": Buffer.byteLength(body),
@@ -277,7 +295,7 @@ function sendPlainText(response, status, body, extraHeaders = {}, head = false) 
 }
 
 function sendXml(response, status, body, extraHeaders = {}, head = false) {
-  if (response.destroyed || response.writableEnded) return false;
+  if (!canWriteResponse(response)) return false;
   response.writeHead(status, {
     "content-type": "application/xml; charset=utf-8",
     "content-length": Buffer.byteLength(body),
@@ -290,7 +308,7 @@ function sendXml(response, status, body, extraHeaders = {}, head = false) {
 }
 
 function sendNotModified(response, etag, cacheControl, extraHeaders = {}) {
-  if (response.destroyed || response.writableEnded) return false;
+  if (!canWriteResponse(response)) return false;
   response.writeHead(304, {
     etag,
     "cache-control": cacheControl,
@@ -346,6 +364,17 @@ function securityHeadersForIndex(content) {
   };
 }
 
+function rateLimitHeaders(limit, count, windowStart, now = Date.now()) {
+  const boundedLimit = Math.max(0, Math.floor(Number(limit) || 0));
+  const boundedCount = Math.max(0, Math.floor(Number(count) || 0));
+  const boundedWindowStart = Number.isFinite(Number(windowStart)) ? Number(windowStart) : now;
+  return {
+    "ratelimit-limit": String(boundedLimit),
+    "ratelimit-remaining": String(Math.max(0, boundedLimit - boundedCount)),
+    "ratelimit-reset": String(Math.max(1, Math.ceil((boundedWindowStart + 60000 - now) / 1000)))
+  };
+}
+
 function xmlEscape(value) {
   return String(value)
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
@@ -375,9 +404,26 @@ function hasValidBearerToken(request, expectedToken) {
   return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
+function isUsableAuthToken(value) {
+  return typeof value === "string"
+    && value.length >= MIN_AUTH_TOKEN_CHARS
+    && value.length <= MAX_AUTH_TOKEN_CHARS
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isLoopbackPublicOrigin(value) {
+  if (typeof value !== "string" || !value) return false;
+  try {
+    return new Set(["127.0.0.1", "::1", "localhost"]).has(new URL(value).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 function hasAllowedRequestOrigin(request, publicOrigin) {
   const fetchSite = request.headers["sec-fetch-site"];
-  if (typeof fetchSite === "string" && fetchSite.trim().toLowerCase() === "cross-site") return false;
+  if (typeof fetchSite === "string" && ["cross-site", "same-site"].includes(fetchSite.trim().toLowerCase())) return false;
   const requestOrigin = request.headers.origin;
   if (requestOrigin === undefined) return true;
   if (typeof requestOrigin !== "string" || !requestOrigin.trim()) return false;
@@ -460,6 +506,8 @@ function compactFeedbackHint(value) {
   return compact;
 }
 
+const BODY_DISCARD_STARTED = Symbol("bodyDiscardStarted");
+
 function feedbackConflictKeys(value) {
   if (value.kind === "concept") return [`concept|${value.id}`];
   return [
@@ -485,6 +533,8 @@ function hasContradictoryFeedback(values) {
 }
 
 function discardRequestBody(request, response) {
+  if (request[BODY_DISCARD_STARTED]) return;
+  request[BODY_DISCARD_STARTED] = true;
   if (request.readableEnded || request.destroyed) return;
   let discardedBytes = 0;
   let terminated = false;
@@ -618,7 +668,9 @@ export function createAppServer({
   metricsAuthToken = process.env.METRICS_AUTH_TOKEN || "",
   publicOrigin = process.env.PUBLIC_ORIGIN || "",
   requireExtractorAuth = false,
-  requireMetricsAuth = false
+  requireMetricsAuth = false,
+  requireSecurePublicOrigin = false,
+  requireBuildRevision = false
 } = {}) {
   const safeRoot = resolve(staticRoot);
   const learningNoteAssets = discoverLearningNoteAssets(safeRoot);
@@ -669,9 +721,12 @@ export function createAppServer({
     : 120000;
   const authToken = typeof extractorAuthToken === "string" ? extractorAuthToken : "";
   const extractorAuthRequired = requireExtractorAuth === true || Boolean(authToken);
+  const extractorAuthConfigured = isUsableAuthToken(authToken);
   const metricsToken = typeof metricsAuthToken === "string" ? metricsAuthToken : "";
   const metricsAuthRequired = requireMetricsAuth === true || Boolean(metricsToken);
+  const metricsAuthConfigured = isUsableAuthToken(metricsToken);
   const origin = requirePublicOrigin(publicOrigin);
+  const securePublicOriginConfigured = origin.startsWith("https://") || isLoopbackPublicOrigin(origin);
   const transportSecurityHeaders = origin.startsWith("https://")
     ? { "strict-transport-security": "max-age=31536000; includeSubDomains" }
     : {};
@@ -709,6 +764,10 @@ export function createAppServer({
   const processStartedAt = Date.now();
   const metrics = {
     requests: 0,
+    httpRequestsInFlight: 0,
+    httpLatencyBuckets: Array(HTTP_LATENCY_BUCKETS_MS.length).fill(0),
+    httpLatencySumMs: 0,
+    httpLatencyCount: 0,
     extractionRequests: 0,
     extractionSuccesses: 0,
     extractionFailures: 0,
@@ -724,6 +783,14 @@ export function createAppServer({
   };
   let readinessCache = null;
   let readinessCheck = null;
+  const observeHttpLatency = (durationMs) => {
+    const boundedDuration = Math.max(0, Math.floor(Number(durationMs) || 0));
+    metrics.httpLatencySumMs += boundedDuration;
+    metrics.httpLatencyCount += 1;
+    HTTP_LATENCY_BUCKETS_MS.forEach((bucket, index) => {
+      if (boundedDuration <= bucket) metrics.httpLatencyBuckets[index] += 1;
+    });
+  };
   const observeExtractionLatency = (durationMs) => {
     const boundedDuration = Math.max(0, Math.floor(Number(durationMs) || 0));
     metrics.extractionLatencySumMs += boundedDuration;
@@ -742,6 +809,58 @@ export function createAppServer({
     }
   };
   const inspectReadiness = async () => {
+    if (requireBuildRevision === true && BUILD_REVISION === "unknown") {
+      return {
+        status: 503,
+        payload: {
+          ok: false,
+          schema: GRAPH_SCHEMA,
+          version: APP_VERSION,
+          revision: BUILD_REVISION,
+          ready: false,
+          error: "A trusted source build revision is not configured."
+        }
+      };
+    }
+    if (requireSecurePublicOrigin === true && !securePublicOriginConfigured) {
+      return {
+        status: 503,
+        payload: {
+          ok: false,
+          schema: GRAPH_SCHEMA,
+          version: APP_VERSION,
+          revision: BUILD_REVISION,
+          ready: false,
+          error: "A trusted HTTPS public origin is not configured."
+        }
+      };
+    }
+    if (extractorAuthRequired && !extractorAuthConfigured) {
+      return {
+        status: 503,
+        payload: {
+          ok: false,
+          schema: GRAPH_SCHEMA,
+          version: APP_VERSION,
+          revision: BUILD_REVISION,
+          ready: false,
+          error: "Extraction authentication is not configured."
+        }
+      };
+    }
+    if (metricsAuthRequired && !metricsAuthConfigured) {
+      return {
+        status: 503,
+        payload: {
+          ok: false,
+          schema: GRAPH_SCHEMA,
+          version: APP_VERSION,
+          revision: BUILD_REVISION,
+          ready: false,
+          error: "Metrics authentication is not configured."
+        }
+      };
+    }
     try {
       const realRoot = await realpath(safeRoot);
       const readinessAssets = new Set([...fixedPublicAssets, ...learningNoteAssets]);
@@ -786,11 +905,23 @@ export function createAppServer({
     try {
       response.securityHeaders = { ...securityHeaders, ...transportSecurityHeaders };
       response.setHeader("x-request-id", requestId);
+      if (request.method !== "POST") discardRequestBody(request, response);
       metrics.requests += 1;
+      metrics.httpRequestsInFlight += 1;
+      const requestStartedAt = Date.now();
+      let requestMetricsSettled = false;
+      const observeRequestCompletion = () => {
+        if (requestMetricsSettled) return;
+        requestMetricsSettled = true;
+        metrics.httpRequestsInFlight = Math.max(0, metrics.httpRequestsInFlight - 1);
+        observeHttpLatency(Date.now() - requestStartedAt);
+      };
       response.once("finish", () => {
         const status = String(response.statusCode || 0);
         metrics.responsesByStatus.set(status, (metrics.responsesByStatus.get(status) || 0) + 1);
+        observeRequestCompletion();
       });
+      response.once("close", observeRequestCompletion);
       let requestPath;
       try {
         requestPath = new URL(request.url || "/", "http://localhost").pathname;
@@ -954,7 +1085,7 @@ export function createAppServer({
         return;
       }
       if (["GET", "HEAD"].includes(request.method) && requestPath === "/metrics") {
-        if (metricsAuthRequired && !metricsToken) {
+        if (metricsAuthRequired && !metricsAuthConfigured) {
           sendJson(response, 503, { error: "Metrics authentication is not configured." }, { "retry-after": "60" }, request.method === "HEAD");
           return;
         }
@@ -966,6 +1097,15 @@ export function createAppServer({
           "# HELP llm_field_notes_http_requests_total Total HTTP requests handled by the reference server.",
           "# TYPE llm_field_notes_http_requests_total counter",
           `llm_field_notes_http_requests_total ${metrics.requests}`,
+          "# HELP llm_field_notes_http_requests_in_flight Current HTTP requests that have not completed.",
+          "# TYPE llm_field_notes_http_requests_in_flight gauge",
+          `llm_field_notes_http_requests_in_flight ${metrics.httpRequestsInFlight}`,
+          "# HELP llm_field_notes_http_duration_ms HTTP request latency distribution in milliseconds.",
+          "# TYPE llm_field_notes_http_duration_ms histogram",
+          ...HTTP_LATENCY_BUCKETS_MS.map((bucket, index) => `llm_field_notes_http_duration_ms_bucket{le="${bucket}"} ${metrics.httpLatencyBuckets[index]}`),
+          `llm_field_notes_http_duration_ms_bucket{le="+Inf"} ${metrics.httpLatencyCount}`,
+          `llm_field_notes_http_duration_ms_sum ${metrics.httpLatencySumMs}`,
+          `llm_field_notes_http_duration_ms_count ${metrics.httpLatencyCount}`,
           "# HELP llm_field_notes_http_responses_total HTTP responses grouped by status code.",
           "# TYPE llm_field_notes_http_responses_total counter",
           ...[...metrics.responsesByStatus.entries()]
@@ -1013,6 +1153,9 @@ export function createAppServer({
           "# HELP llm_field_notes_process_uptime_seconds Process uptime in seconds.",
           "# TYPE llm_field_notes_process_uptime_seconds gauge",
           `llm_field_notes_process_uptime_seconds ${Math.max(0, (Date.now() - processStartedAt) / 1000)}`,
+          "# HELP llm_field_notes_draining Whether the server is refusing new extraction work during graceful shutdown.",
+          "# TYPE llm_field_notes_draining gauge",
+          `llm_field_notes_draining ${server.isDraining ? 1 : 0}`,
           ""
         ].join("\n");
         sendText(response, 200, body, {}, request.method === "HEAD");
@@ -1029,6 +1172,10 @@ export function createAppServer({
             readinessCheck = null;
           });
           const result = await readinessCheck;
+          if (server.isDraining) {
+            sendJson(response, 503, { ok: false, schema: GRAPH_SCHEMA, version: APP_VERSION, revision: BUILD_REVISION, ready: false, error: "Server is draining." }, { "retry-after": "5" }, request.method === "HEAD");
+            return;
+          }
           readinessCache = { ...result, expiresAt: Date.now() + READINESS_CACHE_TTL_MS };
         }
         sendJson(
@@ -1041,6 +1188,7 @@ export function createAppServer({
         return;
       }
       if (requestPath === "/api/extract-graph" && request.method !== "POST") {
+        discardRequestBody(request, response);
         sendEmpty(response, 405, { allow: "POST" });
         return;
       }
@@ -1053,13 +1201,14 @@ export function createAppServer({
         metrics.extractionRequests += 1;
         const startedAt = Date.now();
         let extractionOutcomeLogged = false;
+        let extractionRateLimitHeaders = {};
         const respondJson = (status, payload, extraHeaders = {}, logFields = {}) => {
           const durationMs = Date.now() - startedAt;
           observeExtractionLatency(durationMs);
           if (status === 200) metrics.extractionSuccesses += 1;
           else metrics.extractionFailures += 1;
           extractionOutcomeLogged = true;
-          sendJson(response, status, payload, { "x-request-id": requestId, ...extraHeaders });
+          sendJson(response, status, payload, { "x-request-id": requestId, ...extractionRateLimitHeaders, ...extraHeaders });
           safeLog({ requestId, status, durationMs, route: "extract-graph", ...logFields });
         };
         const recordClientAbort = (logFields = {}) => {
@@ -1102,6 +1251,7 @@ export function createAppServer({
         const windowStart = current && now - current.startedAt < 60000 ? current.startedAt : now;
         const count = current && windowStart === current.startedAt ? current.count + 1 : 1;
         rateLimits.set(clientKey, { startedAt: windowStart, count });
+        extractionRateLimitHeaders = rateLimitHeaders(requestLimit, count, windowStart, now);
         if (count > requestLimit) {
           discardRequestBody(request, response);
           metrics.rateLimited += 1;
@@ -1109,7 +1259,7 @@ export function createAppServer({
           respondJson(429, { error: "Extraction rate limit exceeded." }, { "retry-after": String(retryAfter) });
           return;
         }
-        if (extractorAuthRequired && !authToken) {
+        if (extractorAuthRequired && !extractorAuthConfigured) {
           discardRequestBody(request, response);
           respondJson(503, { error: "Extraction authentication is not configured." }, { "retry-after": "60" }, { error: "AUTH_NOT_CONFIGURED" });
           return;
@@ -1139,7 +1289,16 @@ export function createAppServer({
             recordClientAbort();
             return;
           }
-          respondJson(error?.statusCode || 400, { error: error instanceof Error ? error.message : "Invalid JSON." });
+          const bodyError = error?.statusCode === 413
+            ? "Request body exceeds the 2 MB limit."
+            : error?.code === "REQUEST_LENGTH_MISMATCH"
+              ? "Request body length does not match Content-Length."
+              : error?.code === "INVALID_CONTENT_LENGTH"
+                ? "Content-Length header is invalid."
+                : error?.message === "Request body is not valid UTF-8."
+                  ? error.message
+                  : "Invalid extraction request body.";
+          respondJson(error?.statusCode || 400, { error: bodyError });
           return;
         }
         const document = body?.document;
@@ -1168,6 +1327,11 @@ export function createAppServer({
         }
         if (document.text.trim().length < 40 || document.text.length > MAX_DOCUMENT_CHARS) {
           respondJson(400, { error: "Document text must be between 40 and 300,000 characters." });
+          return;
+        }
+        if (server.isDraining) {
+          discardRequestBody(request, response);
+          respondJson(503, { error: "Server is draining." }, { "retry-after": "5" }, { error: "SERVER_DRAINING" });
           return;
         }
         if (activeExtractors.size >= concurrencyLimit) {
@@ -1301,6 +1465,7 @@ export function createAppServer({
         return;
       }
       if (request.method !== "GET" && request.method !== "HEAD") {
+        discardRequestBody(request, response);
         sendEmpty(response, 405, { allow: "GET, HEAD, POST" });
         return;
       }
@@ -1432,8 +1597,11 @@ export function createAppServer({
     ...metrics,
     extractorConcurrencyLimit: concurrencyLimit,
     responsesByStatus: Object.fromEntries(metrics.responsesByStatus),
+    httpLatencyBuckets: [...metrics.httpLatencyBuckets],
     extractionLatencyBuckets: [...metrics.extractionLatencyBuckets],
+    httpRequestsInFlight: metrics.httpRequestsInFlight,
     extractionsInFlight: activeExtractors.size,
+    draining: server.isDraining,
     uptimeSeconds: Math.max(0, (Date.now() - processStartedAt) / 1000)
   });
   server.abortActiveExtractors = () => {
@@ -1476,6 +1644,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     publicOrigin: process.env.PUBLIC_ORIGIN || "",
     requireExtractorAuth: !loopbackHost,
     requireMetricsAuth: !loopbackHost,
+    requireSecurePublicOrigin: !loopbackHost,
+    requireBuildRevision: !loopbackHost,
     logger: (entry) => console.log(JSON.stringify(entry))
   });
   let actualPort = port;

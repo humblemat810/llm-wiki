@@ -3,10 +3,12 @@ import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { parseJsonWithUniqueKeys } from "../graph-core.js";
 import { MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES } from "./public-assets.mjs";
-import { computeServiceWorkerCacheRevision, readServiceWorkerCacheName, stripDeploymentCacheRevision } from "./service-worker-cache.mjs";
+import { requirePublicOrigin } from "./public-origin.mjs";
+import { computeServiceWorkerCacheRevision, readServiceWorkerCacheName, readServiceWorkerShellAssets, stripDeploymentCacheRevision } from "./service-worker-cache.mjs";
 
 const output = resolve(process.argv[2] || "dist");
 const outputRealPath = await realpath(output);
+const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN);
 const manifestPath = resolve(outputRealPath, "asset-manifest.json");
 const packageManifest = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json");
 const isContained = (candidate) => {
@@ -75,8 +77,54 @@ const sortedManifestPaths = [...manifestPaths].sort();
 if (JSON.stringify(outputFiles) !== JSON.stringify(sortedManifestPaths)) {
   throw new Error("Pages asset manifest does not cover exactly the output files.");
 }
+if (JSON.stringify(manifestPaths) !== JSON.stringify(sortedManifestPaths)) {
+  throw new Error("Pages asset manifest file entries must be lexically sorted.");
+}
+const robotsFile = await resolveContainedFile(resolve(outputRealPath, "robots.txt"), "Pages robots policy");
+const robotsText = await readFile(robotsFile.fileRealPath, "utf8");
+const expectedRobots = publicOrigin
+  ? `User-agent: *\nAllow: /\nSitemap: ${publicOrigin}/sitemap.xml\n`
+  : "User-agent: *\nAllow: /\n";
+if (robotsText !== expectedRobots) {
+  throw new Error("Pages robots policy does not match the configured public origin.");
+}
+if (publicOrigin && !manifestPaths.includes("sitemap.xml")) {
+  throw new Error("Pages sitemap is required when a public origin is configured.");
+}
+if (!publicOrigin && manifestPaths.includes("sitemap.xml")) {
+  throw new Error("Pages sitemap must not be published without a configured public origin.");
+}
 const serviceWorkerPath = resolve(outputRealPath, "sw.js");
 const serviceWorker = await readFile(serviceWorkerPath, "utf8");
+const shellAssets = readServiceWorkerShellAssets(serviceWorker);
+if (!shellAssets.length) throw new Error("Pages service worker APP_SHELL must not be empty.");
+const shellPaths = shellAssets.map((asset) => {
+  if (!asset.startsWith("./") || asset.includes("?") || asset.includes("#")) {
+    throw new Error(`Pages service worker APP_SHELL asset is unsafe: ${asset}`);
+  }
+  const relativePath = asset === "./" ? "index.html" : asset.slice(2);
+  if (!relativePath || relativePath.startsWith("/") || relativePath.split("/").includes("..")) {
+    throw new Error(`Pages service worker APP_SHELL asset is unsafe: ${asset}`);
+  }
+  return relativePath;
+});
+const manifestPathSet = new Set(manifestPaths);
+for (const shellPath of shellPaths) {
+  if (shellPath !== "asset-manifest.json" && !manifestPathSet.has(shellPath)) {
+    throw new Error(`Pages service worker APP_SHELL asset is missing from the asset manifest: ${shellPath}`);
+  }
+  if (shellPath !== "asset-manifest.json" && !outputFiles.includes(shellPath)) {
+    throw new Error(`Pages service worker APP_SHELL asset is missing from the published output: ${shellPath}`);
+  }
+}
+for (const generatedNote of manifestPaths.filter((asset) => /^notes\/.+\.html$/.test(asset))) {
+  if (!shellPaths.includes(generatedNote)) {
+    throw new Error(`Pages service worker APP_SHELL is missing generated note page: ${generatedNote}`);
+  }
+}
+if (!shellPaths.includes("asset-manifest.json")) {
+  throw new Error("Pages service worker APP_SHELL must precache asset-manifest.json.");
+}
 const cacheName = readServiceWorkerCacheName(serviceWorker);
 if (!cacheName.startsWith(`llm-field-notes-v${packageManifest.version}`)) {
   throw new Error("Pages service-worker cache does not match package.json.");

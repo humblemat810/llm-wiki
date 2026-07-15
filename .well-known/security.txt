@@ -1,0 +1,5 @@
+Contact: https://github.com/humblemat810/llm-wiki/security/advisories/new
+Policy: https://github.com/humblemat810/llm-wiki/blob/main/SECURITY.md
+Preferred-Languages: en
+Canonical: https://github.com/humblemat810/llm-wiki/blob/main/.well-known/security.txt
+Expires: 2027-07-15T00:00:00.000Z

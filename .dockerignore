@@ -1,10 +1,19 @@
 .git
 .github
+.codex
 dist
+.llm-field-notes-pages-build-*
+*.previous-*
 .env
 .env.*
 tests
+benchmarks
 node_modules
+scripts/*.mjs
+!scripts/note-page.mjs
+!scripts/public-assets.mjs
+!scripts/public-origin.mjs
+!scripts/service-worker-cache.mjs
 experiments/*.mjs
 !experiments/bounded-file.mjs
 !experiments/compare-evaluations.mjs
@@ -20,6 +29,7 @@ experiments/*.mjs
 !experiments/project-jsonld.mjs
 !experiments/verify-jsonld.mjs
 !experiments/verify-graph.mjs
+!experiments/verify-backup.mjs
 !experiments/verify-diff.mjs
 scripts/build-pages.mjs
 scripts/check-release.mjs

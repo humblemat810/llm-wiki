@@ -247,20 +247,23 @@
                 <div class="projection-actions">
                   <button class="button button-light" id="download-markdown" type="button" aria-describedby="projection-privacy-note">Download .md <span>↓</span></button>
                   <button class="button button-light" id="copy-markdown" type="button" aria-describedby="projection-privacy-note">Copy Markdown <span>↗</span></button>
-                  <button class="button button-quiet" id="copy-redacted-markdown" type="button" title="Removes source text, evidence quotes, and URIs">Copy redacted Markdown <span>↗</span></button>
-                  <button class="button button-quiet" id="share-redacted-markdown" type="button" title="Shares a Markdown file with source text, evidence quotes, and URIs removed">Share redacted graph <span>↗</span></button>
-                  <button class="button button-quiet" id="download-redacted-markdown" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted Markdown <span>↓</span></button>
+                  <button class="button button-quiet" id="copy-redacted-markdown" type="button" aria-describedby="projection-privacy-note" title="Removes source text, evidence quotes, and URIs">Copy redacted Markdown <span>↗</span></button>
+                  <button class="button button-quiet" id="share-redacted-markdown" type="button" aria-describedby="projection-privacy-note" title="Shares a Markdown file with source text, evidence quotes, and URIs removed">Share redacted graph <span>↗</span></button>
+                  <button class="button button-quiet" id="download-redacted-markdown" type="button" aria-describedby="projection-privacy-note" title="Removes source text, evidence quotes, and URIs">Download redacted Markdown <span>↓</span></button>
+                  <button class="button button-quiet" id="download-redacted-html" type="button" aria-describedby="projection-privacy-note" title="Creates a self-contained, script-free public snapshot without source text, evidence quotes, or URIs">Download shareable HTML <span>↓</span></button>
+                  <button class="button button-quiet" id="share-redacted-html" type="button" aria-describedby="projection-privacy-note" title="Shares a self-contained, script-free public snapshot without source text, evidence quotes, or URIs">Share HTML snapshot <span>↗</span></button>
                   <button class="button button-light" id="download-vault" type="button" aria-describedby="projection-privacy-note">Download Obsidian vault <span>↓</span></button>
-                  <button class="button button-quiet" id="download-redacted-vault" type="button" title="Removes source text, evidence quotes, and URIs">Download redacted vault <span>↓</span></button>
+                  <button class="button button-quiet" id="download-redacted-vault" type="button" aria-describedby="projection-privacy-note" title="Removes source text, evidence quotes, and URIs">Download redacted vault <span>↓</span></button>
                   <button class="button button-quiet" id="download-json" type="button" aria-describedby="projection-privacy-note">Export graph JSON <span>↓</span></button>
                   <button class="button button-quiet" id="download-jsonld" type="button" aria-describedby="projection-privacy-note">Export JSON-LD <span>↓</span></button>
-                  <button class="button button-quiet" id="download-redacted-jsonld" type="button" title="Removes source text, evidence quotes, and URIs">Export redacted JSON-LD <span>↓</span></button>
+                  <button class="button button-quiet" id="download-redacted-jsonld" type="button" aria-describedby="projection-privacy-note" title="Removes source text, evidence quotes, and URIs">Export redacted JSON-LD <span>↓</span></button>
                   <button class="button button-quiet" id="download-health" type="button">Export health report <span>↓</span></button>
-                  <button class="button button-quiet" id="download-redacted" type="button">Export redacted graph <span>↓</span></button>
+                  <button class="button button-quiet" id="download-redacted" type="button" aria-describedby="projection-privacy-note">Export redacted graph <span>↓</span></button>
                   <button class="button button-quiet" id="download-backup" type="button" aria-describedby="projection-privacy-note">Download full backup <span>↓</span></button>
+                  <button class="button button-quiet" id="download-encrypted-backup" type="button" aria-describedby="projection-privacy-note" title="Encrypts the full backup in this browser with a password; the password is never stored">Download encrypted backup <span>↓</span></button>
                   <button class="button button-quiet" id="download-feedback" type="button" title="Includes evidence and source references" aria-describedby="projection-privacy-note">Export feedback dataset <span>↓</span></button>
                   <button class="button button-quiet" id="download-compact-feedback" type="button" title="Removes evidence and source references">Export compact feedback <span>↓</span></button>
-                  <button class="button button-quiet" id="download-diff" type="button">Export latest revision diff <span>↓</span></button>
+                  <button class="button button-quiet" id="download-diff" type="button" aria-describedby="projection-privacy-note" title="May include source titles and URIs">Export latest revision diff <span>↓</span></button>
                 </div>
                 <p class="projection-status" id="projection-status" role="status" aria-live="polite"></p>
               </div>
