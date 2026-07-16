@@ -46,7 +46,16 @@ jobs:
           BROWSER_SMOKE_EXPECTED_REVISION: ${{ steps.revision.outputs.value }}
           BROWSER_SMOKE_EXPECTED_REPOSITORY: https://github.com/${{ github.repository }}
           BROWSER_SMOKE_ARTIFACT_DIR: browser-artifacts
-        run: npm run browser:smoke
+        run: |
+          for attempt in 1 2 3; do
+            if npm run browser:smoke; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep 20
+            fi
+          done
+          exit 1
       - name: Upload browser-monitor failure diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

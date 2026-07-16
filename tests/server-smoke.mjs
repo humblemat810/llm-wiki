@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Agent, request as httpRequest } from "node:http";
@@ -7,9 +7,11 @@ import { connect as tcpConnect } from "node:net";
 import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { canWriteResponse, createAppServer, MIN_AUTH_TOKEN_CHARS, readBody, readBoundedFile, readBoundedUtf8 } from "../server.mjs";
+import { canWriteResponse, createAppServer, MIN_AUTH_TOKEN_CHARS, parseConfiguredBoundedInteger, parseTrustedProxyHops, readBody, readBoundedFile, readBoundedUtf8, resolveRateLimitClientKey, safeDiagnosticCode, sanitizeLogEntry } from "../server.mjs";
 import { extractGraph, MAX_GRAPH_NODES } from "../graph-core.js";
 import { FIXED_PUBLIC_ASSETS, MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
+import { verifyCanvasProjection } from "../scripts/verify-canvas.mjs";
+import { verifyServiceHealth } from "../scripts/verify-service-health.mjs";
 
 const expectedBuildRevision = /^(?:unknown|[0-9a-f]{7,64})$/i.test(String(process.env.BUILD_REVISION || "").trim())
   ? String(process.env.BUILD_REVISION).trim().toLowerCase()
@@ -32,6 +34,106 @@ for (const state of [
   assert.equal(canWriteResponse(state), false, "response helpers must refuse writes after any terminal response state");
 }
 assert.equal(canWriteResponse({ destroyed: false, headersSent: false, writableEnded: false }), true, "response helpers should permit a fresh response");
+assert.equal(safeDiagnosticCode("EXTRACTOR_TIMEOUT"), "EXTRACTOR_TIMEOUT", "known diagnostic codes should remain available for incident correlation");
+assert.equal(safeDiagnosticCode(`bad${"x".repeat(200)}`), "EXTRACTOR_FAILURE", "unexpected diagnostic codes should use a bounded generic fallback");
+assert.equal(safeDiagnosticCode("BAD CODE"), "EXTRACTOR_FAILURE", "diagnostic codes containing unsafe characters should not reach lifecycle logs");
+assert.equal(safeDiagnosticCode(""), "EXTRACTOR_FAILURE", "empty diagnostic codes should use a generic fallback");
+assert.deepEqual(parseTrustedProxyHops(undefined), { value: 0, valid: true, configured: false }, "missing proxy trust configuration should use direct-socket mode");
+assert.deepEqual(parseTrustedProxyHops("2"), { value: 2, valid: true, configured: true }, "valid proxy trust configuration should preserve its hop count");
+assert.deepEqual(parseTrustedProxyHops(""), { value: 0, valid: true, configured: false }, "empty proxy trust configuration should remain optional");
+assert.equal(parseTrustedProxyHops("1.5").valid, false, "fractional proxy trust configuration should be rejected");
+assert.equal(parseTrustedProxyHops("9").valid, false, "proxy trust configuration above the safety ceiling should be rejected");
+assert.deepEqual(parseConfiguredBoundedInteger("PORT", undefined, { defaultValue: 8000, max: 65535 }), { value: 8000, configured: false, valid: true }, "missing integer settings should use their documented default");
+assert.deepEqual(parseConfiguredBoundedInteger("EXTRACTOR_TIMEOUT_MS", "2500", { defaultValue: 120000, max: 120000 }), { value: 2500, configured: true, valid: true }, "valid bounded integer settings should be preserved");
+  assert.equal(parseConfiguredBoundedInteger("EXTRACTOR_RATE_LIMIT", "oops", { defaultValue: 60, max: 1000000 }).valid, false, "malformed integer settings should fail validation");
+  assert.equal(parseConfiguredBoundedInteger("EXTRACTOR_CONCURRENCY", "0", { defaultValue: 8, max: 1024 }).valid, false, "out-of-range integer settings should fail validation");
+  assert.throws(
+    () => createAppServer({
+      publicOrigin: "http://localhost:8000",
+      requireSecurePublicOrigin: true,
+      requireBuildRevision: false
+    }),
+    /Public origin must use HTTPS/,
+    "strict non-loopback origin policy should reject HTTP even when the configured origin hostname is loopback"
+  );
+  const invalidProxyTrustStartup = spawnSync(
+  process.execPath,
+  ["server.mjs"],
+  {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    timeout: 2000,
+    env: { ...process.env, HOST: "127.0.0.1", TRUST_PROXY_HOPS: "not-an-integer" }
+  }
+);
+assert.notEqual(invalidProxyTrustStartup.status, 0, "standalone startup should fail on explicit invalid proxy trust configuration");
+assert.match(invalidProxyTrustStartup.stderr, /TRUST_PROXY_HOPS must be an integer from 0 to 8/, "invalid proxy trust startup should provide an actionable bounded diagnostic");
+for (const [variable, value, expectedMessage] of [
+  ["PORT", "not-a-port", /PORT must be an integer from 1 to 65535/],
+  ["EXTRACTOR_RATE_LIMIT", "not-a-rate", /EXTRACTOR_RATE_LIMIT must be an integer from 1 to 1000000/],
+  ["EXTRACTOR_TIMEOUT_MS", "0", /EXTRACTOR_TIMEOUT_MS must be an integer from 1 to 120000/],
+  ["EXTRACTOR_CONCURRENCY", "9999", /EXTRACTOR_CONCURRENCY must be an integer from 1 to 1024/]
+]) {
+  const invalidSettingStartup = spawnSync(
+    process.execPath,
+    ["server.mjs"],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 2000,
+      env: { ...process.env, HOST: "127.0.0.1", [variable]: value }
+    }
+  );
+  assert.notEqual(invalidSettingStartup.status, 0, `${variable} should fail standalone startup when explicitly malformed`);
+  assert.match(invalidSettingStartup.stderr, expectedMessage, `${variable} startup failure should identify the accepted range`);
+}
+const directRateLimitRequest = { socket: { remoteAddress: "127.0.0.1" }, headers: {} };
+assert.equal(resolveRateLimitClientKey(directRateLimitRequest), "127.0.0.1", "rate limiting should use the socket address by default");
+assert.equal(
+  resolveRateLimitClientKey({
+    socket: { remoteAddress: "10.0.0.8" },
+    headers: { "x-forwarded-for": "198.51.100.10, 10.0.0.7" }
+  }, 1),
+  "198.51.100.10",
+  "an explicitly trusted proxy hop should expose the client address immediately before the trusted proxy"
+);
+assert.equal(
+  resolveRateLimitClientKey({
+    socket: { remoteAddress: "10.0.0.8" },
+    headers: { "x-forwarded-for": "198.51.100.10, 203.0.113.20, 10.0.0.7" }
+  }, 1),
+  "203.0.113.20",
+  "multi-hop forwarding should select the address immediately before the configured trusted chain"
+);
+assert.equal(
+  resolveRateLimitClientKey({
+    socket: { remoteAddress: "10.0.0.8" },
+    headers: { "x-forwarded-for": "attacker, 10.0.0.7" }
+  }, 1),
+  "10.0.0.8",
+  "malformed forwarded addresses must fail closed to the socket identity"
+);
+assert.equal(
+  resolveRateLimitClientKey({
+    socket: { remoteAddress: "10.0.0.8" },
+    headers: { "x-forwarded-for": "198.51.100.10" }
+  }, 0),
+  "10.0.0.8",
+  "forwarded headers must be ignored unless proxy trust is explicitly enabled"
+);
+assert.deepEqual(
+  sanitizeLogEntry({
+    error: `bad${"x".repeat(400)}`,
+    message: `unsafe${String.fromCharCode(0)}message`,
+    durationMs: Number.POSITIVE_INFINITY,
+    nested: { secret: true },
+    enabled: true
+  }),
+  {
+    error: "SERVER_FAILURE"
+  },
+  "structured log entries should retain only bounded allowlisted operational fields"
+);
 
 const logs = [];
 const server = createAppServer({ logger: (entry) => logs.push(entry) });
@@ -157,6 +259,42 @@ try {
   assert.equal(server.headersTimeout, 15000);
   assert.equal(server.keepAliveTimeout, 5000);
   assert.equal(server.maxHeaderSize, 16 * 1024);
+  const readinessTimeoutServer = createAppServer({ readinessTimeoutMs: 1 });
+  await new Promise((resolve) => readinessTimeoutServer.listen(0, "127.0.0.1", resolve));
+  const readinessTimeoutPort = readinessTimeoutServer.address().port;
+  try {
+    const readinessTimeoutResponse = await fetch(`http://127.0.0.1:${readinessTimeoutPort}/readyz`);
+    assert.equal(readinessTimeoutResponse.status, 503, "readiness should fail closed when its validation deadline expires");
+    assert.equal(readinessTimeoutResponse.headers.get("retry-after"), "5");
+    assert.deepEqual(await readinessTimeoutResponse.json(), {
+      ok: false,
+      schema: "llm-field-notes/graph@1",
+      version: "0.1.0",
+      revision: expectedBuildRevision,
+      ready: false,
+      error: "Readiness check timed out."
+    });
+    const readinessTimeoutMetrics = await fetch(`http://127.0.0.1:${readinessTimeoutPort}/metrics`);
+    assert.match(await readinessTimeoutMetrics.text(), /llm_field_notes_readiness_timeouts_total 1/, "readiness timeouts should be observable in Prometheus metrics");
+  } finally {
+    readinessTimeoutServer.close();
+  }
+  const failedReadinessLogs = [];
+  const failedReadinessServer = createAppServer({
+    staticRoot: join(tmpdir(), `llm-field-notes-missing-readiness-${process.pid}-${Date.now()}`),
+    logger: (entry) => failedReadinessLogs.push(entry)
+  });
+  await new Promise((resolve) => failedReadinessServer.listen(0, "127.0.0.1", resolve));
+  const failedReadinessPort = failedReadinessServer.address().port;
+  try {
+    const failedReadinessResponse = await fetch(`http://127.0.0.1:${failedReadinessPort}/readyz`);
+    assert.equal(failedReadinessResponse.status, 503, "missing readiness assets should fail closed");
+    const failedReadinessMetrics = await fetch(`http://127.0.0.1:${failedReadinessPort}/metrics`);
+    assert.match(await failedReadinessMetrics.text(), /llm_field_notes_readiness_failures_total 1/, "completed readiness failures should be observable in Prometheus metrics");
+    assert(failedReadinessLogs.some((entry) => entry.route === "readyz" && entry.error === "READINESS_FAILED"), "readiness failures should emit a sanitized structured diagnostic");
+  } finally {
+    failedReadinessServer.close();
+  }
   assert(Number.isFinite(server.getMetrics().uptimeSeconds) && server.getMetrics().uptimeSeconds >= 0, "programmatic metrics should expose process uptime");
   assert.equal(server.getMetrics().draining, false, "programmatic metrics should expose the initial non-draining state");
   const index = await fetch(`http://127.0.0.1:${port}/`);
@@ -183,6 +321,10 @@ try {
   const release = await fetch(`http://127.0.0.1:${port}/version.json`);
   assert.equal(release.headers.get("cache-control"), "no-cache", "release metadata should update promptly");
   assert.deepEqual((await release.json()), { version: "0.1.0", channel: "unreleased", date: "2026-07-12", revision: expectedBuildRevision });
+  const webManifest = await fetch(`http://127.0.0.1:${port}/manifest.webmanifest`);
+  assert.equal(webManifest.headers.get("cache-control"), "no-cache", "installable-app metadata should update promptly");
+  const notFoundPage = await fetch(`http://127.0.0.1:${port}/404.html`);
+  assert.equal(notFoundPage.headers.get("cache-control"), "no-cache", "the branded recovery page should update promptly");
     const robots = await fetch(`http://127.0.0.1:${port}/robots.txt`);
     assert.equal(robots.headers.get("content-type"), "text/plain; charset=utf-8", "robots.txt should use the standard text MIME type");
     const securityMetadata = await fetch(`http://127.0.0.1:${port}/.well-known/security.txt`);
@@ -197,6 +339,7 @@ try {
   assert((await note.text()).includes("# Tokens are the interface"), "versioned learning notes should be served as Markdown");
   const notePage = await fetch(`http://127.0.0.1:${port}/notes/tokens.html`);
   assert.equal(notePage.status, 200);
+  assert.equal(notePage.headers.get("cache-control"), "no-cache", "generated learning-note pages should revalidate after publication changes");
   const notePageText = await notePage.text();
   assert(notePageText.includes("Tokens are the interface") && notePageText.includes("<h2>The short version</h2>") && notePageText.includes("application/ld+json") && notePageText.includes("\"@type\":\"Article\"") && notePageText.includes("application/atom+xml") && notePageText.includes("Content-Security-Policy") && notePageText.includes("script-src 'none'") && notePageText.includes("robots\" content=\"index,follow\"") && notePageText.includes("og:type\" content=\"article\"") && notePageText.includes("text/markdown"), "Node hosts should serve safe rendered note pages with Article structured data, feed discovery, strict CSP, and Markdown alternate");
   assert(notePage.headers.get("content-security-policy")?.includes("script-src 'none'") && notePage.headers.get("content-security-policy")?.includes("connect-src 'none'"), "Node note landing pages should enforce their strict CSP at the response boundary");
@@ -215,6 +358,13 @@ try {
   const sampleGraphPageText = await sampleGraphPage.text();
   assert(sampleGraphPageText.includes("A document,") && sampleGraphPageText.includes("CONCEPTS WITH EVIDENCE") && sampleGraphPageText.includes("RELATIONS WITH GROUNDS") && sampleGraphPageText.includes("fnv64-") && sampleGraphPageText.includes("script-src 'none'"), "Node hosts should serve the script-free sample graph explainer with evidence, relations, and fingerprint");
   assert(sampleGraphPage.headers.get("content-security-policy")?.includes("script-src 'none'"), "Node sample graph pages should enforce their strict CSP at the response boundary");
+  const sampleGraphCanvas = await fetch(`http://127.0.0.1:${port}/examples/sample-graph.canvas`);
+  assert.equal(sampleGraphCanvas.status, 200, "Node hosts should serve the standalone sample Graph.canvas projection");
+  assert.equal(sampleGraphCanvas.headers.get("content-type"), "application/json; charset=utf-8", "Node hosts should advertise the Canvas projection as JSON");
+  const sampleGraphCanvasPayload = JSON.parse(await sampleGraphCanvas.text());
+  verifyCanvasProjection(sampleGraphCanvasPayload, "served sample Graph.canvas");
+  const sampleGraphCanvasIds = new Set(sampleGraphCanvasPayload.nodes.map((node) => node.id));
+  assert(sampleGraphCanvasPayload.nodes.length > 0 && sampleGraphCanvasPayload.edges.every((edge) => sampleGraphCanvasIds.has(edge.fromNode) && sampleGraphCanvasIds.has(edge.toNode)), "Node Canvas projections should expose resolvable native nodes and edges");
   const oversizedNoteRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-note-page-oversized-"));
   await mkdir(join(oversizedNoteRoot, "notes"), { recursive: true });
   await writeFile(join(oversizedNoteRoot, "notes", "large.md"), `# Large note\n\n${"x".repeat(10 * 1024 * 1024 + 1)}`);
@@ -281,13 +431,20 @@ try {
   assert.equal(weakNotModified.status, 304);
   const health = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: expectedBuildRevision });
+  const healthPayload = await health.json();
+  verifyServiceHealth(healthPayload, "health response", "liveness");
+  assert.deepEqual(healthPayload, { ok: true, live: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: expectedBuildRevision });
   assert.match(health.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/, "health responses should expose a request ID for operational correlation");
   assert.equal(health.headers.get("cache-control"), "no-store");
   const healthHead = await fetch(`http://127.0.0.1:${port}/healthz`, { method: "HEAD" });
   assert.equal(healthHead.status, 200, "health checks should support HEAD probes");
   assert.equal(Number(healthHead.headers.get("content-length")), Number(health.headers.get("content-length")));
   assert.equal(await healthHead.text(), "", "health HEAD responses should not contain a body");
+  const liveness = await fetch(`http://127.0.0.1:${port}/livez`);
+  assert.equal(liveness.status, 200, "liveness checks should answer independently of readiness");
+  const livenessPayload = await liveness.json();
+  verifyServiceHealth(livenessPayload, "liveness response", "liveness");
+  assert.deepEqual(livenessPayload, { ok: true, live: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: expectedBuildRevision });
   const metrics = await fetch(`http://127.0.0.1:${port}/metrics`);
   assert.equal(metrics.status, 200);
   assert.equal(metrics.headers.get("content-type"), "text/plain; version=0.0.4; charset=utf-8");
@@ -300,6 +457,9 @@ try {
     && metricsText.includes("llm_field_notes_extraction_duration_ms_bucket{le=\"+Inf\"}")
     && metricsText.includes("llm_field_notes_extraction_duration_ms_count")
     && metricsText.includes('llm_field_notes_http_responses_total{status="200"}')
+    && metricsText.includes("llm_field_notes_rate_limit_keys ")
+    && metricsText.includes("llm_field_notes_rate_limit_key_capacity 10000")
+    && metricsText.includes("llm_field_notes_trusted_proxy_hops 0")
     && metricsText.includes("llm_field_notes_concurrency_limited_total 0")
     && metricsText.includes("llm_field_notes_extractions_in_flight 0")
     && metricsText.includes("llm_field_notes_extractor_concurrency_limit 8")
@@ -310,6 +470,9 @@ try {
     && metricsText.includes(`llm_field_notes_build_revision_info{revision="${expectedBuildRevision}"} 1`), "metrics should expose privacy-safe request, latency, version, and source-revision gauges");
   assert.equal(server.getMetrics().buildRevision, expectedBuildRevision, "programmatic metrics should expose the sanitized source revision");
   assert.equal(server.getMetrics().httpRequestsInFlight, 0, "completed HTTP requests should leave no request pressure behind");
+  assert(Number.isSafeInteger(server.getMetrics().rateLimitKeys) && server.getMetrics().rateLimitKeys >= 0, "programmatic metrics should expose bounded rate-limit client-window occupancy");
+  assert.equal(server.getMetrics().rateLimitKeyCapacity, 10000, "programmatic metrics should expose the rate-limit client-window ceiling");
+  assert.equal(server.getMetrics().trustedProxyHops, 0, "programmatic metrics should expose the default direct-socket proxy trust mode");
   assert(Number.isFinite(server.getMetrics().httpLatencyCount) && server.getMetrics().httpLatencyCount > 0, "programmatic metrics should record completed HTTP latency observations");
   assert(Number(server.getMetrics().responsesByStatus["200"]) > 0, "programmatic metrics should expose successful HTTP response counts");
   const metricsHead = await fetch(`http://127.0.0.1:${port}/metrics`, { method: "HEAD" });
@@ -326,6 +489,32 @@ try {
   const wrongMethod = await fetch(`http://127.0.0.1:${port}/api/extract-graph`);
   assert.equal(wrongMethod.status, 405, "the extraction route should report method errors as API errors");
   assert.equal(wrongMethod.headers.get("allow"), "POST");
+  const trustedProxyRateServer = createAppServer({ maxRequestsPerMinute: 1, trustedProxyHops: 1 });
+  await new Promise((resolve) => trustedProxyRateServer.listen(0, "127.0.0.1", resolve));
+  try {
+    assert.equal(trustedProxyRateServer.getMetrics().trustedProxyHops, 1, "programmatic metrics should expose the normalized trusted proxy hop count");
+    const trustedProxyRateUrl = `http://127.0.0.1:${trustedProxyRateServer.address().port}/api/extract-graph`;
+    const firstForwardedClient = await fetch(trustedProxyRateUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "198.51.100.10, 10.0.0.7" },
+      body: "{}"
+    });
+    const secondForwardedClient = await fetch(trustedProxyRateUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "198.51.100.11, 10.0.0.7" },
+      body: "{}"
+    });
+    const repeatedForwardedClient = await fetch(trustedProxyRateUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "198.51.100.10, 10.0.0.7" },
+      body: "{}"
+    });
+    assert.equal(firstForwardedClient.status, 400, "the first forwarded client should reach request validation");
+    assert.equal(secondForwardedClient.status, 400, "different forwarded clients should receive independent process-local budgets");
+    assert.equal(repeatedForwardedClient.status, 429, "repeated requests from one forwarded client should be rate limited");
+  } finally {
+    trustedProxyRateServer.close();
+  }
   server.isDraining = true;
   const drainingReady = await fetch(`http://127.0.0.1:${port}/readyz`);
   assert.equal(drainingReady.status, 503);
@@ -440,6 +629,44 @@ try {
     request.end();
   });
   assert.equal(declaredOversizedUpload.status, 413, "declared oversized JSON bodies should be rejected without buffering");
+  const expectContinueOversizedUpload = await new Promise((resolve, reject) => {
+    let interim = "";
+    let settled = false;
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      path: "/api/extract-graph",
+      method: "POST",
+      headers: {
+        expect: "100-continue",
+        "content-type": "application/json",
+        "content-length": String(2 * 1024 * 1024 + 1)
+      }
+    }, (response) => {
+      response.resume();
+      response.on("end", () => {
+        settled = true;
+        resolve({ status: response.statusCode, interim });
+      });
+    });
+    request.on("continue", () => {
+      if (!settled) reject(new Error("oversized Expect: 100-continue request was accepted before rejection"));
+    });
+    request.on("information", (info) => {
+      interim += `${info.statusCode} `;
+    });
+    request.on("error", (error) => {
+      if (!settled && error?.code === "ECONNRESET") {
+        settled = true;
+        resolve({ status: 413, interim });
+        return;
+      }
+      if (!settled) reject(error);
+    });
+    request.end();
+  });
+  assert.equal(expectContinueOversizedUpload.status, 413, "Expect: 100-continue oversized bodies should be rejected before upload");
+  assert(!expectContinueOversizedUpload.interim.includes("100"), "oversized Expect: 100-continue bodies must not receive an interim acceptance");
   const invalidMediaType = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json-malicious" },
@@ -1402,6 +1629,41 @@ try {
   } finally {
     drainServer.close();
   }
+  let stubbornDrainStartedResolve;
+  const stubbornDrainStarted = new Promise((resolve) => {
+    stubbornDrainStartedResolve = resolve;
+  });
+  const stubbornDrainServer = createAppServer({
+    extractor: () => {
+      stubbornDrainStartedResolve();
+      return new Promise(() => {});
+    }
+  });
+  await new Promise((resolve) => stubbornDrainServer.listen(0, "127.0.0.1", resolve));
+  const stubbornDrainPort = stubbornDrainServer.address().port;
+  try {
+    const stubbornDrainRequest = fetch(`http://127.0.0.1:${stubbornDrainPort}/api/extract-graph`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        operation: "extract-graph",
+        schema: "llm-field-notes/graph@1",
+        feedbackFormat: "llm-field-notes/feedback@1",
+        feedback: [],
+        document: { title: "Stubborn shutdown", text: "Attention uses context to create a useful graph representation for review." }
+      })
+    });
+    await stubbornDrainStarted;
+    const drainAt = Date.now();
+    assert.equal(stubbornDrainServer.beginDrain(), true, "stubborn provider shutdown should enter draining mode");
+    const stubbornDrainResponse = await stubbornDrainRequest;
+    assert(Date.now() - drainAt < 1000, "draining should settle a provider that ignores cancellation without waiting for its provider timeout");
+    assert.equal(stubbornDrainResponse.status, 503, "stubborn provider shutdown should return a retryable response");
+    assert.equal(stubbornDrainResponse.headers.get("retry-after"), "5");
+    await stubbornDrainServer.waitForIdle({ timeoutMs: 20 });
+  } finally {
+    stubbornDrainServer.close();
+  }
   const adapted = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1479,6 +1741,8 @@ try {
   assert.equal(traversal.status, 404);
   const malformedPathEncoding = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
   assert.equal(malformedPathEncoding.status, 400, "malformed path encoding should be a client error");
+  const controlCharacterPath = await fetch(`http://127.0.0.1:${port}/%00`);
+  assert.equal(controlCharacterPath.status, 400, "decoded control characters in static paths should be client errors");
   const privateAsset = await fetch(`http://127.0.0.1:${port}/package.json`);
   assert.equal(privateAsset.status, 404);
   assert.equal(privateAsset.headers.get("cache-control"), "no-store");
@@ -1575,7 +1839,7 @@ try {
   } finally {
     publicDefaultServer.close();
   }
-  for (const insecureOrigin of ["", "http://wiki.example.test"]) {
+  for (const insecureOrigin of [""]) {
     const insecureOriginServer = createAppServer({
       publicOrigin: insecureOrigin,
       requireSecurePublicOrigin: true
@@ -1589,6 +1853,14 @@ try {
       insecureOriginServer.close();
     }
   }
+  assert.throws(
+    () => createAppServer({
+      publicOrigin: "http://wiki.example.test",
+      requireSecurePublicOrigin: true
+    }),
+    /Public origin must use HTTPS/,
+    "strict non-loopback origin configuration should reject HTTP before the server listens"
+  );
   const secureOriginServer = createAppServer({
     publicOrigin: "https://wiki.example.test",
     requireSecurePublicOrigin: true
@@ -1776,12 +2048,14 @@ try {
     const sitemap = await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`);
     assert.equal(sitemap.status, 200, "configured public origins should expose a sitemap");
     assert.equal(sitemap.headers.get("content-type"), "application/xml; charset=utf-8");
+    assert.equal(sitemap.headers.get("cache-control"), "no-cache", "generated sitemaps should revalidate after publication changes");
     const sitemapText = await sitemap.text();
     assert(sitemapText.includes("https://notes.example.test/artifacts.html") && sitemapText.includes("https://notes.example.test/sample-graph.html") && sitemapText.includes("https://notes.example.test/experiments/README.md") && sitemapText.includes("https://notes.example.test/notes/tokens.md") && sitemapText.includes("https://notes.example.test/notes/tokens.html"), "sitemap should include the sample graph explainer, public discovery pages, source notes, and canonical learning-note landing pages");
     assert(!(await (await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`)).text()).includes("https://notes.example.test/notes/README.md"), "sitemap should exclude the learning-map index README");
     const seoRobots = await fetch(`http://127.0.0.1:${seoPort}/robots.txt`);
     assert.equal(seoRobots.status, 200);
     assert.equal(seoRobots.headers.get("content-type"), "text/plain; charset=utf-8", "dynamic robots should use the standard text MIME type");
+    assert.equal(seoRobots.headers.get("cache-control"), "no-cache", "generated robots metadata should revalidate after publication changes");
     assert((await seoRobots.text()).includes("Sitemap: https://notes.example.test/sitemap.xml"), "configured robots should point crawlers at the sitemap");
     const seoSecurity = await fetch(`http://127.0.0.1:${seoPort}/.well-known/security.txt`);
     const seoSecurityText = await seoSecurity.text();
@@ -1807,6 +2081,7 @@ try {
     const feed = await fetch(`http://127.0.0.1:${seoPort}/feed.xml`);
     assert.equal(feed.status, 200, "configured public origins should expose an Atom feed");
     assert.equal(feed.headers.get("content-type"), "application/atom+xml; charset=utf-8");
+    assert.equal(feed.headers.get("cache-control"), "no-cache", "generated feeds should revalidate after publication changes");
     const feedText = await feed.text();
     assert(feedText.includes("<feed xmlns=\"http://www.w3.org/2005/Atom\">") && feedText.includes("notes/tokens.html") && feedText.includes("Tokens are the interface") && feedText.includes("Why can&apos;t the model see words?"), "the Atom feed should include titled landing entries with note-derived summaries");
     assert.equal((feedText.match(/<id>/g) || []).length, (feedText.match(/<entry>/g) || []).length + 1, "the Atom feed should contain exactly one feed ID plus one ID per entry");

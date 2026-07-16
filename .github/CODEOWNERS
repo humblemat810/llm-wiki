@@ -1,0 +1,11 @@
+# Production-sensitive boundaries require review from the repository owner.
+* @humblemat810
+
+/.github/workflows/ @humblemat810
+/Dockerfile @humblemat810
+/server.mjs @humblemat810
+/SECURITY.md @humblemat810
+/schema/ @humblemat810
+/graph-core.js @humblemat810
+/graph-store.js @humblemat810
+/extractor-adapter.js @humblemat810

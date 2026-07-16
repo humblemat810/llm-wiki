@@ -69,6 +69,23 @@ const sourceRecordComparable = (source) => {
   return JSON.stringify(record);
 };
 
+const sourceContentComparable = (source) => JSON.stringify({
+  id: source.id,
+  title: source.title,
+  text: source.text,
+  fingerprint: source.fingerprint,
+  addedAt: source.addedAt,
+  uri: source.uri,
+  quality: source.quality
+});
+
+const replacedSourceContentPreserved = (before, after, replacedSourceId) => {
+  const original = before.find((source) => source.id === replacedSourceId);
+  const replacement = after.find((source) => source.id === replacedSourceId);
+  return Boolean(original && replacement)
+    && sourceContentComparable(original) === sourceContentComparable(replacement);
+};
+
 const savedSourceRecordsPreserved = (before, after, replacedSourceId) => before
   .filter((source) => source.id !== replacedSourceId)
   .every((source) => {
@@ -81,6 +98,23 @@ const sourceContributionCounts = (graph, sourceId) => ({
   nodes: graph.nodes.filter((node) => Array.isArray(node?.sources) && node.sources.includes(sourceId)).length,
   edges: graph.edges.filter((edge) => Array.isArray(edge?.sources) && edge.sources.includes(sourceId)).length
 });
+
+const reviewedDecisions = (graph) => new Map([
+  ...(Array.isArray(graph?.nodes) ? graph.nodes : [])
+    .filter((node) => node?.status === "accepted" || node?.status === "rejected")
+    .map((node) => [`node|${node.id}`, node.status]),
+  ...(Array.isArray(graph?.edges) ? graph.edges : [])
+    .filter((edge) => edge?.status === "accepted" || edge?.status === "rejected")
+    .map((edge) => [`edge|${edge.id}`, edge.status])
+]);
+
+const reviewedDecisionsPreserved = (before, after, suppressedRejectedDecisions = new Set()) => {
+  const replacementDecisions = reviewedDecisions(after);
+  return [...reviewedDecisions(before)].every(([identity, status]) => (
+    replacementDecisions.get(identity) === status
+    || (status === "rejected" && suppressedRejectedDecisions.has(identity))
+  ));
+};
 
 const abortableExtract = (extract, source, graph, signal) => {
   if (!signal) return Promise.resolve().then(() => extract(source, graph, signal));
@@ -106,7 +140,8 @@ export async function rebuildSources(
     replace = replaceSource,
     revisionExtractor = "unknown",
     signal,
-    onProgress
+    onProgress,
+    suppressedRejectedDecisions = new Set()
   } = {}
 ) {
   if (!initialGraph || typeof initialGraph !== "object" || !Array.isArray(initialGraph.documents)) {
@@ -165,14 +200,20 @@ export async function rebuildSources(
     }
     try {
       const previousContributionCounts = sourceContributionCounts(graph, source.id);
-      const extraction = await abortableExtract(extract, source, graph, signal);
+      const extraction = await abortableExtract(extract, source, normalizeGraph(graph), signal);
       if (signal?.aborted) {
         canceled = true;
         break;
       }
-      const result = replace(graph, source.id, extraction, {
+      // Replacement implementations are extension points. Give each one a
+      // normalized snapshot so an invalid or throwing implementation cannot
+      // mutate the committed graph before its result is validated.
+      const replacementInput = normalizeGraph(graph);
+      const result = replace(replacementInput, source.id, extraction, {
         revisionExtractor,
-        preserveSourceCategories: true
+        preserveSourceCategories: true,
+        preserveSourceContent: true,
+        preservedLearningDecisionKeys: suppressedRejectedDecisions
       });
       if (result?.replaced) {
         const normalizedReplacement = normalizeGraph(result.graph);
@@ -188,6 +229,14 @@ export async function rebuildSources(
         }
         if (!savedSourceRecordsPreserved(graph.documents, normalizedReplacement.documents, source.id)) {
           failures.push(`${source.title}: replacement changed saved source records`);
+          continue;
+        }
+        if (!replacedSourceContentPreserved(graph.documents, normalizedReplacement.documents, source.id)) {
+          failures.push(`${source.title}: replacement changed saved source content`);
+          continue;
+        }
+        if (!reviewedDecisionsPreserved(graph, normalizedReplacement, suppressedRejectedDecisions)) {
+          failures.push(`${source.title}: replacement removed or changed a reviewed decision`);
           continue;
         }
         const replacementContributionCounts = sourceContributionCounts(normalizedReplacement, source.id);

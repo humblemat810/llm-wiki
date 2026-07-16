@@ -23,11 +23,12 @@ from the repository root.
 The [sample graph export](examples/sample-graph.json) is a small, deterministic
 internal representation with a whole-graph integrity fingerprint; inspect,
 diff, health-check, or project it into JSON-LD without opening the browser
-first. The public [sample graph explainer](sample-graph.html) shows the same
-concepts, evidence, relations, and fingerprint in a crawler-readable view
-before a visitor imports anything. The release smoke suite verifies its
-fingerprint, provenance, evidence grounding, and no-loss health gate before
-publication.
+first. Its standalone [Obsidian Graph.canvas](examples/sample-graph.canvas)
+projection opens the same public graph directly in Obsidian. The public
+[sample graph explainer](sample-graph.html) shows the same concepts, evidence,
+relations, and fingerprint in a crawler-readable view before a visitor imports
+anything. The release smoke suite verifies its fingerprint, provenance,
+evidence grounding, and no-loss health gate before publication.
 
 The self-improvement walkthrough is also available as `npm run learning:loop`.
 The [knowledge-graph note](notes/knowledge-graphs.md) explains the same loop
@@ -199,6 +200,10 @@ The browser workbench supports:
 - Surfacing an **apply learning to saved sources** action directly in graph
   health whenever reusable feedback and saved documents coexist, so the
   self-improvement loop does not depend on discovering a separate control.
+- Allowing a feedback-guided rebuild to remove an explicitly rejected concept
+  or relation from the active representation while retaining its compact,
+  privacy-safe learning decision for future documents. Accepted decisions and
+  unapproved losses remain protected by the rebuild guard.
 - Letting source review candidates be marked reviewed today from the source
   inspector in one guarded, undoable revision, while leaving source quality
   selection explicit; the action clearly uses the UTC calendar day and is
@@ -312,6 +317,13 @@ The browser workbench supports:
   inferences while preserving accepted knowledge and making the whole refresh
   undoable.
 - Undoing the last three local graph mutations with bounded snapshot history.
+- Offering a separately confirmed **Forget all local data** action that purges
+  graph/history, drafts, recovery snapshots, learning progress, endpoint
+  settings, and backup checkpoints when a user needs a complete local wipe,
+  while disclosing when durable deletion cannot be verified.
+- Reconciling backup checkpoints across tabs with a bounded fallback read, so
+  a missed browser storage event cannot leave a stale recovery warning visible
+  after a matching full backup has been downloaded.
 - Preserving malformed local graph data as a downloadable recovery snapshot
   instead of silently discarding it.
 - Offering recovery downloads directly from the runtime error panel, so a
@@ -491,6 +503,9 @@ The browser workbench supports:
   inspectable rather than hidden behind a single “review next” action.
 - Disclosing when the review queue safety cap hides lower-priority candidates,
   so the visible queue is not mistaken for the complete review workload.
+- Providing a privacy-safe, item-specific correction template from the
+  inspector, carrying the graph fingerprint and stable IDs without copying
+  source text or evidence into a contribution draft.
 - Routing exact evidence-grounding failures back to the affected concept or
   relation with a bounded unanchored-evidence count, without exporting source
   text, evidence quotes, or source URIs.
@@ -547,6 +562,9 @@ The browser workbench supports:
   detached reusable memory cannot hide the newest human correction.
 - Ordering reusable learning examples by review freshness before bounded
   export selection, so import order cannot evict newer corrections.
+- Retaining the newest trusted review decisions when the internal learning
+  memory itself reaches its bound, so an older append order cannot evict a
+  more recent human correction.
 - Stamping feedback exports with a deterministic reviewed-dataset fingerprint
   so evaluation runs can prove they used the intended examples; new exports
   use a dual-lane 64-bit digest while legacy fingerprints remain importable.
@@ -789,6 +807,10 @@ non-empty. The shorter `npm run artifacts:check` command validates only the
 gallery cards, structured discovery metadata, and downloadable targets.
 `npm run build:pages` runs the same artifact gate before generating a
 publishable static bundle.
+Run `npm run workflows:check` when editing GitHub Actions to parse every
+workflow independently, validate job dependencies and permission values, and
+reject duplicate keys, mutable action references, and missing checkout
+credential isolation before opening a pull request.
 Versioned release tags must match the package exactly (`vX.Y.Z`) and use a
 `stable` `version.json` channel; `npm run release:tag:check` is the same gate
 used by the tag-triggered release workflow.
@@ -797,11 +819,12 @@ Model-backed adapters should call `normalizeExtraction()` before merge; this is
 the stable boundary for partial or provider-specific extraction responses.
 HTTP adapters should use `normalizeExtractionForDocument()` when the submitted
 document's title, text, URI, and provenance must remain authoritative.
-`extractor-adapter.js` provides a small HTTP adapter with endpoint validation,
+`extractor-adapter.js` provides a small browser/gateway HTTP adapter with endpoint validation,
 timeouts, one bounded retry for transient network/HTTP failures, bounded
 document input and response size, and normalized responses. It is intentionally
-not wired to a vendor or API key, so deployments can add a server-side provider
-without putting credentials in the browser.
+provider-neutral and never handles a provider secret. The reference server's
+`provider-adapter.js` adds the optional server-side OpenAI-compatible model
+connection without putting credentials in the browser.
 The standard suite also runs a real localhost HTTP provider integration smoke
 test, rather than relying only on mocked fetch responses; it checks the browser
 gateway route, wire request contract, one transient retry, response byte
@@ -870,9 +893,10 @@ request body has a separate 30-second receive window, so a slow client cannot
 hold a bounded upload for the full provider timeout. The
 normalized extractor response is capped at 10 MB before transmission. The
 provider response also fails closed when it exceeds the graph's concept or
-relation collection limits rather than silently dropping model output. The
-invalid or absent `PORT` falls back to `8000`; an empty or absent `HOST`
-falls back to `127.0.0.1`, while a non-empty host is passed to Node for
+relation collection limits rather than silently dropping model output. An
+absent `PORT` falls back to `8000`, while an explicitly malformed or
+out-of-range `PORT` fails startup with its accepted range; an empty or absent
+`HOST` falls back to `127.0.0.1`, while a non-empty host is passed to Node for
 normal hostname validation. The reference endpoint requires JSON, validates
 the feedback format,
 sets no-store response behavior, and emits baseline security headers.
@@ -880,7 +904,11 @@ Batch ingestion keeps files that fail with transient remote network, upstream,
 or timeout errors in the queue so they can be retried after the provider or
 connection recovers; deterministic validation failures are reported without
 being retried indefinitely.
-Provider concurrency is bounded to 8 in-flight extractions by default; configure
+The standalone server also fails startup when explicitly configured
+`EXTRACTOR_RATE_LIMIT` is outside `1`–`1,000,000`, `EXTRACTOR_CONCURRENCY` is
+outside `1`–`1,024`, or `EXTRACTOR_TIMEOUT_MS` is outside `1`–`120,000`.
+Leaving those settings empty uses their documented defaults. Provider
+concurrency is bounded to 8 in-flight extractions by default; configure
 `EXTRACTOR_CONCURRENCY` to a value from 1 to 1,024 when provider capacity
 requires a different ceiling. Excess work receives HTTP 503 with
 `Retry-After: 1`.
@@ -888,6 +916,31 @@ Transient provider failures return HTTP 502 with `Retry-After: 1`, while
 provider timeouts return HTTP 504 with `Retry-After: 5`. Malformed, oversized,
 or schema-incompatible provider output fails closed without a retry hint;
 repeating a deterministic contract violation will not repair it.
+
+For a zero-code model deployment, configure the built-in
+OpenAI-compatible chat-completions adapter instead of writing a custom
+`createAppServer` wrapper:
+
+```bash
+EXTRACTOR_PROVIDER_URL=https://llm-gateway.example.test/v1/chat/completions \
+EXTRACTOR_PROVIDER_MODEL=your-model \
+EXTRACTOR_PROVIDER_API_KEY="$MODEL_PROVIDER_API_KEY" \
+npm start
+```
+
+`EXTRACTOR_PROVIDER_API_KEY` stays server-side and is never sent to the
+browser. The adapter sends a strict graph-extraction prompt plus bounded
+reviewed guidance, requests JSON mode by default, accepts the returned graph
+only after bounded decoding, and then applies the same provenance and schema
+normalization as the local extractor. Set
+`EXTRACTOR_PROVIDER_JSON_MODE=off` for a compatible gateway that does not
+implement `response_format`; the prompt still requires JSON. Set
+`EXTRACTOR_PROVIDER_TIMEOUT_MS` between 100 and 120,000 milliseconds.
+`npm run deployment:check` validates this configuration before traffic.
+
+Without `EXTRACTOR_PROVIDER_URL`, the server intentionally uses the
+transparent local extractor. This keeps local development and offline use
+zero-configuration while making the model boundary explicit for production.
 Set `EXTRACTOR_AUTH_TOKEN` to require a bearer token for extraction requests.
 Loopback development keeps extraction open when it is unset; non-loopback
 server hosts fail extraction closed with HTTP 503 until a token is configured.
@@ -895,6 +948,14 @@ Tokens must be 16–4,096 characters, have no control characters or surrounding
 whitespace, and are compared constant-time without being logged. Public
 deployments should still use TLS, gateway authentication, and a shared rate
 limiter.
+When the reference process itself sits behind a reverse proxy, set
+`TRUST_PROXY_HOPS` to the exact number of proxy hops that overwrite
+`X-Forwarded-For`; the bounded process-local limiter will then distinguish the
+client address immediately before that trusted chain. The default is `0`,
+which ignores forwarded headers. Never enable this setting unless every
+configured proxy hop is under deployment control, because forwarded headers
+are otherwise client-supplied and are deliberately ignored. An explicitly
+invalid value stops standalone startup with an actionable configuration error.
 The browser endpoint setting accepts a same-origin path or URL without
 credentials, query strings, or fragments; keep authentication in the server
 boundary rather than in the endpoint URL.
@@ -923,13 +984,13 @@ These dynamic distribution assets use ETags and conditional `304` responses;
 they also serve standards-compliant `HEAD` responses. The feature remains
 disabled when no trusted public origin is configured.
 If `PUBLIC_ORIGIN` is set, it must be an absolute credential-free `http://` or
-`https://` origin with no query string or fragment. The Node server and Pages
-builder fail closed on invalid values instead of silently publishing incomplete
-canonical or crawler metadata. Non-loopback server deployments also fail
-readiness unless the origin is HTTPS; HTTP origins remain available for local
-or loopback container smoke tests.
-It exposes `/healthz` for process liveness and `/readyz` for app readiness;
-both include the package version and sanitized source revision
+`https://` origin with no query string or fragment. Static publication rejects
+non-loopback `http://` origins before generating canonical or crawler metadata.
+The Node server and Pages builder fail closed on invalid values instead of
+silently publishing incomplete or insecure deployment metadata. HTTP origins
+remain available for local or loopback container smoke tests.
+It exposes `/livez` and `/healthz` for process liveness and `/readyz` for app
+readiness; all include the package version and sanitized source revision
 (both support `GET` and bodyless `HEAD` probes);
 the latter verifies that the static shell is available and returns 503 while
 the process is draining after shutdown begins, so orchestrators stop routing
@@ -937,9 +998,12 @@ new traffic before the server exits. Both health endpoints report the package
 version, and `/metrics` exposes version- and revision-labelled build-info gauges alongside
 privacy-safe Prometheus text counters for total requests, extraction outcomes,
 authentication failures, rate-limited and concurrency-limited requests, and
-in-flight provider work, and the configured extractor concurrency ceiling
-plus HTTP response status counters and a bounded extraction latency histogram; it never includes document
-content or credentials. Metrics also support bodyless `HEAD` probes and expose
+in-flight provider work, the configured extractor concurrency ceiling, and
+current rate-limit window occupancy, plus HTTP response status counters and a
+bounded extraction latency histogram; it never includes document content or
+credentials. It also exposes the normalized `TRUST_PROXY_HOPS` value so an
+operator can verify whether forwarded client identity is active. Metrics also
+support bodyless `HEAD` probes and expose
 a process-uptime gauge for restart correlation, plus a
 `llm_field_notes_draining` gauge that distinguishes graceful shutdown from
 provider failure. Operational JSON and metrics
@@ -967,8 +1031,8 @@ orchestrators can distinguish a clean provider drain from an abandoned one.
 Quick contract smoke test:
 
 ```bash
-curl --fail http://localhost:8000/healthz
-curl --fail http://localhost:8000/readyz
+curl --fail --silent http://localhost:8000/livez | node scripts/verify-service-health.mjs - liveness
+curl --fail --silent http://localhost:8000/readyz | node scripts/verify-service-health.mjs - readiness
 curl --fail \
   -H 'content-type: application/json' \
   -d '{"operation":"extract-graph","schema":"llm-field-notes/graph@1","feedbackFormat":"llm-field-notes/feedback@1","feedback":[],"document":{"title":"Quick test","text":"Attention uses context to create a useful graph representation for review."}}' \
@@ -984,8 +1048,10 @@ Static assets include ETags and return conditional `304` responses when
 unchanged; the Node server caches those hashes per allowed asset using file
 metadata and transformation inputs, with a bounded cache that invalidates on
 deployment or asset changes.
-Invalid environment or embedded-server values fall back to the 60/minute
-default. Declared request bodies over 2 MB are rejected before buffering.
+Missing or empty numeric environment values use their documented defaults, but
+explicit malformed or out-of-range values fail standalone startup closed with
+an actionable range diagnostic. Declared request bodies over 2 MB are rejected
+before buffering.
 The HTTP server also bounds header, request, and keep-alive lifetimes, stops
 buffering immediately when an uploading client disconnects, and answers
 malformed HTTP parser input with a bounded generic `400 Bad Request` response
@@ -1004,21 +1070,30 @@ docker build \
   -t llm-field-notes .
 docker run --rm --read-only --tmpfs /tmp --cap-drop=ALL \
   --security-opt=no-new-privileges -p 8000:8000 \
-  --env PUBLIC_ORIGIN=http://127.0.0.1:8000 \
+  --env PUBLIC_ORIGIN=https://wiki.example.test \
   --env EXTRACTOR_AUTH_TOKEN=replace-with-a-local-secret \
   --env METRICS_AUTH_TOKEN=replace-with-a-local-secret \
   llm-field-notes
 ```
+
+The container listener is plain HTTP and should sit behind a TLS gateway whose
+external origin matches `PUBLIC_ORIGIN`; the example hostname is deliberately
+not a claim that the standalone process provides TLS. For a direct local
+container probe, use `npm run smoke:container`, which supplies a loopback
+logical origin while checking the same production-mode identity and
+authentication boundary.
 
 The Docker metadata arguments default to the upstream repository, but fork
 owners should pass their own repository so OCI source and documentation labels
 remain accurate.
 
 Generic Node hosts can use `npm start`; the server honors `PORT`, `HOST`,
-`EXTRACTOR_RATE_LIMIT`, `EXTRACTOR_CONCURRENCY`, and `EXTRACTOR_TIMEOUT_MS`. The container intentionally
+`EXTRACTOR_RATE_LIMIT`, `EXTRACTOR_CONCURRENCY`, `EXTRACTOR_TIMEOUT_MS`, and
+the opt-in `TRUST_PROXY_HOPS`. The container intentionally
 execs Node directly so orchestrator signals reach graceful shutdown handling
 without an npm intermediary.
-Non-loopback deployments must configure both bearer secrets and provide a
+Non-loopback deployments, including loopback-bound servers exposed through an
+external `PUBLIC_ORIGIN`, must configure both bearer secrets and provide a
 sanitized `BUILD_REVISION` before `/readyz` can report healthy; missing
 authentication or an untraceable build is treated as a deployment
 misconfiguration rather than a healthy-but-unusable service.
@@ -1045,8 +1120,9 @@ containers should use a read-only root filesystem, a bounded temporary
 filesystem, dropped Linux capabilities, and `no-new-privileges` as shown above.
 The Docker context excludes environment files, local exports, development
 tests, build/release-only scripts, common backup/database artifacts, and
-private-key material; it retains the dependency-free experiment sources that
-are part of the runtime public-asset contract.
+private-key material. It retains only explicitly allowlisted dependency-free
+runtime helpers and public experiment sources; unpublished development files
+and generated SBOM evidence remain outside the image.
 
 Run the dependency-free test suite with:
 
@@ -1062,13 +1138,21 @@ bundles and dependency directories are excluded from discovery. New source and
 test files are included automatically, so a green result cannot silently mean
 “syntax only.” It also runs the release contract on every supported Node lane.
 
-`npm run production:check` additionally runs `npm run release:check`, builds and
-verifies a fresh Pages artifact before the dist-dependent browser checks, and
-re-verifies the final artifact after all tests. It also runs
+`npm run production:check` additionally runs a high-severity audit across all
+locked runtime and development dependencies, generates and validates an SPDX
+dependency inventory, runs `npm run release:check`, builds and verifies a
+fresh Pages artifact, checks the public artifact inventory, audits
+every generated HTML page for accessibility, enforces the critical browser-shell
+performance budget, and re-verifies the final artifact after all tests. It also runs
 `npm run smoke:server`, validating release metadata, the lockfile, workflow
 permissions and pinning, public/offline asset parity, container provenance,
 and the real standalone server lifecycle before Pages or a tagged container
 can be published.
+Run `npm run deployment:check` separately when changing deployment
+environment variables. It fails before traffic is sent when a non-loopback
+host lacks a secure public origin, source revision, extraction token, metrics
+token, or valid bounded setting; loopback development remains usable but
+reports its intentionally open optional endpoints.
 
 The standard suite also audits every generated HTML page for document language,
 titles, heading structure, duplicate IDs, labeled controls, named links and
@@ -1080,7 +1164,11 @@ failure. Inspect an existing bundle with `npm run performance:check -- dist`.
 
 The same checks run in GitHub Actions on every push to `main` and every pull
 request across Node 22 and 24, matching the supported production runtime
-baseline.
+baseline. To extend the local gate to the exact deployed Pages origin, set
+`PAGES_DEPLOYMENT_URL` and `PAGES_EXPECTED_REVISION`; the gate then runs the
+same manifest, endpoint, digest, service-worker, and source-revision probe used
+after publication. Without those variables, it intentionally makes no claim
+about external deployment state.
 The checked-in `.nvmrc` and `.node-version` files select Node 22 for local
 version managers; `npm run runtime:check` verifies those hints stay aligned
 with `package.json`.
@@ -1089,6 +1177,13 @@ Playwright, so unsupported local Node versions fail with setup guidance rather
 than a misleading browser-library error.
 CI first performs a locked `npm ci` install, then builds the Docker image to
 run the production dependency audit and catch package and deployment drift.
+Verification and tagged-release workflows also retain the validated
+`sbom.spdx.json` dependency inventory as evidence for vulnerability triage and
+release comparison. The generator canonicalizes package ordering, namespace,
+creator, and release-date metadata, so identical locked inputs produce
+byte-identical SBOMs across the supported Node lanes.
+Pages publication and tagged releases also generate pinned GitHub artifact
+attestations for the exact published asset manifest and associated SBOM.
 CI starts that image, probes `/readyz`, and waits for Docker’s health status to
 become `healthy` so the runtime and its own health check agree. Superseded
 verification runs are canceled and each matrix job has a 20-minute timeout, so
@@ -1106,8 +1201,12 @@ For deployment-specific capacity evidence, `npm run load:server` runs a
 bounded, opt-in probe. It checks `/healthz` by default or authenticated
 `/api/extract-graph` when `EXTRACTOR_AUTH_TOKEN` is supplied, caps requests and
 concurrency, and requires `LOAD_TEST_CONFIRM=I_UNDERSTAND` for non-loopback
-targets. It is an operational sample rather than a default CI gate or a
-replacement for representative browser and sustained-load testing.
+targets. Set `LOAD_TEST_ALLOWED_ORIGIN` to bind a probe to one deployment
+origin; the capacity workflow supplies the repository `PUBLIC_ORIGIN` variable
+when configured. A path-bearing target is preserved when the probe builds its
+health or extraction request. It is an operational sample rather than a
+default CI gate or a replacement for representative browser and sustained-load
+testing.
 
 The test suite also serves the static asset graph through a local HTTP server,
 simulates service-worker install/network/offline behavior, and verifies that
@@ -1131,6 +1230,7 @@ those files as feedback updates rather than new source documents.
 - `graph-store.js` — transactional local persistence, history, undo, and restore
 - `CHANGELOG.md` — user-visible release history and production hardening notes
 - `extractor-adapter.js` — provider-neutral remote extraction boundary
+- `provider-adapter.js` — optional server-side OpenAI-compatible model adapter
 - `rebuild-adapter.js` — bounded, cancelable saved-source rebuild orchestration
 - `projection-adapter.js` — Obsidian feedback parser and graph update boundary
 - `storage-adapter.js` — durable IndexedDB/localStorage boundary with an in-memory fallback
@@ -1138,6 +1238,7 @@ those files as feedback updates rather than new source documents.
 - `notes/` — versioned Markdown learning pages and curriculum index
 - `experiments/` — small dependency-free runnable learning artifacts (see [experiments/README.md](experiments/README.md))
 - `server.mjs` — optional same-origin static server and extraction contract example
+- `scripts/check-deployment-config.mjs` — fail-closed deployment environment preflight
 - `scripts/note-page.mjs` — shared crawler-readable learning-note page renderer
 - `manifest.webmanifest` / `sw.js` — installable, cacheable static deployment
   with explicit 192px and 512px raster app icons
@@ -1164,6 +1265,14 @@ those files as feedback updates rather than new source documents.
 - `schema/vault-manifest.schema.json` — versioned Obsidian projection identity
 - `schema/jsonld.schema.json` — versioned JSON-LD projection contract
 - `schema/learning-loop.schema.json` — versioned learning-loop artifact output
+- `schema/canvas.schema.json` — bounded native Obsidian Canvas projection
+  contract
+- `schema/service-health.schema.json` — versioned `/livez`, `/healthz`, and
+  `/readyz` response contract
+- `scripts/verify-service-health.mjs` — offline verifier for service-health
+  responses
+- `scripts/verify-canvas.mjs` — offline strict verifier for published Canvas
+  projections
 - `jsonld-projection.js` — reusable full and redacted JSON-LD projection
 - `SECURITY.md` — data boundary and vulnerability-reporting guidance
 - `RUNBOOK.md` — deployment, monitoring, backup, incident, and rollback procedures
@@ -1226,8 +1335,9 @@ those files as feedback updates rather than new source documents.
 This is a static site: GitHub Pages, Cloudflare Pages, Netlify, or any static
 file host can serve it. HTTPS is recommended so the service worker and browser
 file APIs behave consistently. The app is useful without a backend; a backend
-is optional, and the included same-origin server can be replaced with
-a model-backed extraction implementation behind the same graph contract.
+is optional. The included same-origin server uses the deterministic local
+extractor by default and can select the built-in server-side model adapter
+through `EXTRACTOR_PROVIDER_URL`, without changing the graph contract.
 - GitHub Pages deployment is ready through `.github/workflows/pages.yml`. Before
   the first publication, open repository **Settings → Pages**, choose **GitHub
   Actions** as the build and deployment source, and run the workflow from the
@@ -1280,11 +1390,15 @@ a model-backed extraction implementation behind the same graph contract.
   reachable deployment.
 - A read-only scheduled workflow repeats that deployed-URL probe daily. It
   uses the repository's default Pages URL automatically and honors the
-  `PUBLIC_ORIGIN` repository variable for custom domains or paths.
+  `PUBLIC_ORIGIN` repository variable for custom domains or paths. Its probe
+  uses a longer, still bounded retry window so ordinary CDN propagation does
+  not become a false outage.
 - A separate scheduled browser monitor repeats the Chromium, Firefox, and
   WebKit workbench smoke against the same published origin. A local
   `production:check` proves the artifact; only a successful post-deploy probe
-  proves that the public URL is actually serving it.
+  proves that the public URL is actually serving it. The daily browser monitor
+  retries each browser three times with a bounded delay to tolerate ordinary
+  publication propagation without weakening the post-deploy release gate.
 - The Pages artifact also generates `feed.xml` from the published learning
   notes. Set the build environment variable `PUBLIC_ORIGIN` to the final
   HTTPS origin to additionally generate absolute `sitemap.xml` URLs and a

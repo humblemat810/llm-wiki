@@ -10,12 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: read
   contents: read
-  issues: read
-  id-token: write
-  pull-requests: read
-  security-events: write
 
 concurrency:
   group: scorecard-${{ github.workflow }}-${{ github.ref }}
@@ -24,6 +19,13 @@ concurrency:
 jobs:
   analysis:
     name: Analyze repository posture
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      id-token: write
+      pull-requests: read
+      security-events: write
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

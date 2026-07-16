@@ -1,13 +1,31 @@
 import assert from "node:assert/strict";
-import { enforceLoadBudget, parseLoadConfig, runLoadProbe } from "../scripts/load-server.mjs";
+import { buildLoadProbeUrl, enforceLoadBudget, parseLoadConfig, runLoadProbe } from "../scripts/load-server.mjs";
 
 assert.equal(parseLoadConfig({}).mode, "healthz", "load probe should default to a safe health-only mode");
 assert.equal(parseLoadConfig({ LOAD_TEST_REQUESTS: "999", LOAD_TEST_CONCURRENCY: "999" }).requests, 500);
 assert.equal(parseLoadConfig({ LOAD_TEST_REQUESTS: "999", LOAD_TEST_CONCURRENCY: "999" }).concurrency, 64);
 assert.equal(parseLoadConfig({ LOAD_TEST_MAX_FAILURES: "4", LOAD_TEST_MAX_P95_MS: "2500" }).maxFailures, 4);
 assert.equal(parseLoadConfig({ LOAD_TEST_MAX_FAILURES: "4", LOAD_TEST_MAX_P95_MS: "2500" }).maxP95Ms, 2500);
-assert.equal(parseLoadConfig({ LOAD_TEST_MAX_FAILURES: "-1", LOAD_TEST_MAX_P95_MS: "nope" }).maxFailures, null);
-assert.equal(parseLoadConfig({ LOAD_TEST_MAX_FAILURES: "-1", LOAD_TEST_MAX_P95_MS: "nope" }).maxP95Ms, null);
+assert.throws(
+  () => parseLoadConfig({ LOAD_TEST_MAX_FAILURES: "-1" }),
+  /LOAD_TEST_MAX_FAILURES must be a non-negative integer/,
+  "malformed failure budgets should fail closed instead of disabling the budget"
+);
+assert.throws(
+  () => parseLoadConfig({ LOAD_TEST_MAX_P95_MS: "nope" }),
+  /LOAD_TEST_MAX_P95_MS must be a non-negative integer/,
+  "malformed latency budgets should fail closed instead of disabling the budget"
+);
+assert.throws(
+  () => parseLoadConfig({ LOAD_TEST_REQUESTS: "oops" }),
+  /LOAD_TEST_REQUESTS must be a positive integer/,
+  "malformed request counts should fail closed instead of using a default load"
+);
+assert.throws(
+  () => parseLoadConfig({ LOAD_TEST_DURATION_MS: "oops" }),
+  /LOAD_TEST_DURATION_MS must be a non-negative integer/,
+  "malformed duration settings should fail closed instead of switching probe mode"
+);
 assert.equal(parseLoadConfig({ LOAD_TEST_DURATION_MS: "30000" }).durationMs, 30000);
 assert.equal(parseLoadConfig({ LOAD_TEST_DURATION_MS: "30000" }).requests, 10000);
 assert.equal(parseLoadConfig({ LOAD_TEST_DURATION_MS: "999999" }).durationMs, 30000);
@@ -18,9 +36,60 @@ assert.throws(
   "non-loopback load probes should require explicit operator confirmation"
 );
 assert.throws(
+  () => parseLoadConfig({ LOAD_TEST_URL: "http://example.test", LOAD_TEST_CONFIRM: "I_UNDERSTAND" }),
+  /must use HTTPS/,
+  "non-loopback load probes should reject plaintext HTTP even with explicit confirmation"
+);
+assert.throws(
   () => parseLoadConfig({ LOAD_TEST_URL: "http://127.0.0.1:8000/?secret=1" }),
   /without credentials, query, or fragment/,
   "load probe targets should reject query strings that could carry secrets"
+);
+assert.equal(
+  parseLoadConfig({
+    LOAD_TEST_URL: "https://wiki.example.test/field-notes",
+    LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test",
+    LOAD_TEST_CONFIRM: "I_UNDERSTAND"
+  }).allowedOrigin,
+  "https://wiki.example.test",
+  "load probes should accept a target under the explicitly allowed deployment origin"
+);
+assert.throws(
+  () => parseLoadConfig({
+    LOAD_TEST_URL: "https://other.example.test",
+    LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test",
+    LOAD_TEST_CONFIRM: "I_UNDERSTAND"
+  }),
+  /does not match LOAD_TEST_ALLOWED_ORIGIN/,
+  "load probes should reject targets outside the declared deployment origin"
+);
+assert.throws(
+  () => parseLoadConfig({
+    LOAD_TEST_URL: "https://wiki.example.test",
+    LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test/field-notes?token=1",
+    LOAD_TEST_CONFIRM: "I_UNDERSTAND"
+  }),
+  /without credentials, query, or fragment/,
+  "load probe allowlists should reject query strings that could carry secrets"
+);
+assert.equal(
+  parseLoadConfig({
+    LOAD_TEST_URL: "https://wiki.example.test/field-notes",
+    LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test/field-notes",
+    LOAD_TEST_CONFIRM: "I_UNDERSTAND"
+  }).allowedOrigin,
+  "https://wiki.example.test",
+  "load probe allowlists should normalize Pages subpaths to their origin"
+);
+assert.equal(
+  buildLoadProbeUrl(new URL("https://wiki.example.test/field-notes"), "healthz").toString(),
+  "https://wiki.example.test/field-notes/healthz",
+  "load probes should preserve a deployment base path when building health URLs"
+);
+assert.equal(
+  buildLoadProbeUrl(new URL("https://wiki.example.test/field-notes/"), "/api/extract-graph").toString(),
+  "https://wiki.example.test/field-notes/api/extract-graph",
+  "load probes should preserve a deployment base path when building extraction URLs"
 );
 
 let active = 0;
@@ -223,5 +292,57 @@ const invalidExtractionResult = await runLoadProbe({
   })
 });
 assert.equal(invalidExtractionResult.failures.length, 1, "authenticated probes should reject an invalid graph response contract");
+
+let lateFetchCanceled = false;
+let releaseLateFetch;
+const lateFetchResponse = new Promise((resolve) => {
+  releaseLateFetch = resolve;
+});
+const lateFetchProbe = await runLoadProbe({
+  config: {
+    url: new URL("http://127.0.0.1:8000"),
+    requests: 1,
+    concurrency: 1,
+    mode: "healthz",
+    token: "",
+    deadlineMs: 5
+  },
+  fetchImpl: async () => lateFetchResponse
+});
+assert(lateFetchProbe.failures.includes("request 1: timeout"), "load probes should settle when fetch ignores AbortSignal");
+releaseLateFetch({
+  ok: true,
+  status: 200,
+  body: { cancel: async () => { lateFetchCanceled = true; } },
+  arrayBuffer: async () => new TextEncoder().encode(JSON.stringify({ ok: true, schema: "llm-field-notes/graph@1" })).buffer
+});
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(lateFetchCanceled, true, "late fetch responses should have their bodies canceled after probe timeout");
+
+let hangingReaderCanceled = false;
+const hangingBodyProbe = await runLoadProbe({
+  config: {
+    url: new URL("http://127.0.0.1:8000"),
+    requests: 1,
+    concurrency: 1,
+    mode: "healthz",
+    token: "",
+    deadlineMs: 5
+  },
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    body: {
+      getReader: () => ({
+        read: () => new Promise(() => {}),
+        cancel: async () => { hangingReaderCanceled = true; },
+        releaseLock: () => {}
+      }),
+      cancel: async () => {}
+    }
+  })
+});
+assert(hangingBodyProbe.failures.includes("request 1: timeout"), "load probes should classify a response body hang as a timeout");
+assert.equal(hangingReaderCanceled, true, "timed-out response readers should receive best-effort cancellation");
 
 console.log("load server smoke ok");

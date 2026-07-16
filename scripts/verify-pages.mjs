@@ -7,8 +7,10 @@ import { requirePublicOrigin } from "./public-origin.mjs";
 import { computeServiceWorkerCacheRevision, readServiceWorkerCacheName, readServiceWorkerShellAssets, stripDeploymentCacheRevision } from "./service-worker-cache.mjs";
 
 const output = resolve(process.argv[2] || "dist");
+const outputMetadata = await lstat(output);
+if (outputMetadata.isSymbolicLink()) throw new Error("Pages output must not be a symbolic link.");
 const outputRealPath = await realpath(output);
-const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN);
+const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN, { requireSecure: true });
 const manifestPath = resolve(outputRealPath, "asset-manifest.json");
 const packageManifest = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json");
 const rawExpectedRevision = typeof process.env.BUILD_REVISION === "string" && process.env.BUILD_REVISION.trim()

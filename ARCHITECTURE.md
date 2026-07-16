@@ -75,11 +75,16 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
 - The Playwright browser smoke runs the workbench in a reduced-motion,
   narrow-viewport context, verifies visible controls have accessible names,
   confirms keyboard focus reaches the primary sample action, and still checks
-  service-worker activation, persistence, Obsidian vault ZIP export/import
-  round trips, and offline reopening where the runner supports offline
-  service-worker emulation. Failure-only screenshots are written to an
-  operator-supplied artifact directory so CI can retain visual triage evidence
-  without adding successful-run payloads.
+  the local same-origin model-mode extraction switch, draft-preserving provider
+  failure where request interception is supported, service-worker activation,
+  persistence, Obsidian vault ZIP export/import round trips, and offline
+  reopening where the runner supports offline service-worker emulation.
+  The pinned WebKit runner bypasses interception for service-worker-controlled
+  requests and records that limitation. Exact-origin runs skip the
+  local-only extractor endpoint drill.
+  Failure-only screenshots are written to an operator-supplied artifact
+  directory so CI can retain visual triage evidence without adding
+  successful-run payloads.
 - `graph-store.js` owns graph persistence semantics: optimistic version and
   content-fingerprint checks, bounded undo history, graph and history recovery
   snapshots—including raw over-capacity history before trimming—and
@@ -143,14 +148,25 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   Its response helpers also stop when a response has already sent headers, so a
   late filesystem or rendering failure cannot trigger a second header write and
   hide the original failure.
-- The reference server's metrics expose a privacy-safe draining gauge alongside
+- The reference server exposes `/livez` for process liveness separately from
+  `/readyz` traffic admission. Its metrics expose a privacy-safe draining gauge alongside
   aggregate HTTP and extraction latency, in-flight request pressure, and
   extraction capacity, so graceful shutdown and gateway saturation are
   distinguishable from provider failure while `/readyz` transitions to 503.
   These metrics do not add document, URI, or client-identity labels.
+- `scripts/check-deployment-config.mjs` is the pre-traffic configuration
+  boundary shared by operators and the canonical production gate. It validates
+  bounded numeric settings, trusted proxy configuration, public origin and
+  repository metadata, build identity, and both bearer-token requirements for
+  non-loopback deployments. Loopback development remains intentionally
+  permissive but reports its open optional endpoints as warnings.
 - The production Docker context excludes local Codex artifacts in
   `.dockerignore`; agent workspace files, tests, and release-only benchmark
-  fixtures are not part of the runtime image.
+  fixtures are not part of the runtime image. Generated SBOM evidence and
+  unpublished development-only files are excluded even when CI creates them
+  before the image build; public dependency-free experiment sources and
+  runtime page helpers remain explicitly allowlisted because the published
+  learning surface and Node server use them.
   It also excludes Pages staging and rollback directories, which may remain
   briefly after an interrupted atomic publication.
 - `storage-adapter.js` provides browser storage. IndexedDB is preferred;
@@ -195,13 +211,21 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   shared duplicate-key/depth-safe JSON boundary before it influences hydration,
   so ambiguous synchronization metadata preserves the synchronous mirror,
   discloses degraded durability, and is repaired through a fresh bounded
-  durable write. The workbench listens for both the graph and history keys:
+  durable write. A separate generation-bearing clear-intent marker survives a
+  failed IndexedDB purge and reaches live tabs, so reloads and open workspaces
+  clear the durable namespace before adopting old state instead of resurrecting
+  a graph the user explicitly forgot; per-key write generations newer than the
+  clear intent are preserved and committed after the purge. The
+  workbench listens for both the graph and history keys:
   because those keys are committed separately, a history notification that
   arrives after the graph notification still refreshes the visible undo
   timeline instead of leaving it stale until reload. Reusable hosts can await
   the adapter's `dispose()` method to
   remove native storage listeners, close BroadcastChannel and IndexedDB
   resources, and wait for queued durable writes to settle during a remount.
+  The optional persistent-storage request also treats a throwing
+  `navigator.storage` getter as unavailable persistence, so privacy-restricted
+  browsers keep the local-first workbench usable.
 - Workbench graph selections use `#item=` deep links containing only a bounded
   item kind and stable ID. Reloads and browser back/forward restore local
   selection when that graph exists in the current browser, while copied links
@@ -372,6 +396,15 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   paths such as `/api/extract-graph` to absolute URLs before handing them to
   this adapter, while the adapter itself continues to reject ambiguous
   non-HTTP provider URLs.
+- `provider-adapter.js` is the built-in server-side LLM adapter. It speaks the
+  common OpenAI-compatible chat-completions request shape, keeps the provider
+  key out of browser state, sends only the document and compact reviewed
+  guidance, labels the document as untrusted source material, requests
+  deterministic temperature-zero structured JSON by default, and rejects malformed,
+  oversized, non-JSON, timed-out, or cross-boundary responses before they
+  reach graph normalization. It is optional: an unset provider URL selects the
+  deterministic local extractor, while a configured provider is selected by
+  the standalone server without changing the browser or graph contract.
 - `tests/provider-http-smoke.mjs` exercises the gateway and adapter against a
   real localhost provider socket, including the serialized request envelope, a
   retryable HTTP failure, streamed response decoding, and rebinding provider
@@ -391,12 +424,20 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   diagnostics are normalized and bounded before they reach the browser status
   surface. Extraction is raced against the rebuild abort signal, so an
   extractor that ignores cancellation cannot hold the orchestration loop open.
+  Each injected replacement receives a normalized graph snapshot rather than
+  the committed graph object, so a failed or invalid extension cannot mutate
+  saved state before validation.
+  Extractors receive the same snapshot isolation for their graph context, so
+  provider callbacks cannot mutate committed state while deriving a new
+  representation.
   Replacement graphs carrying ambiguous source/relation IDs or contradictory
   duplicate-identity diagnostics are rejected before they can be counted or
   persisted.
   Each replacement also preserves every unrelated saved source record
   byte-for-byte at the normalized field level; only the target source may be
-  replaced by the rebuild operation.
+  replaced by the rebuild operation. Automatic saved-source rebuilds preserve
+  the target source's title, text, fingerprint, URI, added time, and quality
+  as authoritative input; only the inferred graph representation may change.
   A rebuild also rejects a structurally valid empty replacement when
   the source previously grounded concepts or relations, preserving the prior
   representation through transient provider/model failures. Successful bounded
@@ -439,11 +480,17 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   provides static allowlisting, request limits, rate limiting, security
   headers, optional bearer-token authentication, readiness, privacy-safe
   metrics, bounded latency telemetry, structured logs, and provider
-  cancellation. Client disconnects also race the request handler itself, so a
+  cancellation. It rejects invalid or oversized `Expect: 100-continue` bodies
+  before interim acceptance. Client disconnects also race the request handler itself, so a
   non-conforming provider cannot keep a dead HTTP request open until the full
   provider timeout; its still-running promise remains counted for capacity and
   graceful drain. When graceful shutdown aborts active extraction, the gateway
   returns a retryable `503` with bounded `Retry-After` guidance rather than
+  silently changing the process contract. Explicitly configured numeric startup
+  settings are parsed against bounded ranges and fail closed on typos.
+  The container healthcheck imports that same parser before probing `/readyz`,
+  preventing a runtime port override from making health report on a different
+  endpoint than the server configuration.
   misclassifying deployment drain as a provider `502`. Runtime learning-note rendering uses incremental fatal UTF-8
   decoding, matching Pages publication without rejecting a valid multibyte
   character split across a bounded read; the shared note-page boundary helper
@@ -550,10 +597,21 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   findings. Both workflows use immutable action commits, bounded execution,
   credential-free checkout, and explicit permissions; `check-release.mjs`
   rejects any future workflow that reintroduces mutable action references.
+- `check-release.mjs` also parses every workflow with the locked YAML parser,
+  rejecting duplicate or malformed keys, missing job dependencies, invalid
+  permission values, and malformed step collections before a release can
+  proceed.
 - `RUNBOOK.md` turns release, health, graceful-drain, browser-backup, incident,
   and rollback contracts into repeatable operator procedures. It intentionally
   keeps secrets and user graph payloads out of commands and observability
   examples.
+- Browser certification writes failure screenshots only after checking the
+  configured diagnostic directory and target path with `lstat`, preventing a
+  repository or stale workspace symlink from redirecting CI evidence.
+- Pages publication and tagged releases generate pinned GitHub artifact
+  attestations for the exact asset manifest and validated dependency SBOM.
+  This keeps the retained evidence tied to the workflow run and source
+  repository instead of relying only on an upload-artifact filename.
 - `scripts/check-accessibility.mjs` audits the generated HTML release surface
   without a third-party parser. It checks document language and titles,
   heading progression, duplicate IDs, named controls/links/buttons, image
@@ -571,7 +629,10 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   boundary. Pages builds derive the service-worker cache revision from the
   complete final bundle, and `verify-pages.mjs` recomputes that revision before
   publication so generated assets cannot be deployed under a stale shell-cache
-  identity.
+  identity. Pages injects `asset-manifest.json` into the shell and the worker
+  promotes it to a required install asset only in that built deployment, so an
+  offline Pages worker cannot activate without publication-integrity metadata;
+  local development remains manifest-free.
 - The install manifest publishes explicit 192×192 and 512×512 PNG icons in
   addition to the vector fallback. Release checks validate their PNG signatures
   and dimensions, and the same files are served and precached as shell assets.
@@ -628,6 +689,8 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   cache names are scoped to the deployment revision (the Pages build derives a
   bounded digest from the published asset set, while Node deployments use
   `BUILD_REVISION`); the checked-in source keeps the release-version fallback.
+  First-install activation messages are best-effort and guarded, so a
+  terminated or restricted worker cannot become a workbench runtime error.
   Shell cache entries use
   pathname-only keys so cache-busting query strings cannot create unbounded
   duplicate copies of the same asset; query-bearing responses are never allowed
@@ -847,7 +910,12 @@ The orchestration adapter repeats the category check after normalization, so an
 alternate replacement implementation cannot bypass the automatic rebuild
 invariant. Successful rebuilds also return bounded source identity and pruning
 counts so the workbench can explain semantic change without exporting source
-content.
+content. When the workbench supplies a reviewed feedback snapshot, explicitly
+rejected items may disappear from the active replacement as intentional model
+guidance; their compact learning decisions are carried through the source
+replacement so later documents can still benefit. Accepted decisions and
+rejected items not present in that approved guidance snapshot remain protected
+as review-loss failures.
 
 `diffGraphs()` compares normalized revisions using stable identities and emits
 compact summaries of documents, concepts, relations, reusable learning memory,
@@ -932,6 +1000,9 @@ without reordering revision history or reusable-learning chronology.
 Full backups carry a deterministic fingerprint over the normalized graph and
 newest bounded undo-history window. New imports verify it before restoration;
 legacy backups without a fingerprint remain readable.
+The browser acknowledges a full-backup checkpoint only after its local
+fingerprint write succeeds; reminders also synchronize across tabs and
+reconcile from durable browser storage on a bounded timer.
 
 Sharing surfaces have explicit privacy levels: the full graph, backup, vault,
 and evidence-bearing feedback exports retain source material; the redacted
@@ -988,10 +1059,13 @@ runtime, so Node-version differences cannot bypass deployment-contract checks.
 
 The canonical `production:check` also runs `release:check` and
 `smoke:server`, coupling the behavioral suite to package-lock, release
-metadata, workflow permissions and pinning, public/offline asset parity, OCI
-provenance, and the real standalone server lifecycle. It verifies the Pages
-artifact before artifact-dependent tests and again after all checks, so a test
+metadata, parsed workflow structure, permissions and pinning, public/offline
+asset parity, OCI provenance, and the real standalone server lifecycle. It
+verifies the Pages artifact before artifact-dependent tests and again after all checks, so a test
 that rebuilds or mutates `dist/` cannot leave an unverified final publication.
+Each child command has a bounded five-minute subprocess timeout, and the
+timeout, signal, and nonzero-exit paths are covered by an executable production
+gate smoke test rather than only a source-text contract.
 
 The same checks run across Node 22 and 24, build the container, verify
 readiness, and exercise static delivery and offline service-worker behavior.

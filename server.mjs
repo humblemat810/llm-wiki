@@ -1,12 +1,14 @@
 import { createServer } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
+import { isIP } from "node:net";
 import { lstat, open, realpath, stat } from "node:fs/promises";
 import { closeSync, constants as fsConstants, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_DOCUMENT_TITLE_CHARS, MAX_FEEDBACK_EXAMPLES, MAX_FEEDBACK_LABEL_CHARS, MAX_ID_CHARS, MAX_SOURCE_URI_CHARS, extractGraph, normalizeExtractionForDocument, normalizeSourceUri, parseJsonWithUniqueKeys, relationSemanticKey, slugify } from "./graph-core.js";
 import { MAX_FEEDBACK_CHARS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES } from "./extractor-adapter.js";
+import { createConfiguredProviderExtractor } from "./provider-adapter.js";
 import { FIXED_PUBLIC_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, PUBLIC_SITEMAP_ASSETS } from "./scripts/public-assets.mjs";
 import { requirePublicOrigin } from "./scripts/public-origin.mjs";
 import { DEFAULT_PUBLIC_REPOSITORY, requirePublicRepository } from "./scripts/public-repository.mjs";
@@ -16,7 +18,9 @@ import { buildSampleGraphPage } from "./scripts/sample-graph-page.mjs";
 const require = createRequire(import.meta.url);
 const APP_VERSION = require("./package.json").version;
 const rawBuildRevision = typeof process.env.BUILD_REVISION === "string" ? process.env.BUILD_REVISION.trim() : "";
-const BUILD_REVISION = /^(?:unknown|[0-9a-f]{7,64})$/i.test(rawBuildRevision) ? rawBuildRevision : "unknown";
+const BUILD_REVISION = /^(?:unknown|[0-9a-f]{7,64})$/i.test(rawBuildRevision)
+  ? rawBuildRevision.toLowerCase()
+  : "unknown";
 const RELEASE_DATE = require("./version.json").date;
 const FEED_UPDATED_AT = /^\d{4}-\d{2}-\d{2}$/.test(RELEASE_DATE)
   ? `${RELEASE_DATE}T00:00:00.000Z`
@@ -24,6 +28,7 @@ const FEED_UPDATED_AT = /^\d{4}-\d{2}-\d{2}$/.test(RELEASE_DATE)
 const MAX_BODY_BYTES = MAX_REQUEST_BYTES;
 const MAX_RATE_LIMIT_KEYS = 10000;
 const RATE_LIMIT_SWEEP_INTERVAL_MS = 1000;
+const MAX_TRUSTED_PROXY_HOPS = 8;
 export const DEFAULT_MAX_CONCURRENT_EXTRACTORS = 8;
 const MAX_CONCURRENT_EXTRACTORS = 1024;
 const REQUEST_TIMEOUT_MS = 30000;
@@ -33,11 +38,21 @@ const MAX_HEADER_BYTES = 16 * 1024;
 const MAX_CRAWLER_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_RUNTIME_TEXT_CHARS = Math.floor(MAX_STATIC_ASSET_BYTES / 4);
 const TEXT_ASSET_EXTENSIONS = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".svg", ".txt", ".webmanifest", ".xml"]);
+const NO_CACHE_STATIC_ASSETS = new Set([
+  "index.html",
+  "artifacts.html",
+  "404.html",
+  "manifest.webmanifest",
+  "sw.js",
+  "version.json"
+]);
 export const MIN_AUTH_TOKEN_CHARS = 16;
 const MAX_AUTH_TOKEN_CHARS = 4096;
 const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
 const DEFAULT_IDLE_WAIT_TIMEOUT_MS = 5000;
 const READINESS_CACHE_TTL_MS = 5000;
+const DEFAULT_READINESS_TIMEOUT_MS = 5000;
+const MAX_READINESS_TIMEOUT_MS = 30000;
 const HTTP_LATENCY_BUCKETS_MS = [50, 100, 250, 500, 1000, 5000, 30000];
 const EXTRACTION_LATENCY_BUCKETS_MS = [100, 500, 1000, 5000, 30000, 120000];
 const root = fileURLToPath(new URL("./", import.meta.url));
@@ -48,6 +63,7 @@ const types = {
   ".css": "text/css; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".canvas": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
@@ -57,6 +73,41 @@ const fixedPublicAssets = FIXED_PUBLIC_ASSETS;
 const decodeUtf8 = (bytes) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 const SERVICE_WORKER_CACHE_MARKER = `const CACHE = "llm-field-notes-v${APP_VERSION}"`;
 const SAMPLE_GRAPH_PAGE = "sample-graph.html";
+
+export function parseTrustedProxyHops(value) {
+  if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) {
+    return { value: 0, valid: true, configured: false };
+  }
+  const normalized = typeof value === "string" ? value.trim() : value;
+  if (typeof normalized === "string" && !/^\d+$/.test(normalized)) {
+    return { value: 0, valid: false, configured: true };
+  }
+  const numeric = Number(normalized);
+  if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > MAX_TRUSTED_PROXY_HOPS) {
+    return { value: 0, valid: false, configured: true };
+  }
+  return { value: numeric, valid: true, configured: true };
+}
+
+export function parseConfiguredBoundedInteger(name, value, {
+  defaultValue,
+  min = 1,
+  max = Number.MAX_SAFE_INTEGER
+} = {}) {
+  if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) {
+    return { value: defaultValue, configured: false, valid: true };
+  }
+  const normalized = typeof value === "string" ? value.trim() : value;
+  if ((typeof normalized === "string" && !/^\d+$/.test(normalized))
+    || (typeof normalized !== "string" && !Number.isSafeInteger(normalized))) {
+    return { value: defaultValue, configured: true, valid: false };
+  }
+  const numeric = Number(normalized);
+  if (!Number.isSafeInteger(numeric) || numeric < min || numeric > max) {
+    return { value: defaultValue, configured: true, valid: false };
+  }
+  return { value: numeric, configured: true, valid: true };
+}
 
 function validateRuntimeReleaseMetadata(content) {
   let release;
@@ -420,7 +471,7 @@ function hasValidBearerToken(request, expectedToken) {
   return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
-function isUsableAuthToken(value) {
+export function isUsableAuthToken(value) {
   return typeof value === "string"
     && value.length >= MIN_AUTH_TOKEN_CHARS
     && value.length <= MAX_AUTH_TOKEN_CHARS
@@ -428,7 +479,7 @@ function isUsableAuthToken(value) {
     && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
-function isLoopbackPublicOrigin(value) {
+export function isLoopbackPublicOrigin(value) {
   if (typeof value !== "string" || !value) return false;
   try {
     return new Set(["127.0.0.1", "::1", "localhost"]).has(new URL(value).hostname.toLowerCase());
@@ -463,10 +514,61 @@ function hasAllowedRequestOrigin(request, publicOrigin) {
   return parsedOrigin.origin === expectedOrigin;
 }
 
-function safeDiagnosticCode(value, fallback = "EXTRACTOR_FAILURE") {
+export function resolveRateLimitClientKey(request, trustedProxyHops = 0) {
+  const socketAddress = typeof request?.socket?.remoteAddress === "string" && request.socket.remoteAddress
+    ? request.socket.remoteAddress
+    : "unknown";
+  const numericHops = Number(trustedProxyHops);
+  if (!Number.isSafeInteger(numericHops) || numericHops < 1 || numericHops > MAX_TRUSTED_PROXY_HOPS) {
+    return socketAddress;
+  }
+  const forwarded = request?.headers?.["x-forwarded-for"];
+  if (typeof forwarded !== "string" || forwarded.length > 4096) return socketAddress;
+  const addresses = forwarded.split(",").map((value) => value.trim());
+  if (!addresses.length || addresses.some((value) => isIP(value) === 0)) return socketAddress;
+  return addresses[Math.max(0, addresses.length - numericHops - 1)] || socketAddress;
+}
+
+export function safeDiagnosticCode(value, fallback = "EXTRACTOR_FAILURE") {
   if (typeof value !== "string") return fallback;
   const code = value.trim().slice(0, 80);
   return /^[A-Z][A-Z0-9_:-]*$/.test(code) ? code : fallback;
+}
+
+const LOG_ENTRY_KEYS = new Set([
+  "version",
+  "revision",
+  "host",
+  "port",
+  "extractor",
+  "event",
+  "signal",
+  "drained",
+  "status",
+  "durationMs",
+  "route",
+  "requestId",
+  "error",
+  "documentChars",
+  "feedbackCount"
+]);
+
+export function sanitizeLogEntry(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return {};
+  const sanitized = {};
+  for (const [key, value] of Object.entries(entry).slice(0, 24)) {
+    if (!LOG_ENTRY_KEYS.has(key)) continue;
+    if (key === "error") {
+      sanitized.error = safeDiagnosticCode(value, "SERVER_FAILURE");
+    } else if (typeof value === "string") {
+      sanitized[key] = value.replace(/[\u0000-\u001F\u007F]/g, "").slice(0, 256);
+    } else if (typeof value === "number" && Number.isFinite(value)) {
+      sanitized[key] = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(value)));
+    } else if (typeof value === "boolean") {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
 }
 
 const hasOnlyKeys = (value, allowedKeys) => (
@@ -687,7 +789,9 @@ export function createAppServer({
   requireExtractorAuth = false,
   requireMetricsAuth = false,
   requireSecurePublicOrigin = false,
-  requireBuildRevision = false
+  requireBuildRevision = false,
+  readinessTimeoutMs = DEFAULT_READINESS_TIMEOUT_MS,
+  trustedProxyHops = 0
 } = {}) {
   const safeRoot = resolve(staticRoot);
   const learningNoteAssets = discoverLearningNoteAssets(safeRoot);
@@ -736,21 +840,31 @@ export function createAppServer({
   const extractorTimeout = Number.isFinite(numericExtractorTimeout) && numericExtractorTimeout >= 1
     ? Math.min(120000, Math.floor(numericExtractorTimeout))
     : 120000;
+  const numericReadinessTimeout = Number(readinessTimeoutMs);
+  const readinessTimeout = Number.isFinite(numericReadinessTimeout) && numericReadinessTimeout >= 1
+    ? Math.min(MAX_READINESS_TIMEOUT_MS, Math.floor(numericReadinessTimeout))
+    : DEFAULT_READINESS_TIMEOUT_MS;
+  const proxyHops = parseTrustedProxyHops(trustedProxyHops).value;
   const authToken = typeof extractorAuthToken === "string" ? extractorAuthToken : "";
   const extractorAuthRequired = requireExtractorAuth === true || Boolean(authToken);
   const extractorAuthConfigured = isUsableAuthToken(authToken);
   const metricsToken = typeof metricsAuthToken === "string" ? metricsAuthToken : "";
   const metricsAuthRequired = requireMetricsAuth === true || Boolean(metricsToken);
   const metricsAuthConfigured = isUsableAuthToken(metricsToken);
-  const origin = requirePublicOrigin(publicOrigin);
+  const origin = requirePublicOrigin(publicOrigin, {
+    requireSecure: requireSecurePublicOrigin,
+    allowLoopbackHttp: !requireSecurePublicOrigin
+  });
   const repository = requirePublicRepository(publicRepository);
-  const securePublicOriginConfigured = origin.startsWith("https://") || isLoopbackPublicOrigin(origin);
+  const securePublicOriginConfigured = origin.startsWith("https://")
+    || (!requireSecurePublicOrigin && isLoopbackPublicOrigin(origin));
   const transportSecurityHeaders = origin.startsWith("https://")
     ? { "strict-transport-security": "max-age=31536000; includeSubDomains" }
     : {};
   const rateLimits = new Map();
   let nextRateLimitSweepAt = 0;
   const activeExtractors = new Set();
+  const activeExtractorDrainRejectors = new Set();
   const idleWaiters = new Set();
   const markExtractorSettled = (controller) => {
     activeExtractors.delete(controller);
@@ -790,12 +904,15 @@ export function createAppServer({
     extractionSuccesses: 0,
     extractionFailures: 0,
     extractionClientAborts: 0,
+    readinessFailures: 0,
+    readinessTimeouts: 0,
     authenticationFailures: 0,
     rateLimited: 0,
     concurrencyLimited: 0,
     extractionLatencyBuckets: Array(EXTRACTION_LATENCY_BUCKETS_MS.length).fill(0),
     extractionLatencySumMs: 0,
     extractionLatencyCount: 0,
+    trustedProxyHops: proxyHops,
     buildRevision: BUILD_REVISION,
     responsesByStatus: new Map()
   };
@@ -820,7 +937,7 @@ export function createAppServer({
   const safeLog = (entry) => {
     if (typeof logger !== "function") return;
     try {
-      const result = logger(entry);
+      const result = logger(sanitizeLogEntry(entry));
       result?.catch?.(() => {});
     } catch {
       // Logging must not change request behavior.
@@ -958,8 +1075,8 @@ export function createAppServer({
         sendEmpty(response, 400);
         return;
       }
-      if (["GET", "HEAD"].includes(request.method) && requestPath === "/healthz") {
-        sendJson(response, 200, { ok: true, schema: GRAPH_SCHEMA, version: APP_VERSION, revision: BUILD_REVISION }, {}, request.method === "HEAD");
+      if (["GET", "HEAD"].includes(request.method) && ["/healthz", "/livez"].includes(requestPath)) {
+        sendJson(response, 200, { ok: true, live: true, schema: GRAPH_SCHEMA, version: APP_VERSION, revision: BUILD_REVISION }, {}, request.method === "HEAD");
         return;
       }
       if (["GET", "HEAD"].includes(request.method) && requestPath === "/feed.xml") {
@@ -1000,7 +1117,7 @@ export function createAppServer({
           return;
         }
         const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
-        const cacheControl = "public, max-age=3600";
+        const cacheControl = "no-cache";
         if (matchesEtag(request.headers["if-none-match"], etag)) {
           sendNotModified(response, etag, cacheControl);
           return;
@@ -1037,18 +1154,18 @@ export function createAppServer({
           return;
         }
         const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
-        const cacheControl = "public, max-age=3600";
+        const cacheControl = "no-cache";
         if (matchesEtag(request.headers["if-none-match"], etag)) {
           sendNotModified(response, etag, cacheControl);
           return;
         }
-        sendXml(response, 200, body, { etag }, request.method === "HEAD");
+        sendXml(response, 200, body, { "cache-control": cacheControl, etag }, request.method === "HEAD");
         return;
       }
       if (["GET", "HEAD"].includes(request.method) && requestPath === "/robots.txt" && origin) {
         const body = `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`;
         const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
-        const cacheControl = "public, max-age=3600";
+        const cacheControl = "no-cache";
         if (matchesEtag(request.headers["if-none-match"], etag)) {
           sendNotModified(response, etag, cacheControl);
           return;
@@ -1095,7 +1212,7 @@ export function createAppServer({
             return;
           }
           const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
-          const cacheControl = "public, max-age=3600";
+          const cacheControl = "no-cache";
           if (matchesEtag(request.headers["if-none-match"], etag)) {
             sendNotModified(response, etag, cacheControl, { "content-security-policy": learningNotePageCsp });
             return;
@@ -1152,12 +1269,27 @@ export function createAppServer({
           "# HELP llm_field_notes_extraction_client_aborts_total Extraction requests abandoned by the client before a response could be delivered.",
           "# TYPE llm_field_notes_extraction_client_aborts_total counter",
           `llm_field_notes_extraction_client_aborts_total ${metrics.extractionClientAborts}`,
+          "# HELP llm_field_notes_readiness_timeouts_total Readiness validation checks that exceeded their bounded deadline.",
+          "# TYPE llm_field_notes_readiness_timeouts_total counter",
+          `llm_field_notes_readiness_timeouts_total ${metrics.readinessTimeouts}`,
+          "# HELP llm_field_notes_readiness_failures_total Readiness validation checks that completed but reported an unavailable application.",
+          "# TYPE llm_field_notes_readiness_failures_total counter",
+          `llm_field_notes_readiness_failures_total ${metrics.readinessFailures}`,
           "# HELP llm_field_notes_authentication_failures_total Extraction requests rejected by bearer authentication.",
           "# TYPE llm_field_notes_authentication_failures_total counter",
           `llm_field_notes_authentication_failures_total ${metrics.authenticationFailures}`,
           "# HELP llm_field_notes_rate_limited_total Extraction requests rejected by the in-process limiter.",
           "# TYPE llm_field_notes_rate_limited_total counter",
           `llm_field_notes_rate_limited_total ${metrics.rateLimited}`,
+          "# HELP llm_field_notes_rate_limit_keys Current client windows retained by the in-process limiter.",
+          "# TYPE llm_field_notes_rate_limit_keys gauge",
+          `llm_field_notes_rate_limit_keys ${rateLimits.size}`,
+          "# HELP llm_field_notes_rate_limit_key_capacity Maximum client windows retained by the in-process limiter.",
+          "# TYPE llm_field_notes_rate_limit_key_capacity gauge",
+          `llm_field_notes_rate_limit_key_capacity ${MAX_RATE_LIMIT_KEYS}`,
+          "# HELP llm_field_notes_trusted_proxy_hops Number of explicitly trusted reverse-proxy hops used for rate-limit identity.",
+          "# TYPE llm_field_notes_trusted_proxy_hops gauge",
+          `llm_field_notes_trusted_proxy_hops ${metrics.trustedProxyHops}`,
           "# HELP llm_field_notes_concurrency_limited_total Extraction requests rejected because provider capacity is full.",
           "# TYPE llm_field_notes_concurrency_limited_total counter",
           `llm_field_notes_concurrency_limited_total ${metrics.concurrencyLimited}`,
@@ -1200,7 +1332,32 @@ export function createAppServer({
           if (!readinessCheck) readinessCheck = inspectReadiness().finally(() => {
             readinessCheck = null;
           });
-          const result = await readinessCheck;
+          let readinessTimer;
+          const timedOut = Symbol("readinessTimedOut");
+          const result = await Promise.race([
+            readinessCheck,
+            new Promise((resolve) => {
+              readinessTimer = setTimeout(() => resolve(timedOut), readinessTimeout);
+              readinessTimer.unref?.();
+            })
+          ]);
+          clearTimeout(readinessTimer);
+          if (result === timedOut) {
+            metrics.readinessTimeouts += 1;
+            safeLog({ requestId, status: 503, route: "readyz", error: "READINESS_TIMEOUT" });
+            sendJson(
+              response,
+              503,
+              { ok: false, schema: GRAPH_SCHEMA, version: APP_VERSION, revision: BUILD_REVISION, ready: false, error: "Readiness check timed out." },
+              { "retry-after": "5" },
+              request.method === "HEAD"
+            );
+            return;
+          }
+          if (result.status !== 200) {
+            metrics.readinessFailures += 1;
+            safeLog({ requestId, status: result.status, route: "readyz", error: "READINESS_FAILED" });
+          }
           if (server.isDraining) {
             sendJson(response, 503, { ok: false, schema: GRAPH_SCHEMA, version: APP_VERSION, revision: BUILD_REVISION, ready: false, error: "Server is draining." }, { "retry-after": "5" }, request.method === "HEAD");
             return;
@@ -1263,7 +1420,7 @@ export function createAppServer({
           respondJson(403, { error: "The extraction endpoint only accepts same-origin browser requests." }, {}, { error: "ORIGIN_REJECTED" });
           return;
         }
-        const clientKey = request.socket.remoteAddress || "unknown";
+        const clientKey = resolveRateLimitClientKey(request, proxyHops);
         const now = Date.now();
         if (now >= nextRateLimitSweepAt) {
           for (const [key, entry] of rateLimits) {
@@ -1373,6 +1530,8 @@ export function createAppServer({
         let controller;
         let rejectClientAbort;
         let clientAbortPromise;
+        let rejectServerDrain;
+        let serverDrainPromise;
         let clientAborted = false;
         let extractionSettled = false;
         try {
@@ -1381,6 +1540,10 @@ export function createAppServer({
           clientAbortPromise = new Promise((_, reject) => {
             rejectClientAbort = reject;
           });
+          serverDrainPromise = new Promise((_, reject) => {
+            rejectServerDrain = reject;
+          });
+          activeExtractorDrainRejectors.add(rejectServerDrain);
           const abortClient = () => {
             if (clientAborted) return;
             clientAborted = true;
@@ -1418,6 +1581,7 @@ export function createAppServer({
           const rawExtraction = await Promise.race([
             extractionPromise,
             clientAbortPromise,
+            serverDrainPromise,
             new Promise((_, reject) => {
               timeoutHandle = setTimeout(() => {
                 controller.abort();
@@ -1489,6 +1653,7 @@ export function createAppServer({
           if (timeoutHandle) clearTimeout(timeoutHandle);
           if (requestAbortHandler) request.removeListener("aborted", requestAbortHandler);
           if (responseCloseHandler) response.removeListener("close", responseCloseHandler);
+          if (rejectServerDrain) activeExtractorDrainRejectors.delete(rejectServerDrain);
           if (controller && extractionSettled) markExtractorSettled(controller);
         }
         return;
@@ -1502,6 +1667,10 @@ export function createAppServer({
       try {
         pathname = decodeURIComponent(requestPath);
       } catch {
+        sendEmpty(response, 400);
+        return;
+      }
+      if (/[\u0000-\u001F\u007F]/.test(pathname)) {
         sendEmpty(response, 400);
         return;
       }
@@ -1595,7 +1764,7 @@ export function createAppServer({
         BUILD_REVISION
       ].join("\u0000");
       const etag = getStaticEtag(relative, etagSignature, responseContent);
-      const cacheControl = relative === "index.html" || relative === "artifacts.html" || resolvedFilePath.endsWith("sw.js") || resolvedFilePath.endsWith("version.json")
+      const cacheControl = NO_CACHE_STATIC_ASSETS.has(relative) || resolvedFilePath.endsWith("sw.js") || resolvedFilePath.endsWith("version.json")
         ? "no-cache"
         : generatedSampleGraphPage
           ? "no-cache"
@@ -1629,6 +1798,21 @@ export function createAppServer({
       sendEmpty(response, status);
     }
   });
+  server.on("checkContinue", (request, response) => {
+    const declaredLength = parseDeclaredContentLength(request);
+    if (Number.isNaN(declaredLength)) {
+      discardRequestBody(request, response);
+      sendEmpty(response, 400);
+      return;
+    }
+    if (declaredLength !== null && declaredLength > MAX_BODY_BYTES) {
+      discardRequestBody(request, response);
+      sendEmpty(response, 413);
+      return;
+    }
+    response.writeContinue();
+    server.emit("request", request, response);
+  });
   server.on("clientError", (error, socket) => {
     safeLog({ status: 400, route: "client", error: "CLIENT_PROTOCOL_ERROR" });
     if (socket.destroyed) return;
@@ -1651,11 +1835,16 @@ export function createAppServer({
     extractionLatencyBuckets: [...metrics.extractionLatencyBuckets],
     httpRequestsInFlight: metrics.httpRequestsInFlight,
     extractionsInFlight: activeExtractors.size,
+    rateLimitKeys: rateLimits.size,
+    rateLimitKeyCapacity: MAX_RATE_LIMIT_KEYS,
     draining: server.isDraining,
     uptimeSeconds: Math.max(0, (Date.now() - processStartedAt) / 1000)
   });
   server.abortActiveExtractors = () => {
     for (const controller of activeExtractors) controller.abort();
+    for (const rejectServerDrain of activeExtractorDrainRejectors) {
+      rejectServerDrain(Object.assign(new Error("Server is draining."), { code: "SERVER_SHUTDOWN" }));
+    }
   };
   server.waitForIdle = waitForIdle;
   server.beginDrain = () => {
@@ -1669,22 +1858,43 @@ export function createAppServer({
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const configuredPort = Number(process.env.PORT);
-  const port = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535 ? configuredPort : 8000;
+  const portSetting = parseConfiguredBoundedInteger("PORT", process.env.PORT, { defaultValue: 8000, max: 65535 });
+  const rateLimitSetting = parseConfiguredBoundedInteger("EXTRACTOR_RATE_LIMIT", process.env.EXTRACTOR_RATE_LIMIT, { defaultValue: 60, max: 1000000 });
+  const extractorTimeoutSetting = parseConfiguredBoundedInteger("EXTRACTOR_TIMEOUT_MS", process.env.EXTRACTOR_TIMEOUT_MS, { defaultValue: 120000, max: 120000 });
+  const concurrencySetting = parseConfiguredBoundedInteger("EXTRACTOR_CONCURRENCY", process.env.EXTRACTOR_CONCURRENCY, { defaultValue: DEFAULT_MAX_CONCURRENT_EXTRACTORS, max: MAX_CONCURRENT_EXTRACTORS });
+  const settings = [
+    ["PORT", portSetting, "1 to 65535"],
+    ["EXTRACTOR_RATE_LIMIT", rateLimitSetting, "1 to 1000000"],
+    ["EXTRACTOR_TIMEOUT_MS", extractorTimeoutSetting, "1 to 120000"],
+    ["EXTRACTOR_CONCURRENCY", concurrencySetting, `1 to ${MAX_CONCURRENT_EXTRACTORS}`]
+  ];
+  const invalidSetting = settings.find(([, setting]) => !setting.valid);
+  if (invalidSetting) {
+    console.error(`${invalidSetting[0]} must be an integer from ${invalidSetting[2]} when configured.`);
+    process.exit(1);
+  }
+  const port = portSetting.value;
   const host = typeof process.env.HOST === "string" && process.env.HOST.trim() ? process.env.HOST.trim() : "127.0.0.1";
-  const configuredRateLimit = Number(process.env.EXTRACTOR_RATE_LIMIT);
-  const maxRequestsPerMinute = Number.isFinite(configuredRateLimit) && configuredRateLimit >= 1
-    ? Math.floor(configuredRateLimit)
-    : 60;
-  const configuredExtractorTimeout = Number(process.env.EXTRACTOR_TIMEOUT_MS);
-  const extractorTimeoutMs = Number.isFinite(configuredExtractorTimeout) && configuredExtractorTimeout >= 1
-    ? Math.min(120000, Math.floor(configuredExtractorTimeout))
-    : 120000;
-  const configuredConcurrency = Number(process.env.EXTRACTOR_CONCURRENCY);
-  const maxConcurrentExtractors = Number.isSafeInteger(configuredConcurrency) && configuredConcurrency >= 1
-    ? Math.min(MAX_CONCURRENT_EXTRACTORS, configuredConcurrency)
-    : DEFAULT_MAX_CONCURRENT_EXTRACTORS;
+  const maxRequestsPerMinute = rateLimitSetting.value;
+  const extractorTimeoutMs = extractorTimeoutSetting.value;
+  const maxConcurrentExtractors = concurrencySetting.value;
+  const trustedProxyConfiguration = parseTrustedProxyHops(process.env.TRUST_PROXY_HOPS);
+  if (!trustedProxyConfiguration.valid) {
+    console.error("TRUST_PROXY_HOPS must be an integer from 0 to 8 when configured.");
+    process.exit(1);
+  }
+  const trustedProxyHops = trustedProxyConfiguration.value;
   const loopbackHost = new Set(["127.0.0.1", "::1", "localhost"]).has(host.toLowerCase());
+  const publicOriginIsExternal = Boolean(process.env.PUBLIC_ORIGIN)
+    && !isLoopbackPublicOrigin(process.env.PUBLIC_ORIGIN.trim());
+  const productionMode = !loopbackHost || publicOriginIsExternal;
+  let configuredProvider;
+  try {
+    configuredProvider = createConfiguredProviderExtractor(process.env, { requireSecure: productionMode });
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Model provider configuration is invalid.");
+    process.exit(1);
+  }
   const server = createAppServer({
     maxRequestsPerMinute,
     maxConcurrentExtractors,
@@ -1693,33 +1903,36 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     metricsAuthToken: process.env.METRICS_AUTH_TOKEN || "",
     publicOrigin: process.env.PUBLIC_ORIGIN || "",
     publicRepository: process.env.PUBLIC_REPOSITORY_URL || "",
-    requireExtractorAuth: !loopbackHost,
-    requireMetricsAuth: !loopbackHost,
-    requireSecurePublicOrigin: !loopbackHost,
-    requireBuildRevision: !loopbackHost,
+    requireExtractorAuth: productionMode,
+    requireMetricsAuth: productionMode,
+    requireSecurePublicOrigin: productionMode,
+    requireBuildRevision: productionMode,
+    trustedProxyHops,
+    extractor: configuredProvider.extractor || undefined,
     logger: (entry) => console.log(JSON.stringify(entry))
   });
   let actualPort = port;
-  const logLifecycle = (entry) => console.log(JSON.stringify({
+  const safeHost = sanitizeLogEntry({ host }).host || "unknown";
+  const logLifecycle = (entry) => console.log(JSON.stringify(sanitizeLogEntry({
     version: APP_VERSION,
     revision: BUILD_REVISION,
-    host,
+    host: safeHost,
     port: actualPort,
     ...entry
-  }));
+  })));
   process.on("uncaughtExceptionMonitor", (error) => {
-    logLifecycle({ event: "uncaught-exception", error: error?.code || "UNCAUGHT_EXCEPTION" });
+    logLifecycle({ event: "uncaught-exception", error: safeDiagnosticCode(error?.code, "UNCAUGHT_EXCEPTION") });
   });
   server.once("error", (error) => {
-    console.error(`LLM Field Notes server failed to listen: ${error.message}`);
-    logLifecycle({ event: "server-error", error: error.code || "LISTEN_FAILURE" });
+    console.error("LLM Field Notes server failed to listen.");
+    logLifecycle({ event: "server-error", error: safeDiagnosticCode(error?.code, "LISTEN_FAILURE") });
     process.exitCode = 1;
   });
   server.listen(port, host, () => {
     const address = server.address();
     actualPort = address && typeof address === "object" ? address.port : port;
-    console.log(`LLM Field Notes server listening on http://${host}:${actualPort}`);
-    logLifecycle({ event: "server-ready" });
+    console.log(`LLM Field Notes server listening on http://${safeHost}:${actualPort}`);
+    logLifecycle({ event: "server-ready", extractor: configuredProvider.configuration.configured ? "model-provider" : "local-heuristic" });
   });
   let shuttingDown = false;
   const shutdown = (signal) => {
@@ -1743,7 +1956,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("unhandledRejection", (reason) => {
-    logLifecycle({ event: "unhandled-rejection", error: reason?.code || "UNHANDLED_REJECTION" });
+    logLifecycle({ event: "unhandled-rejection", error: safeDiagnosticCode(reason?.code, "UNHANDLED_REJECTION") });
     shutdown("unhandled-rejection");
   });
 }

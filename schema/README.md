@@ -122,6 +122,20 @@ history aligned with the Markdown and Obsidian projections.
 review-guided follow-up and requires the explicit concept-count delta and
 suppression proof to remain machine-checkable.
 
+`canvas.schema.json` describes the native Obsidian Canvas projection. It keeps
+the interchange shape deliberately small: bounded file/text cards, finite
+coordinates and dimensions, unique node and edge identities, and edges whose
+endpoints resolve to cards. `scripts/verify-canvas.mjs` applies the same
+fail-closed checks without requiring a JSON Schema implementation, making the
+published sample and deployed projection independently verifiable offline.
+
+`service-health.schema.json` describes the small JSON contract returned by the
+reference server's liveness and readiness endpoints. It lets load balancers,
+orchestrators, and monitoring tools distinguish a live process from a ready
+deployment without depending on prose or implementation-specific fields.
+The companion `scripts/verify-service-health.mjs` tool performs the same
+fail-closed checks on captured JSON responses.
+
 The browser normalizer is intentionally more forgiving than the schema: it
 accepts legacy fields, repairs missing metadata, and records migrations. New
 extractors and external projections should emit the schema shape directly.

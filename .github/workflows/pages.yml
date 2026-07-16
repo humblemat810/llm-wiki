@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -16,6 +14,11 @@ concurrency:
 
 jobs:
   deploy:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 20
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
@@ -37,12 +40,42 @@ jobs:
       - name: Configure Pages
         id: pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Verify GitHub Pages configuration
+        env:
+          PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          if [ -z "$PAGES_BASE_URL" ]; then
+            echo "::error title=GitHub Pages is not configured::Enable Settings → Pages and choose GitHub Actions as the source before publishing."
+            exit 1
+          fi
       - name: Run canonical production gate
         env:
           PUBLIC_ORIGIN: ${{ vars.PUBLIC_ORIGIN || steps.pages.outputs.base_url }}
           PUBLIC_REPOSITORY_URL: https://github.com/${{ github.repository }}
           BUILD_REVISION: ${{ github.sha }}
         run: npm run production:check
+      - name: Retain Pages publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pages-publication-evidence-${{ github.run_id }}
+          path: |
+            sbom.spdx.json
+            dist/asset-manifest.json
+            dist/version.json
+            dist/manifest.webmanifest
+            dist/404.html
+            dist/robots.txt
+            dist/feed.xml
+            dist/sitemap.xml
+            dist/sample-graph.html
+            dist/.well-known/security.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Attest Pages manifest and dependency SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/asset-manifest.json
+          sbom-path: sbom.spdx.json
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
@@ -58,6 +91,8 @@ jobs:
   browser:
     name: Smoke deployed origin (${{ matrix.browser }})
     needs: deploy
+    permissions:
+      contents: read
     timeout-minutes: 20
     strategy:
       fail-fast: false

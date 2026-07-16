@@ -105,6 +105,7 @@ export function buildSampleGraphPage(graph, origin = "") {
   const home = safeOrigin ? `${safeOrigin}/` : "./";
   const workbench = safeOrigin ? `${safeOrigin}/#sample` : "./#sample";
   const graphJson = absoluteOrRelative(safeOrigin, "examples/sample-graph.json");
+  const graphCanvas = absoluteOrRelative(safeOrigin, "examples/sample-graph.canvas");
   const graphNote = absoluteOrRelative(safeOrigin, "notes/knowledge-graphs.html");
   const graphVisual = buildGraphVisual(nodes, edges, nodeLabels);
   const conceptCards = nodes.map((node) => `
@@ -122,6 +123,13 @@ export function buildSampleGraphPage(graph, origin = "") {
     headline: "Sample knowledge graph · LLM Field Notes",
     description: "A small evidence-backed example of the internal representation produced from a document.",
     url: safeOrigin ? `${safeOrigin}/sample-graph.html` : "./sample-graph.html",
+    image: safeOrigin ? `${safeOrigin}/social-card.png` : "./social-card.png",
+    keywords: ["knowledge graph", "document extraction", "human feedback", "Obsidian"],
+    about: {
+      "@type": "Thing",
+      name: "Inspectable document-to-knowledge-graph representation",
+      identifier: graphFingerprint
+    },
     isPartOf: { "@type": "WebSite", name: "LLM Field Notes", url: home }
   }).replace(/[<>&]/g, (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`);
   return `<!doctype html>
@@ -161,7 +169,7 @@ export function buildSampleGraphPage(graph, origin = "") {
       <p class="eyebrow"><span class="pulse"></span> PUBLIC SAMPLE / INTERNAL REPRESENTATION</p>
       <h1>A document,<br /><em>made inspectable.</em></h1>
       <p class="sample-graph-lede">This is the small graph behind the “try a sample” walkthrough: concepts and relations are hypotheses, evidence keeps them honest, and a fingerprint makes the projection verifiable.</p>
-      <div class="sample-graph-actions"><a class="button button-primary" href="${escapeHtml(workbench)}">Try it in the wiki <span>↗</span></a><a class="button button-quiet" href="${escapeHtml(graphJson)}">Download graph JSON <span>↓</span></a><a class="button button-quiet" href="${escapeHtml(graphNote)}">Read the graph note <span>→</span></a></div>
+      <div class="sample-graph-actions"><a class="button button-primary" href="${escapeHtml(workbench)}">Try it in the wiki <span>↗</span></a><a class="button button-quiet" href="${escapeHtml(graphJson)}">Download graph JSON <span>↓</span></a><a class="button button-quiet" href="${escapeHtml(graphCanvas)}">Open in Obsidian <span>↓</span></a><a class="button button-quiet" href="${escapeHtml(graphNote)}">Read the graph note <span>→</span></a></div>
       <section class="sample-graph-stats" aria-label="Sample graph summary">
         <div><strong>${nodes.length}</strong><span>concepts</span></div>
         <div><strong>${edges.length}</strong><span>relations</span></div>

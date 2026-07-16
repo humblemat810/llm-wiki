@@ -7,13 +7,15 @@ const endpointStart = source.indexOf("const validateExtractorEndpoint =");
 const endpointEnd = source.indexOf("\nlet storedExtractorEndpoint", endpointStart);
 const declaredStart = source.indexOf("const declaredResponseBytes =");
 const declaredEnd = source.indexOf("\nconst releaseController", declaredStart);
+const deadlineStart = source.indexOf("const cancelTextResponseBody =");
+const deadlineEnd = source.indexOf("\nconst isReadableSameOriginResponse =", deadlineStart);
 const originGuardStart = source.indexOf("const isReadableSameOriginResponse =");
 const originGuardEnd = source.indexOf("\nconst releaseController", originGuardStart);
 const fileHelperStart = source.indexOf("async function readBrowserFileBytes");
 const fileHelperEnd = source.indexOf("\nasync function readBrowserFileText", fileHelperStart);
 const helperStart = source.indexOf("async function readBoundedTextResponse");
 const helperEnd = source.indexOf("\nconst textEncoder", helperStart);
-assert(endpointStart >= 0 && endpointEnd > endpointStart && declaredStart >= 0 && declaredEnd > declaredStart && originGuardStart >= 0 && originGuardEnd > originGuardStart && fileHelperStart >= 0 && fileHelperEnd > fileHelperStart && helperStart >= 0 && helperEnd > helperStart, "browser boundary helpers should remain discoverable");
+assert(endpointStart >= 0 && endpointEnd > endpointStart && declaredStart >= 0 && declaredEnd > declaredStart && deadlineStart >= 0 && deadlineEnd > deadlineStart && originGuardStart >= 0 && originGuardEnd > originGuardStart && fileHelperStart >= 0 && fileHelperEnd > fileHelperStart && helperStart >= 0 && helperEnd > helperStart, "browser boundary helpers should remain discoverable");
 const endpointHelpers = vm.runInNewContext(`(() => {
   const MAX_SOURCE_URI_CHARS = 2048;
   const location = { href: "https://notes.example.test/workbench/", origin: "https://notes.example.test" };
@@ -34,6 +36,44 @@ const helper = vm.runInNewContext(`(() => {
   ${source.slice(declaredStart, declaredEnd)}
   return ${source.slice(helperStart, helperEnd)};
 })()`, { ArrayBuffer, Number, Promise, TextDecoder, Object, Uint8Array });
+const fetchDeadlineHelper = vm.runInNewContext(`(() => {
+  ${source.slice(deadlineStart, deadlineEnd)}
+  return fetchWithAbortDeadline;
+})()`, { Error, Math, Promise, clearTimeout, fetch: () => new Promise(() => {}), setTimeout });
+const deadlineController = new AbortController();
+const deadlineStartedAt = Date.now();
+await assert.rejects(
+  fetchDeadlineHelper("https://notes.example.test/notes/tokens.md", { signal: deadlineController.signal }, deadlineController, 10),
+  (error) => error?.name === "AbortError",
+  "learning-note fetches should reject when the transport ignores abort"
+);
+assert(Date.now() - deadlineStartedAt < 1000, "learning-note fetch deadlines should settle promptly");
+assert.equal(deadlineController.signal.aborted, true, "learning-note fetch deadlines should abort the underlying controller");
+let lateResponseCanceled = 0;
+const lateResponseState = { count: 0 };
+const lateFetchDeadlineHelper = vm.runInNewContext(`(() => {
+  ${source.slice(deadlineStart, deadlineEnd)}
+  return fetchWithAbortDeadline;
+})()`, {
+  Error,
+  Math,
+  Promise,
+  clearTimeout,
+  fetch: () => new Promise((resolve) => setTimeout(() => resolve({
+    body: { cancel: () => { lateResponseState.count += 1; } }
+  }), 25)),
+  setTimeout,
+  lateResponseState
+});
+const lateDeadlineController = new AbortController();
+await assert.rejects(
+  lateFetchDeadlineHelper("https://notes.example.test/notes/tokens.md", { signal: lateDeadlineController.signal }, lateDeadlineController, 5),
+  (error) => error?.name === "AbortError",
+  "late learning-note fetch responses should not keep a timed-out export pending"
+);
+await new Promise((resolve) => setTimeout(resolve, 40));
+lateResponseCanceled = lateResponseState.count;
+assert.equal(lateResponseCanceled, 1, "late learning-note fetch responses should have their bodies canceled best-effort");
 const originGuard = vm.runInNewContext(`(() => {
   const location = { href: "https://notes.example.test/workbench/", origin: "https://notes.example.test" };
   ${source.slice(originGuardStart, originGuardEnd)}

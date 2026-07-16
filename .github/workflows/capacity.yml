@@ -58,6 +58,7 @@ jobs:
       - name: Run bounded capacity probe
         env:
           LOAD_TEST_URL: ${{ inputs.target }}
+          LOAD_TEST_ALLOWED_ORIGIN: ${{ vars.PUBLIC_ORIGIN }}
           LOAD_TEST_CONFIRM: ${{ inputs.confirmation }}
           LOAD_TEST_DURATION_MS: ${{ inputs.duration_ms }}
           LOAD_TEST_CONCURRENCY: ${{ inputs.concurrency }}

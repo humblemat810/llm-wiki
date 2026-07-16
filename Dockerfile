@@ -26,6 +26,6 @@ USER node
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD node -e "const configured = Number(process.env.PORT); const port = Number.isInteger(configured) && configured > 0 && configured <= 65535 ? configured : 8000; fetch('http://127.0.0.1:' + port + '/readyz').then((r) => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"
+  CMD node --input-type=module -e "import { parseConfiguredBoundedInteger } from './server.mjs'; const setting = parseConfiguredBoundedInteger('PORT', process.env.PORT, { defaultValue: 8000, max: 65535 }); if (!setting.valid) process.exit(1); fetch('http://127.0.0.1:' + setting.value + '/readyz').then((r) => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"
 
 CMD ["node", "server.mjs"]

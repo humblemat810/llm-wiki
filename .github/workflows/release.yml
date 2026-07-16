@@ -14,6 +14,10 @@ concurrency:
 jobs:
   validate:
     name: Validate release artifacts
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -38,15 +42,23 @@ jobs:
         with:
           name: release-pages-evidence-${{ github.ref_name }}
           path: |
+            sbom.spdx.json
             dist/asset-manifest.json
             dist/version.json
             dist/manifest.webmanifest
             dist/404.html
             dist/robots.txt
+            dist/feed.xml
             dist/sitemap.xml
+            dist/sample-graph.html
             dist/.well-known/security.txt
           if-no-files-found: error
           retention-days: 90
+      - name: Attest release manifest and dependency SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/asset-manifest.json
+          sbom-path: sbom.spdx.json
       - name: Build versioned production container
         id: package
         run: |
@@ -70,6 +82,8 @@ jobs:
   browser:
     name: Certify release workbench (${{ matrix.browser }})
     needs: validate
+    permissions:
+      contents: read
     timeout-minutes: 20
     strategy:
       fail-fast: false

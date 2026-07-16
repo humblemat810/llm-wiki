@@ -91,6 +91,9 @@ try {
 
   const health = await fetchWithTimeout("/healthz");
   assert.equal(health.status, 200, "standalone health should be live");
+  const liveness = await fetchWithTimeout("/livez");
+  assert.equal(liveness.status, 200, "standalone liveness should be live");
+  assert.equal((await liveness.json()).live, true, "standalone liveness should expose the liveness contract");
 
   const healthLoad = await runLoadProbe({
     config: {

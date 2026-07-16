@@ -4,6 +4,246 @@ All notable changes to LLM Field Notes are documented here.
 
 ## [Unreleased]
 
+- Add a built-in server-side OpenAI-compatible model-provider adapter with
+  bounded JSON decoding, credential isolation, structured-output prompting, and
+  fail-closed deployment configuration validation; leave the deterministic
+  local extractor as the zero-configuration fallback.
+- Mark ingested documents as untrusted model input and request deterministic
+  temperature-zero provider extraction, reducing prompt-injection influence and
+  representation drift while retaining mandatory human review.
+- Align hardened container smoke with the TLS-at-the-gateway contract by using
+  an HTTPS logical public origin while the direct probe exercises the bounded
+  HTTP listener.
+- Add a shared fail-closed deployment configuration preflight, and make
+  loopback HTTP an explicit development-only exception so non-loopback
+  deployments cannot satisfy HTTPS policy with a loopback public-origin value.
+- Treat an externally visible `PUBLIC_ORIGIN` as production even when the
+  Node process binds to loopback, preventing reverse-proxy deployments from
+  inheriting open development authentication and revision defaults.
+- Make automatic saved-source rebuilds preserve authoritative source content
+  while allowing the inferred graph representation to improve; provider output
+  that rewrites the saved document is rejected and reported.
+- Isolate automatic rebuild replacement extensions from the committed graph,
+  preventing an invalid or hostile replacement from mutating saved state before
+  validation.
+- Isolate automatic rebuild extractor graph context as well, preventing
+  provider callbacks from mutating committed state while deriving output.
+- Guard the optional persistent-storage request against browsers with a
+  throwing `navigator.storage` getter, keeping privacy-restricted workbenches
+  usable without an unhandled application error.
+- Make explicitly configured server port, rate-limit, timeout, and concurrency
+  settings fail startup on malformed or out-of-range values instead of silently
+  falling back to an unexpected process contract.
+- Make the production container healthcheck reuse the server's bounded port
+  parser, preventing invalid runtime overrides from probing the wrong endpoint.
+- Make deployment load probes reject malformed explicit numeric settings before
+  sending traffic, preserving operator-supplied failure and latency budgets.
+- Make exact-deployment Pages probes reject malformed retry counts and delays
+  before sending verification requests.
+- Harden the reference extractor limiter behind controlled reverse proxies
+  with an explicit `TRUST_PROXY_HOPS` setting: forwarded client addresses are
+  accepted only when configured, validated as IPs, and otherwise ignored,
+  preventing both accidental shared buckets and client-controlled identity
+  spoofing; expose the normalized trust mode through metrics for operator
+  verification, and fail startup on an explicitly invalid trust setting.
+- Retain the newest trusted review decisions when bounded internal learning
+  memory is normalized or updated, rather than relying only on append order.
+- Make the extraction-quality gate require all five named representative cases,
+  keeping the benchmark cardinality check aligned with its relation, safety,
+  multilingual, sparse-title, and technical-phrase coverage.
+- Make generated learning-note, feed, sitemap, and robots responses revalidate
+  promptly on the reference server while retaining ETag-based conditional
+  requests.
+- Retain a bounded clear-intent marker when a durable local-data purge fails,
+  so reloads and live tabs retry the deletion before adopting stale IndexedDB
+  state while preserving writes made after the failed clear.
+- Sanitize and bound all reference-server structured log fields, not only
+  provider diagnostic codes, before they reach an operator logger.
+- Apply the same sanitized lifecycle logging to configured host output before
+  it reaches standalone operator logs.
+- Restrict reference-server logs to an explicit operational-field allowlist so
+  future document or provider fields cannot become accidental log content.
+- Allow feedback-guided source rebuilds to intentionally suppress explicitly
+  rejected concepts or relations while carrying their compact learning memory
+  forward; accepted decisions and unapproved review loss remain fail-closed.
+- Retry scheduled Pages and browser experience monitors within bounded
+  propagation windows without weakening strict post-publication release gates.
+- Reconcile full-backup checkpoint reminders with durable storage on a bounded
+  fallback timer so missed cross-tab lifecycle events do not leave stale
+  recovery warnings visible.
+- Keep full-backup reminders visible when checkpoint persistence fails instead
+  of acknowledging an in-memory-only checkpoint.
+- Make the production status and runbook explicitly distinguish a green local
+  artifact gate from an externally unconfigured GitHub Pages deployment, with
+  an exact-origin and revision verification command.
+- Extend local browser certification through the real workbench model-mode
+  switch and same-origin extraction endpoint, then verify it returns to
+  privacy-safe local mode.
+- Verify the browser preserves an in-progress title and document draft when a
+  configured model endpoint returns a bounded provider failure.
+- Record the pinned WebKit service-worker interception limitation explicitly
+  instead of treating its successful provider response as a failure-drill pass.
+- Require the Pages-injected asset manifest during service-worker installation
+  so an offline deployment cannot activate without its integrity metadata,
+  while keeping local development manifest-free.
+- Guard first-install service-worker activation messages so a terminated or
+  restricted worker cannot surface as a workbench runtime error.
+- Make the installable-app manifest and branded 404 page revalidate promptly
+  on the reference Node server so release metadata and recovery guidance do not
+  remain stale in an hour-long browser cache.
+- Add an explicit GitHub Pages activation preflight with an actionable
+  Settings → Pages error before publication begins.
+- Make the confirmed full-local-data purge disclose when durable deletion cannot
+  be verified, and allow a later successful retry to restore IndexedDB
+  durability after a transient clear failure.
+- Make browser persistent-storage capability requests retryable after denial or
+  timeout while preventing overlapping requests in the same session.
+- Bound aggregate IndexedDB hydration by entry count and total UTF-8 bytes so
+  corrupted or overfilled application state fails closed to fallback storage
+  instead of materializing without an aggregate memory ceiling.
+- Apply the aggregate storage ceiling to durable writes and cross-tab updates,
+  rejecting over-capacity state instead of allowing it to grow after hydration.
+- Apply the same aggregate storage ceiling to localStorage-only fallback writes
+  and expose degraded state when an external update exceeds that bound.
+- Notify live browser-storage subscribers when localStorage fallback crosses
+  the aggregate safety ceiling, so the workbench can disclose degradation
+  without requiring a reload.
+- Bound browser certification page and console error capture so repeated
+  client failures cannot exhaust the diagnostic runner before evidence is saved.
+- Apply the bounded diagnostic-code allowlist to process-level lifecycle
+  failures so unexpected errors cannot inject arbitrary messages into logs.
+- Fail closed on malformed IndexedDB entries and retain the database only for
+  a confirmed purge, preventing corrupt state from masquerading as durable.
+- Surface rejected existing localStorage values as a degraded fallback state
+  instead of silently treating the fallback as clean.
+- Include malformed application-owned keys and localStorage read failures in
+  the fallback degradation signal.
+- Mark storage degraded when invalid cross-tab or BroadcastChannel values are
+  rejected instead of silently ignoring the synchronization failure.
+- Include overlong application-owned synchronization keys in that degraded
+  cross-tab state signal.
+- Bind shared UI graph mutations to an Undo-history fingerprint so concurrent
+  history-only changes fail as conflicts instead of being overwritten.
+- Preserve malformed local-mirror degradation warnings when IndexedDB hydrates
+  successfully, rather than masking rejected synchronous state.
+- Keep service-worker installation available when optional public notes or
+  experiments transiently fail, while retaining a fail-closed core shell gate.
+- Add a 60-second aggregate service-worker precache deadline so repeated
+  bounded asset retries cannot hold installation indefinitely.
+- Remove durable pending-write marker remnants after complete namespace clears,
+  including history-only workspaces and malformed local-storage entries.
+- Reject decoded control characters in Node static request paths with bounded
+  client errors instead of allowing malformed URLs to reach filesystem
+  resolution.
+- Extend container smoke to inspect effective read-only/tmpfs isolation,
+  production image mode, readiness healthcheck metadata, and the absence of
+  baked authentication secrets.
+- Bound capacity probes even when a target fetch or response body ignores
+  cancellation, cancel late bodies best-effort, and classify those failures as
+  timeouts rather than allowing operator workflows to hang.
+- Bound the Pages deployment verifier's endpoint and manifest fetches even when
+  a provider ignores abort signals, cancel late response bodies best-effort,
+  and keep publication checks from hanging indefinitely.
+- Make graceful server drain settle active extraction requests immediately even
+  when a provider ignores cancellation, returning retryable `503` responses
+  before the hard shutdown deadline while retaining late-work accounting.
+- Bound `/readyz` asset and generated-page validation with a five-second default
+  deadline, returning a fail-closed `503` instead of allowing a degraded
+  filesystem to hold health traffic until the generic HTTP timeout.
+- Explicitly race service-worker shell fetches and startup release metadata
+  against their network deadlines, canceling late response bodies so ignored
+  abort signals cannot hold offline fallback or app startup indefinitely.
+- Explicitly bound each Obsidian learning-note fetch by the remaining
+  aggregate export deadline, canceling late responses so ignored abort signals
+  cannot hold vault export indefinitely.
+- Expose bounded readiness-timeout Prometheus and structured diagnostics so
+  operators can distinguish slow static validation from ordinary readiness
+  failures without leaking asset or document details.
+- Expose completed readiness failures through an aggregate Prometheus counter
+  and sanitized structured event, making missing or misconfigured publication
+  health actionable without leaking internal asset details.
+- Align container-boundary documentation with the allowlisted public experiment
+  sources and runtime helpers actually required by the published learning
+  surface and reference server.
+- Generate pinned GitHub artifact attestations for the exact Pages/release
+  manifest and dependency SBOM used as publication evidence.
+- Scope release OIDC and attestation write permissions to the validation job,
+  keeping the separate browser-certification job read-only.
+- Scope CodeQL and Scorecard write permissions to their analysis jobs and make
+  release validation reject future top-level workflow write grants.
+- Parse all GitHub workflows with a locked YAML dependency during release
+  validation, catching duplicate keys and malformed job/permission structure
+  before publication.
+- Expose the same workflow validator as `npm run workflows:check` so
+  contributors can diagnose CI configuration before running the full release
+  gate.
+- Retain the generated Atom feed and sample-graph explainer in Pages and
+  tagged-release evidence so rollback comparisons include the public discovery
+  and projection surfaces.
+- Add a privacy-safe, item-specific correction-template copy action to the
+  inspector so contributors can submit graph improvements with stable IDs and
+  fingerprints without copying source text or evidence.
+- Run `workflows:check` as an explicit first-class step in the canonical
+  production gate so CI configuration failures are reported before release
+  metadata and artifact work.
+- Publish a versioned native Obsidian Canvas schema and offline verifier, and
+  wire release, server, and Pages deployment checks to reject malformed,
+  duplicate, oversized, or dangling Canvas projections.
+- Add the Canvas verifier to the public artifact gallery with a copy-paste
+  command, so downstream users can validate projections without cloning the
+  project.
+- Add an explicit `/livez` process-liveness endpoint distinct from `/readyz`
+  traffic admission, with container, server, and runbook coverage.
+- Publish the service-health schema so deployment monitors can validate
+  liveness and readiness responses as a versioned contract.
+- Add an offline service-health verifier and checked-in sample response for
+  monitoring integrations and CI fixtures.
+- Canonicalize hexadecimal build revisions to lowercase at the Node health,
+  service-worker, and container-smoke boundaries so all deployment metadata
+  satisfies the published service-health contract.
+- Canonicalize browser release-manifest revisions to lowercase so the
+  workbench displays the same deployment identity as runtime health metadata.
+- Extend the cross-browser release smoke to verify that the visible release
+  footer exposes the same canonical source revision served by `version.json`.
+- Restrict the Pages browser-smoke job to read-only repository permissions;
+  publication and deployment identity tokens remain limited to the deploy job.
+- Retain manifest, release, crawler, and security metadata for every Pages
+  deployment so incidents can compare the exact published contract.
+- Document the retained Pages evidence and rollback-comparison workflow in the
+  operator runbook.
+- Add explicit CODEOWNERS coverage for deployment workflows, runtime/security
+  boundaries, Docker, schemas, and graph persistence.
+- Make saved-source rebuilds fail closed when provider output removes or flips
+  an existing human-reviewed concept or relation decision.
+- Align sample-graph JSON-LD with its social share card and authoritative graph
+  fingerprint so crawler previews retain useful context and provenance.
+- Upgrade Playwright to the advisory-fixed release line and audit development
+  dependencies as well as runtime dependencies before CI or publication.
+- Make release validation compare all package dependency declarations directly
+  with the lockfile before building or publishing.
+- Promote public artifact inventory, generated HTML accessibility, and critical
+  browser-shell performance checks into the canonical production gate.
+- Extend release-browser smoke to rebuild saved sources through the user-facing
+  reviewed-learning action and verify accepted memory survives the write.
+- Add a browser-level full-backup download, destructive clear, and fingerprinted
+  restore drill to the release certification path.
+- Generate and validate a bounded SPDX dependency inventory, retaining it with
+  verification and tagged-release evidence for vulnerability response.
+- Canonicalize SBOM package ordering, namespace, creator, and release-date
+  metadata so identical locked inputs produce byte-identical evidence across
+  Node lanes.
+- Exclude generated SBOM evidence from production container contexts and assert
+  the boundary in container smoke tests.
+- Preserve the complete public experiment allowlist in the runtime image so
+  Node readiness and artifact-gallery links remain internally consistent.
+- Make container smoke assert the presence of the Node sample-graph startup
+  helper that the runtime imports directly.
+- Retain the validated dependency SBOM with every Pages publication-evidence
+  artifact for static-deployment incident comparison.
+- Restore the runtime sample-graph page helper to the container allowlist so
+  the standalone server's startup import contract is complete.
+- Let the service-health verifier consume bounded stdin for direct monitoring
+  pipelines as well as saved response fixtures.
 - Add a deterministic, accessible SVG graph projection to the public sample
   explainer, so visitors can see concepts and evidence-backed relations before
   opening the interactive workbench; keep the page script-free and CSP-safe.
@@ -31,6 +271,25 @@ All notable changes to LLM Field Notes are documented here.
   Playwright, keeping local browser failures actionable.
 - Make Obsidian vault export fail closed if generated Canvas node identities,
   concept note paths, or edge endpoints are malformed.
+- Make the container release smoke reject repository metadata, agent state,
+  dependency directories, private-data directories, and training artifacts
+  leaking into the production image.
+- Add a direct validated `Graph.canvas` download so the internal graph can
+  open in Obsidian without first exporting the full learning-note vault.
+- Publish a deterministic standalone sample `Graph.canvas` alongside the
+  sample JSON and link it from the crawler-readable sample explainer.
+- Extend the deployed Pages probe to verify the live sample `Graph.canvas`
+  projection, not just the HTML explainer and source graph.
+- Extend standalone Node smoke coverage to verify the same sample Canvas asset,
+  MIME contract, and native edge endpoint integrity as the Pages deployment.
+- Decouple direct Canvas export from full source-bearing vault serialization, so
+  large source text cannot block a lightweight native graph projection.
+- Make direct `Graph.canvas` downloads self-contained text-card projections,
+  usable when opened without the accompanying Obsidian vault files.
+- Include the authoritative graph fingerprint in standalone Canvas exports,
+  preserving provenance when the projection is shared without its vault.
+- Add a redacted standalone Canvas export that removes source text, evidence,
+  and URIs before a graph view is shared publicly.
 - Fix single-file imports so the edited title and document body are authoritative
   when building the graph; only multi-file selections remain in the queued batch
   path.
@@ -677,6 +936,12 @@ All notable changes to LLM Field Notes are documented here.
   metadata that does not match the running package version.
 - Prevented the service worker from caching HTML login or error pages as
   non-HTML shell assets when a gateway returns them with HTTP 200.
+- Rejected non-HTML responses for HTML shell assets too, preventing an
+  upstream API or gateway representation from replacing the cached workbench
+  document.
+- Rejected invalid and oversized `Expect: 100-continue` request bodies before
+  interim acceptance, reducing unnecessary upload and parser work at the
+  extraction boundary.
 - Aligned extractor-guidance ordering with its caller-provided inspection
   timestamp, preventing clock-skewed reviews from losing priority after
   freshness filtering.

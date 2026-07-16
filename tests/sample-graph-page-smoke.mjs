@@ -14,10 +14,16 @@ assert(page.includes("A document,"), "sample graph page should explain the docum
 assert(page.includes("THE GRAPH AT A GLANCE") && page.includes("sample-graph-visual"), "sample graph page should include a visual graph projection");
 assert(page.includes("sample-graph-visual-description") && page.includes("Attention uses Weighted lookup"), "sample graph visual should expose an accessible relation summary");
 assert(page.includes("Graph.canvas") && page.includes("Obsidian vault"), "sample graph page should explain the native Obsidian projection path");
+assert(page.includes("examples/sample-graph.canvas") && page.includes("Open in Obsidian"), "sample graph page should link directly to the native Canvas projection");
 assert(page.includes("<tspan") && page.includes("sample-graph-node-confidence"), "sample graph nodes should wrap long labels inside their visual cards");
 assert(page.includes("CONCEPTS WITH EVIDENCE") && page.includes("RELATIONS WITH GROUNDS"), "sample graph page should expose both graph collections");
 assert(page.includes("fnv64-4d8c362569fbcce7-2627"), "sample graph page should expose the authoritative graph fingerprint");
 assert(page.includes("https://wiki.example.test/field-notes/#sample"), "sample graph page should preserve the configured workbench origin");
+const structuredData = JSON.parse(page.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)?.[1] || "{}");
+assert.equal(structuredData["@type"], "TechArticle", "sample graph structured data should describe the page as a technical article");
+assert.equal(structuredData.image, "https://wiki.example.test/field-notes/social-card.png", "sample graph structured data should align with the production share-card image");
+assert.equal(structuredData.about?.identifier, "fnv64-4d8c362569fbcce7-2627", "sample graph structured data should bind discovery metadata to the authoritative graph fingerprint");
+assert(structuredData.keywords.includes("human feedback") && structuredData.about?.name, "sample graph structured data should expose the document-to-graph learning context");
 assert(page.includes("script-src 'none'") && !/<script\b[^>]*src=/i.test(page), "sample graph page should remain script-free and CSP-compatible");
 assert(!page.includes("SECRET"), "sample graph fixture should not contain private source markers");
 

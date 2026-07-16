@@ -29,7 +29,7 @@ const lexicalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0
 const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
 
 const rootRealPath = await realpath(root);
-const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN);
+const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN, { requireSecure: true });
 const publicRepository = requirePublicRepository(process.env.PUBLIC_REPOSITORY_URL);
 const rawBuildRevision = typeof process.env.BUILD_REVISION === "string" && process.env.BUILD_REVISION.trim()
   ? process.env.BUILD_REVISION.trim().toLowerCase()
@@ -422,15 +422,19 @@ async function buildPages() {
   await writeFile(resolve(buildOutput, ASSET_MANIFEST), `${JSON.stringify(assetManifest, null, 2)}\n`, "utf8");
   const finalOutputEntries = await collectFiles(buildOutput);
   const expected = new Set([...PUBLIC_FILES, "sample-graph.html", ...generatedNotePages, ".nojekyll", "feed.xml", ASSET_MANIFEST, ...(publicOrigin ? ["sitemap.xml"] : [])]);
+  const finalOutputSet = new Set(finalOutputEntries);
   for (const entry of finalOutputEntries) {
     if (!expected.has(entry)) throw new Error(`unexpected file in Pages bundle: ${entry}`);
+  }
+  if (finalOutputEntries.length !== expected.size || [...expected].some((entry) => !finalOutputSet.has(entry))) {
+    throw new Error("Pages bundle does not contain exactly the expected published and generated files.");
   }
   const outputSizes = await mapWithConcurrency(finalOutputEntries, async (entry) => (await stat(resolve(buildOutput, entry))).size);
   const totalOutputBytes = outputSizes.reduce((total, size) => total + size, 0);
   if (totalOutputBytes > MAX_PUBLIC_ASSET_BYTES) {
     throw new Error(`Pages bundle exceeds the ${MAX_PUBLIC_ASSET_BYTES / (1024 * 1024)} MB aggregate asset limit.`);
   }
-  return { generatedNotePages, fileCount: PUBLIC_FILES.length + generatedNotePages.length + 4 + (publicOrigin ? 1 : 0) };
+  return { generatedNotePages, fileCount: finalOutputEntries.length };
 }
 
 async function publishPages() {
@@ -439,6 +443,10 @@ async function publishPages() {
   let published = false;
   try {
     try {
+      const outputMetadata = await lstat(output);
+      if (outputMetadata.isSymbolicLink()) {
+        throw new Error("Pages output must not be a symbolic link.");
+      }
       await stat(output);
       await rm(previous, { recursive: true, force: true });
       await rename(output, previous);

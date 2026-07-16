@@ -4,7 +4,32 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
-import { smokePagesDeployment } from "../scripts/smoke-pages-deployment.mjs";
+import { parsePagesSmokeConfig, smokePagesDeployment } from "../scripts/smoke-pages-deployment.mjs";
+
+assert.deepEqual(parsePagesSmokeConfig({}), {
+  attempts: 12,
+  retryDelayMs: 1000,
+  expectedRevision: null
+}, "Pages deployment smoke should retain bounded defaults when retry settings are absent");
+assert.deepEqual(parsePagesSmokeConfig({
+  PAGES_SMOKE_ATTEMPTS: "30",
+  PAGES_SMOKE_RETRY_DELAY_MS: "2000",
+  PAGES_EXPECTED_REVISION: "abcdef1234567890"
+}), {
+  attempts: 30,
+  retryDelayMs: 2000,
+  expectedRevision: "abcdef1234567890"
+}, "Pages deployment smoke should preserve valid bounded retry settings");
+assert.throws(
+  () => parsePagesSmokeConfig({ PAGES_SMOKE_ATTEMPTS: "oops" }),
+  /PAGES_SMOKE_ATTEMPTS must be a positive integer/,
+  "malformed Pages retry counts should fail closed"
+);
+assert.throws(
+  () => parsePagesSmokeConfig({ PAGES_SMOKE_RETRY_DELAY_MS: "0" }),
+  /PAGES_SMOKE_RETRY_DELAY_MS must be a positive integer/,
+  "zero Pages retry delays should fail closed"
+);
 
 const fixtureRoot = resolve(new URL("../.deployment-smoke-dist/", import.meta.url).pathname);
 let root = fixtureRoot;
@@ -14,6 +39,7 @@ const types = {
   ".xml": "application/xml; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".canvas": "application/octet-stream",
   ".webmanifest": "application/manifest+json; charset=utf-8"
 };
 const server = createServer(async (request, response) => {
@@ -103,6 +129,40 @@ await assert.rejects(
 );
 assert.equal(canceledTruncatedResponse, true, "Pages deployment smoke should cancel truncated response bodies");
 
+await assert.rejects(
+  () => smokePagesDeployment("https://wiki.example.test/field-notes/", {
+    attempts: 1,
+    requestTimeoutMs: 5,
+    fetchImpl: async () => new Promise(() => {})
+  }),
+  /timed out/,
+  "Pages deployment smoke should settle when a target fetch ignores cancellation"
+);
+
+let canceledHangingResponse = false;
+await assert.rejects(
+  () => smokePagesDeployment("https://wiki.example.test/field-notes/", {
+    attempts: 1,
+    requestTimeoutMs: 5,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      url: "https://wiki.example.test/field-notes/",
+      headers: { get: (name) => name === "content-type" ? "text/html" : null },
+      body: {
+        getReader: () => ({
+          read: async () => new Promise(() => {}),
+          cancel: async () => { canceledHangingResponse = true; },
+          releaseLock: () => {}
+        })
+      }
+    })
+  }),
+  /timed out/,
+  "Pages deployment smoke should settle when a streamed response body ignores cancellation"
+);
+assert.equal(canceledHangingResponse, true, "Pages deployment smoke should cancel a timed-out streamed response reader");
+
 await new Promise((resolveServer) => server.listen(0, "127.0.0.1", resolveServer));
 const { port } = server.address();
 try {
@@ -112,7 +172,8 @@ try {
   });
   const result = await smokePagesDeployment(`http://127.0.0.1:${port}/field-notes/`, { attempts: 1, expectedRevision: "abcdef1234567890" });
   assert.equal(result.manifestFiles > 0, true);
-  assert.equal(result.checked, result.manifestFiles + 12);
+  assert.equal(result.endpointChecks >= 13, true, "Pages deployment smoke should retain its critical endpoint checks");
+  assert.equal(result.checked, result.manifestFiles + result.endpointChecks);
   await assert.rejects(
     () => smokePagesDeployment(`http://127.0.0.1:${port}/field-notes/`, { attempts: 1, expectedRevision: "deadbeef" }),
     /failed its deployed-content assertion/,

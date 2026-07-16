@@ -4,6 +4,9 @@ import { relative } from "node:path";
 import { parseJsonWithUniqueKeys } from "../graph-core.js";
 import { GENERATED_PUBLIC_ASSETS, LEARNING_NOTE_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, OFFLINE_SHELL_ASSETS, PUBLIC_ASSETS, PUBLIC_SITEMAP_ASSETS } from "./public-assets.mjs";
 import { readServiceWorkerShellAssets } from "./service-worker-cache.mjs";
+import { buildSampleGraphCanvas } from "./sample-graph-canvas.mjs";
+import { verifyCanvasProjection } from "./verify-canvas.mjs";
+import { checkWorkflows } from "./check-workflows.mjs";
 
 const packageManifest = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json");
 const packageLock = parseJsonWithUniqueKeys(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"), "package-lock.json");
@@ -18,8 +21,9 @@ const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "ut
 const dockerignore = await readFile(new URL("../.dockerignore", import.meta.url), "utf8");
 const graphCorrectionTemplate = await readFile(new URL("../.github/ISSUE_TEMPLATE/graph_correction.yml", import.meta.url), "utf8");
 const securityTxt = await readFile(new URL("../.well-known/security.txt", import.meta.url), "utf8");
+const sampleGraph = parseJsonWithUniqueKeys(await readFile(new URL("../examples/sample-graph.json", import.meta.url), "utf8"), "sample graph");
+const sampleGraphCanvas = await readFile(new URL("../examples/sample-graph.canvas", import.meta.url), "utf8");
 const version = packageManifest.version;
-const workflowDirectory = new URL("../.github/workflows/", import.meta.url);
 const rootRealPath = await realpath(new URL("../", import.meta.url));
 const isContained = (candidate) => {
   const relativePath = relative(rootRealPath, candidate);
@@ -61,10 +65,10 @@ for (const target of localLlmsLinks) {
     throw new Error(`llms.txt links to a missing or unpublished asset: ${target}`);
   }
 }
-const workflowFiles = (await readdir(workflowDirectory, { withFileTypes: true }))
-  .filter((entry) => entry.isFile() && /\.(?:yaml|yml)$/i.test(entry.name))
-  .map((entry) => `.github/workflows/${entry.name}`)
-  .sort();
+if (sampleGraphCanvas !== buildSampleGraphCanvas(sampleGraph)) {
+  throw new Error("examples/sample-graph.canvas is out of sync with examples/sample-graph.json");
+}
+verifyCanvasProjection(parseJsonWithUniqueKeys(sampleGraphCanvas, "sample Graph.canvas"), "sample Graph.canvas");
 for (const [label, assets] of [["public assets", PUBLIC_ASSETS], ["offline shell assets", OFFLINE_SHELL_ASSETS], ["sitemap assets", PUBLIC_SITEMAP_ASSETS]]) {
   const duplicates = assets.filter((asset, index) => assets.indexOf(asset) !== index);
   if (duplicates.length) throw new Error(`${label} contain duplicate entries: ${[...new Set(duplicates)].join(", ")}`);
@@ -82,6 +86,11 @@ if (packageLock.lockfileVersion !== 3
   || lockedRoot.license !== packageManifest.license
   || JSON.stringify(lockedRoot.engines) !== JSON.stringify(packageManifest.engines)) {
   throw new Error("package-lock.json root metadata is out of sync with package.json");
+}
+for (const dependencyField of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+  if (JSON.stringify(lockedRoot[dependencyField] || {}) !== JSON.stringify(packageManifest[dependencyField] || {})) {
+    throw new Error(`package-lock.json ${dependencyField} are out of sync with package.json`);
+  }
 }
 if (release.version !== version) throw new Error(`version.json (${release.version}) does not match package.json (${version})`);
 if (!["stable", "unreleased"].includes(release.channel)) throw new Error(`version.json channel is unsupported: ${release.channel}`);
@@ -232,30 +241,6 @@ for (const noteId of publishedNoteIds) {
     throw new Error(`curriculum question is out of sync for learning note ${noteId}`);
   }
 }
-for (const workflowFile of workflowFiles) {
-  const workflow = await readFile(new URL(`../${workflowFile}`, import.meta.url), "utf8");
-  if (!/^\s*permissions:\s*$/m.test(workflow)) {
-    throw new Error(`${workflowFile} must declare an explicit top-level permissions policy`);
-  }
-  if (/\bpermissions:\s*write-all\b|\bwrite-all\b/.test(workflow)) {
-    throw new Error(`${workflowFile} must not grant write-all permissions`);
-  }
-  if (/^\s*pull_request_target\s*:/m.test(workflow)) {
-    throw new Error(`${workflowFile} must not execute untrusted pull requests with pull_request_target`);
-  }
-  if (!/^\s*concurrency:\s*$/m.test(workflow)) {
-    throw new Error(`${workflowFile} must declare concurrency controls`);
-  }
-  const mutableActions = [...workflow.matchAll(/^\s*uses:\s*([^\s@]+)@([^\s#]+)/gm)]
-    .filter((match) => !/^[0-9a-f]{40}$/i.test(match[2]));
-  if (mutableActions.length) {
-    throw new Error(`${workflowFile} contains mutable GitHub Action references: ${mutableActions.map((match) => `${match[1]}@${match[2]}`).join(", ")}`);
-  }
-  const checkoutCount = [...workflow.matchAll(/^\s*uses:\s*actions\/checkout@[^\s#]+/gm)].length;
-  const disabledCheckoutCredentialCount = [...workflow.matchAll(/^\s*persist-credentials:\s*false\s*$/gm)].length;
-  if (disabledCheckoutCredentialCount < checkoutCount) {
-    throw new Error(`${workflowFile} must disable persisted checkout credentials`);
-  }
-}
+await checkWorkflows();
 await import("./check-artifacts.mjs");
 console.log(`release check ok: ${version} (${release.channel})`);

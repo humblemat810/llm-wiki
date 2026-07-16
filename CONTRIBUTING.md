@@ -92,6 +92,10 @@ The release check also rejects mutable GitHub Action references; CodeQL and
 OpenSSF Scorecard run as separate repository-security workflows, so review
 their findings before merging changes that affect runtime or deployment
 boundaries.
+The repository's `CODEOWNERS` file identifies the owner for workflow, runtime,
+security, Docker, schema, and persistence-boundary changes. Enable branch
+protection with required CODEOWNERS review when operating a production fork;
+the file is a review signal, not a substitute for the protected-branch setting.
 
 On pull requests opened from a public fork, CodeQL may report a non-fatal
 `Resource not accessible by integration` message while collecting optional

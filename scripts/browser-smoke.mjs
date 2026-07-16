@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { chromium, firefox, webkit } from "playwright";
+import { prepareDiagnosticScreenshotPath } from "./browser-diagnostics.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const APP_VERSION = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")).version;
@@ -14,6 +15,12 @@ const engineName = String(process.env.BROWSER_ENGINE || "chromium").toLowerCase(
 if (!engines[engineName]) throw new Error(`BROWSER_ENGINE must be one of: ${Object.keys(engines).join(", ")}.`);
 const debug = (message) => {
   if (process.env.BROWSER_SMOKE_DEBUG === "1") console.error(`[browser-smoke] ${message}`);
+};
+const MAX_BROWSER_ERROR_RECORDS = 100;
+const MAX_BROWSER_ERROR_CHARS = 512;
+const appendBoundedDiagnostic = (records, value) => {
+  if (records.length >= MAX_BROWSER_ERROR_RECORDS) return;
+  records.push(String(value).slice(0, MAX_BROWSER_ERROR_CHARS));
 };
 const diagnosticDirectory = typeof process.env.BROWSER_SMOKE_ARTIFACT_DIR === "string"
   && process.env.BROWSER_SMOKE_ARTIFACT_DIR.trim()
@@ -80,9 +87,9 @@ if (configuredTarget) {
     cwd: root,
     env: {
       ...process.env,
-    HOST: "127.0.0.1",
-    PORT: String(port),
-    BUILD_REVISION: localRevision,
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      BUILD_REVISION: localRevision,
       PUBLIC_ORIGIN: baseUrl.origin
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -159,6 +166,8 @@ let browser;
 let context;
 let page;
 let samplePage;
+let checkpointPage;
+let expectedRemoteFailure = false;
 try {
   debug(`target ${baseUrl.href}`);
   debug("waiting for server readiness");
@@ -173,9 +182,12 @@ try {
   page.setDefaultTimeout(10000);
   const pageErrors = [];
   const consoleErrors = [];
-  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("pageerror", (error) => appendBoundedDiagnostic(pageErrors, error?.message || error));
   page.on("console", (message) => {
-    if (message.type() === "error" && !message.text().includes("frame-ancestors")) consoleErrors.push(message.text());
+    if (expectedRemoteFailure && message.type() === "error" && /503|Service Unavailable/i.test(message.text())) return;
+    if (message.type() === "error" && !message.text().includes("frame-ancestors")) {
+      appendBoundedDiagnostic(consoleErrors, message.text());
+    }
   });
 
   debug("loading workbench");
@@ -195,6 +207,18 @@ try {
   assert.match(String(servedRelease.revision || ""), /^(?:unknown|[0-9a-f]{7,64})$/, "the browser should load bounded source revision metadata");
   if (expectedRevision !== null) {
     assert.equal(servedRelease.revision, expectedRevision, "the browser should exercise the expected deployed source revision");
+    if (expectedRevision !== "unknown") {
+      await waitForText(
+        page.locator("#release-version"),
+        new RegExp(`${APP_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*${expectedRevision.slice(0, 12)}`),
+        5000
+      );
+      assert.match(
+        await page.locator("#release-version").textContent() || "",
+        new RegExp(expectedRevision.slice(0, 12)),
+        "the visible release footer should expose the same canonical source revision as version.json"
+      );
+    }
   }
   const servedManifest = await page.evaluate(async () => {
     const response = await fetch(new URL("./manifest.webmanifest", location.href), { cache: "no-store" });
@@ -314,9 +338,11 @@ try {
   debug("loading public sample graph page");
   samplePage = await context.newPage();
   samplePage.setDefaultTimeout(10000);
-  samplePage.on("pageerror", (error) => pageErrors.push(`sample-graph: ${error.message}`));
+  samplePage.on("pageerror", (error) => appendBoundedDiagnostic(pageErrors, `sample-graph: ${error?.message || error}`));
   samplePage.on("console", (message) => {
-    if (message.type() === "error" && !message.text().includes("frame-ancestors")) consoleErrors.push(`sample-graph: ${message.text()}`);
+    if (message.type() === "error" && !message.text().includes("frame-ancestors")) {
+      appendBoundedDiagnostic(consoleErrors, `sample-graph: ${message.text()}`);
+    }
   });
   await samplePage.goto(new URL("sample-graph.html", baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 10000 });
   assert.equal(await samplePage.title(), "Sample knowledge graph · LLM Field Notes", "the public sample graph should expose its page title");
@@ -326,6 +352,7 @@ try {
   assert(await samplePage.locator(".sample-graph-card").count() >= 1, "the public sample graph should render concept cards");
   assert(await samplePage.locator(".sample-graph-relations li").count() >= 1, "the public sample graph should render relation rows");
   assert(await samplePage.locator("a[href*='#sample']").count() >= 1, "the public sample graph should link back to the interactive sample");
+  assert.equal(await samplePage.locator("a[href$='examples/sample-graph.canvas']").count(), 1, "the public sample graph should expose one direct Obsidian Canvas download");
   const sampleLayout = await samplePage.evaluate(() => {
     const viewport = window.innerWidth;
     const overflowing = [...document.querySelectorAll("*")]
@@ -357,6 +384,92 @@ try {
   await waitForText(page.locator("#ingest-status"), /Revision/);
   assert.match(await waitForText(page.locator("#graph-health"), /provenance/), /provenance/, "the browser should render graph health after local extraction");
   assert.notEqual(await page.locator("#hero-node-count").textContent(), "0", "the sample walkthrough should render concepts");
+  assert.match(await page.locator("#graph-health").textContent() || "", /backup checkpoint is missing or out of date/i, "a populated graph without a current full backup should disclose the backup reminder");
+  assert.equal(await page.locator("#graph-health [data-storage-action='backup']").count(), 1, "the backup reminder should provide one actionable download control");
+  if (!configuredTarget) {
+    debug("exercising same-origin model extraction");
+    await page.locator("details.extractor-settings").evaluate((element) => {
+      element.open = true;
+    });
+    await page.locator("#extractor-endpoint").fill("/api/extract-graph");
+    await page.locator("#extractor-endpoint").press("Tab");
+    await waitForText(page.locator("#extractor-mode"), /^MODEL$/);
+    assert.equal(
+      await page.locator("#privacy-live").getAttribute("data-state"),
+      "MODEL",
+      "configuring a same-origin extractor should disclose model mode to the browser"
+    );
+    await page.locator("#document-title").fill("Browser remote extraction");
+    await page.locator("#document-input").fill("A browser request exercises same-origin model extraction and preserves reviewed context for the knowledge graph.");
+    await page.locator("#ingest-document").click();
+    await waitForText(page.locator("#ingest-status"), /Revision/);
+    if (engineName === "webkit") {
+      debug("WebKit service-worker fetches bypass the pinned runner's request interception; skipping the synthetic provider-failure drill");
+    } else {
+      debug("exercising model extraction failure recovery");
+    const remoteEndpointPattern = /\/api\/extract-graph(?:\?.*)?$/;
+    let remoteFailureIntercepted = false;
+    await page.route(remoteEndpointPattern, async (route) => {
+      remoteFailureIntercepted = true;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "simulated provider outage" })
+      });
+    });
+    const failedRemoteTitle = "Remote outage draft";
+    const failedRemoteText = "This draft must remain available when the configured model endpoint is temporarily unavailable.";
+    await page.locator("#document-title").fill(failedRemoteTitle);
+    await page.locator("#document-input").fill(failedRemoteText);
+    expectedRemoteFailure = true;
+    await page.locator("#ingest-document").click();
+    await waitForText(page.locator("#ingest-status"), /could not be extracted|provider|503/i);
+    expectedRemoteFailure = false;
+    assert.equal(remoteFailureIntercepted, true, "the browser failure drill should intercept the model endpoint request");
+    assert.equal(await page.locator("#document-title").inputValue(), failedRemoteTitle, "remote extraction failures should preserve the document title draft");
+    assert.equal(await page.locator("#document-input").inputValue(), failedRemoteText, "remote extraction failures should preserve the document text draft");
+    await page.unroute(remoteEndpointPattern);
+    }
+    await page.locator("#extractor-endpoint").fill("");
+    await page.locator("#extractor-endpoint").press("Tab");
+    await waitForText(page.locator("#extractor-mode"), /^LOCAL$/);
+    assert.equal(
+      await page.locator("#privacy-live").getAttribute("data-state"),
+      "LOCAL",
+      "clearing the extractor endpoint should return the browser to local mode"
+    );
+  }
+  checkpointPage = await context.newPage();
+  checkpointPage.setDefaultTimeout(10000);
+  await checkpointPage.goto(new URL("#workbench", baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 10000 });
+  await checkpointPage.locator("#workbench").waitFor({ state: "attached" });
+  await waitForText(checkpointPage.locator("#graph-health"), /backup checkpoint is missing or out of date/i);
+  const checkpointDownloadPromise = page.waitForEvent("download");
+  await page.locator("#download-backup").click();
+  const checkpointDownload = await checkpointDownloadPromise;
+  assert.equal(await checkpointDownload.failure(), null, "the cross-tab checkpoint backup should download successfully");
+  await waitForText(page.locator("#projection-status"), /Full backup downloaded/);
+  const checkpointStorageValue = await page.evaluate(() => localStorage.getItem("llm-field-notes-last-backup-fingerprint"));
+  assert.match(checkpointStorageValue || "", /^fnv64-[0-9a-f]{16}-\d+$/, "backup checkpoint storage should contain only the bounded graph fingerprint");
+  assert(!String(checkpointStorageValue || "").includes("Attention uses context"), "backup checkpoint storage must not contain source text");
+  try {
+    await checkpointPage.waitForFunction(() => !/backup checkpoint is missing or out of date|undo history is not included in a full backup checkpoint/i.test(
+      document.querySelector("#graph-health")?.textContent || ""
+    ));
+  } catch (error) {
+    const checkpointDiagnostics = await checkpointPage.evaluate(() => ({
+      storedCheckpoint: localStorage.getItem("llm-field-notes-last-backup-fingerprint"),
+      health: document.querySelector("#graph-health")?.textContent?.slice(0, 1200) || ""
+    })).catch(() => ({ storedCheckpoint: null, health: "" }));
+    throw new Error(`${error?.message || "backup checkpoint did not synchronize"}; checkpoint=${String(checkpointDiagnostics.storedCheckpoint || "").slice(0, 96)}; health=${checkpointDiagnostics.health}`);
+  }
+  assert.doesNotMatch(
+    await checkpointPage.locator("#graph-health").textContent() || "",
+    /backup checkpoint is missing or out of date|undo history is not included in a full backup checkpoint/i,
+    "another tab should clear its stale backup warning after a checkpoint is recorded"
+  );
+  await checkpointPage.close();
+  checkpointPage = null;
   debug("reviewing a concept");
   await page.locator(".mini-button[data-view='list']").click();
   const confirmConcept = page.locator("#node-list button[data-feedback='up']").first();
@@ -380,6 +493,10 @@ try {
   }
   assert.equal(await correctionLink.getAttribute("target"), "_blank", "inspected graph items should expose a safely opened correction link");
   assert.equal(await correctionLink.getAttribute("rel"), "noopener noreferrer", "correction links should not grant the issue form opener access to the workbench");
+  const correctionTemplateButton = page.locator("#inspector-panel button[data-copy-graph-correction]").first();
+  await correctionTemplateButton.waitFor({ state: "visible" });
+  await correctionTemplateButton.click();
+  await waitForText(page.locator("#ingest-status"), /Privacy-safe correction template copied/);
 
   debug("editing a loaded single document before building");
   await page.locator("#document-file").setInputFiles({
@@ -417,6 +534,18 @@ try {
   await page.locator("#ingest-document").click();
   await waitForText(page.locator("#ingest-status"), /2 documents added/);
 
+  debug("applying reviewed learning to saved sources");
+  page.once("dialog", (dialog) => dialog.accept());
+  const rebuildAction = page.locator("#graph-health button[data-learning-action='rebuild']");
+  await rebuildAction.waitFor({ state: "visible" });
+  await rebuildAction.click();
+  await waitForText(page.locator("#ingest-status"), /source(?:s)? rebuilt/);
+  assert.match(
+    await page.locator("#graph-health").textContent() || "",
+    /learning:\s*1 accepted/,
+    "applying reviewed learning to saved sources should preserve the accepted decision in the persisted workbench"
+  );
+
   debug("exporting Obsidian vault");
   await page.locator("#download-vault").scrollIntoViewIfNeeded();
   const vaultDownloadPromise = page.waitForEvent("download");
@@ -429,6 +558,33 @@ try {
   const vaultBytes = await readFile(vaultDownloadPath);
   assert.equal(vaultBytes.subarray(0, 4).toString("hex"), "504b0304", "the Obsidian vault download should be a ZIP archive");
   await waitForText(page.locator("#projection-status"), /Obsidian vault downloaded/);
+  debug("exporting direct Obsidian Canvas projection");
+  const canvasDownloadPromise = page.waitForEvent("download");
+  await page.locator("#download-canvas").click();
+  const canvasDownload = await canvasDownloadPromise;
+  assert.equal(await canvasDownload.failure(), null, "the direct Graph.canvas download should complete");
+  assert.equal(canvasDownload.suggestedFilename(), "Graph.canvas", "the direct Canvas projection should use the native Obsidian filename");
+  const canvasDownloadPath = await canvasDownload.path();
+  assert(canvasDownloadPath, "the browser should expose the direct Canvas projection bytes");
+  const canvasText = await readFile(canvasDownloadPath, "utf8");
+  const canvasPayload = JSON.parse(canvasText);
+  assert(Array.isArray(canvasPayload.nodes) && Array.isArray(canvasPayload.edges), "the direct Canvas projection should contain native nodes and edges");
+  assert(canvasPayload.nodes.length > 0, "the direct Canvas projection should include the reviewed graph nodes");
+  assert(canvasPayload.nodes.every((node) => node.type === "text" && typeof node.text === "string"), "the direct Canvas projection should be self-contained when opened without the vault ZIP");
+  assert(canvasPayload.nodes.some((node) => node.id === "projection-provenance" && /Graph fingerprint: fnv64-/.test(node.text)), "the direct Canvas projection should expose its graph fingerprint");
+  assert(canvasPayload.edges.every((edge) => edge.fromNode !== "projection-provenance" && edge.toNode !== "projection-provenance"), "the direct Canvas relations should target concept cards, not provenance metadata");
+  await waitForText(page.locator("#projection-status"), /Graph\.canvas downloaded/);
+  debug("exporting redacted Obsidian Canvas projection");
+  const redactedCanvasDownloadPromise = page.waitForEvent("download");
+  await page.locator("#download-redacted-canvas").click();
+  const redactedCanvasDownload = await redactedCanvasDownloadPromise;
+  assert.equal(await redactedCanvasDownload.failure(), null, "the redacted Graph.canvas download should complete");
+  assert.equal(redactedCanvasDownload.suggestedFilename(), "Graph-redacted.canvas", "the redacted Canvas projection should use a distinct filename");
+  const redactedCanvasDownloadPath = await redactedCanvasDownload.path();
+  assert(redactedCanvasDownloadPath, "the browser should expose the redacted Canvas projection bytes");
+  const redactedCanvasText = await readFile(redactedCanvasDownloadPath, "utf8");
+  assert(!redactedCanvasText.includes("Attention uses context") && !redactedCanvasText.includes("source text"), "the redacted Canvas projection should not contain source-bearing evidence");
+  await waitForText(page.locator("#projection-status"), /Redacted Graph\.canvas downloaded/);
   debug("round-tripping Obsidian vault");
   await page.locator("#document-file").setInputFiles({
     name: "llm-field-notes-vault.zip",
@@ -438,6 +594,38 @@ try {
   await waitForText(page.locator("#ingest-status"), /Obsidian vault loaded/);
   await page.locator("#ingest-document").click();
   await waitForText(page.locator("#ingest-status"), /Obsidian vault feedback imported|No matching graph items or changes were found/);
+
+  debug("drilling full backup restore");
+  const backupDownloadPromise = page.waitForEvent("download");
+  await page.locator("#download-backup").click();
+  const backupDownload = await backupDownloadPromise;
+  assert.equal(await backupDownload.failure(), null, "the full backup download should complete");
+  assert.equal(backupDownload.suggestedFilename(), "llm-field-notes-backup.json", "the full backup should use the stable filename");
+  const backupDownloadPath = await backupDownload.path();
+  assert(backupDownloadPath, "the browser should expose the full backup bytes");
+  const backupText = await readFile(backupDownloadPath, "utf8");
+  const backupPayload = JSON.parse(backupText);
+  assert.equal(backupPayload.format, "llm-field-notes/backup@1", "the browser backup should use the versioned envelope");
+  assert.match(backupPayload.graphFingerprint || "", /^fnv64-[0-9a-f]{16}-\d+$/, "the browser backup should carry a content fingerprint");
+  await waitForText(page.locator("#projection-status"), /Full backup downloaded/);
+  assert.doesNotMatch(
+    await page.locator("#graph-health").textContent() || "",
+    /backup checkpoint is missing or out of date|undo history is not included in a full backup checkpoint/i,
+    "a successful full backup should clear the stale backup reminder"
+  );
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("#clear-graph").click();
+  await waitForText(page.locator("#ingest-status"), /Local graph cleared/);
+  assert.equal(await page.locator("#hero-node-count").textContent(), "0", "the backup drill should clear the graph before restoring it");
+  assert.match(await page.locator("#graph-health").textContent() || "", /Undo history is not included in a full backup checkpoint/i, "an empty visible graph with undo history should explicitly disclose the uncheckpointed recoverable state");
+  assert.equal(await page.locator("#graph-health [data-storage-action='backup']").count(), 1, "recoverable undo history should retain a direct backup action after clear");
+  await page.locator("#document-file").setInputFiles({
+    name: "llm-field-notes-backup.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(backupText, "utf8")
+  });
+  await waitForText(page.locator("#ingest-status"), /Full backup restored/);
+  assert.notEqual(await page.locator("#hero-node-count").textContent(), "0", "full backup restore should recover the graph through the browser import path");
 
   debug("verifying destructive clear and undo recovery");
   page.once("dialog", (dialog) => dialog.accept());
@@ -485,6 +673,20 @@ try {
       await page.context().setOffline(false);
     }
   }
+  debug("forgetting all local data");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("#forget-local-data").click();
+  await waitForText(page.locator("#ingest-status"), /All local data forgotten/);
+  assert.equal(await page.locator("#hero-node-count").textContent(), "0", "forgetting local data should clear the visible graph");
+  const remainingLocalKeys = await page.evaluate(() => {
+    const keys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith("llm-field-notes-")) keys.push(key);
+    }
+    return keys;
+  });
+  assert.deepEqual(remainingLocalKeys, [], "forgetting local data should remove every application-namespaced synchronous storage key");
   assert.deepEqual(pageErrors, [], "browser smoke should not produce uncaught page errors");
   assert.deepEqual(consoleErrors, [], "browser smoke should not produce console errors");
   console.log(`browser smoke ok: ${engineName}`);
@@ -494,8 +696,7 @@ try {
     console.error(`browser diagnostics: url=${page.url()} title=${await page.title().catch(() => "")} body=${diagnostic.slice(0, 1200)}`);
     if (diagnosticDirectory) {
       try {
-        await mkdir(diagnosticDirectory, { recursive: true });
-        const screenshotPath = resolve(diagnosticDirectory, `browser-${engineName}-failure.png`);
+        const screenshotPath = await prepareDiagnosticScreenshotPath(diagnosticDirectory, engineName);
         await page.screenshot({ path: screenshotPath, fullPage: false });
         console.error(`browser failure screenshot: ${screenshotPath}`);
       } catch (screenshotError) {
@@ -507,6 +708,7 @@ try {
   throw error;
 } finally {
   await samplePage?.close().catch(() => {});
+  await checkpointPage?.close().catch(() => {});
   await context?.close().catch(() => {});
   await browser?.close().catch(() => {});
   if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");

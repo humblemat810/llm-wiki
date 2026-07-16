@@ -32,8 +32,19 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Verify supported Node runtime
         run: npm run runtime:check
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit all locked dependencies
+        run: npm audit --audit-level=high
+      - name: Generate dependency SBOM
+        run: npm run sbom:generate
+      - name: Verify dependency SBOM
+        run: npm run verify:sbom
+      - name: Retain dependency SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-sbom-node-${{ matrix.node-version }}
+          path: sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Build Pages artifact for artifact-dependent tests
         run: npm run build:pages
       - name: Verify Pages artifact for artifact-dependent tests
@@ -64,7 +75,7 @@ jobs:
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.documentation"}}' llm-field-notes:ci)" = "$documentation"
           test "$(docker image inspect --format '{{.Config.User}}' llm-field-notes:ci)" = "node"
           test "$(docker image inspect --format '{{.Config.StopSignal}}' llm-field-notes:ci)" = "SIGTERM"
-          docker run --rm --entrypoint sh llm-field-notes:ci -c 'test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/scripts/check-runtime.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/experiments/verify-backup.mjs'
+          docker run --rm --entrypoint sh llm-field-notes:ci -c 'test ! -e /app/.git && test ! -e /app/.codex && test ! -e /app/.env && test ! -e /app/node_modules && test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/backups && test ! -e /app/exports && test ! -e /app/sbom.spdx.json && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/experiments/tiny-training.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/scripts/sample-graph-page.mjs && test -f /app/experiments/verify-backup.mjs'
       - name: Smoke test hardened container runtime
         env:
           CONTAINER_IMAGE: llm-field-notes:ci

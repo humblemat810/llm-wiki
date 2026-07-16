@@ -4,6 +4,7 @@ import {
   BACKUP_FORMAT,
   DIFF_FORMAT,
   VAULT_FORMAT,
+  defaultGraph,
   fingerprintBackup,
   matchesGraphFingerprint,
   preferLearningExample,
@@ -157,10 +158,12 @@ async function tryShareFile({ filename, content, type, title, text }) {
 
 const browserStorage = getBrowserStorage();
 await browserStorage.ready;
+let backupCheckpointSyncTimer = null;
 const flushBrowserStorage = () => {
   void browserStorage.flush?.();
 };
 window.addEventListener("pagehide", () => {
+  if (backupCheckpointSyncTimer !== null) clearTimeout(backupCheckpointSyncTimer);
   flushBrowserStorage();
   revokeAllObjectUrls();
 });
@@ -186,6 +189,26 @@ const cancelTextResponseBody = (response) => {
     // A non-conforming response body must not suppress bounded failure handling.
   }
 };
+const fetchWithAbortDeadline = async (input, init, controller, timeoutMs) => {
+  let timedOut = false;
+  let timer;
+  const fetchPromise = fetch(input, init).then((response) => {
+    if (timedOut) cancelTextResponseBody(response);
+    return response;
+  });
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(Object.assign(new Error("The request timed out."), { name: "AbortError" }));
+    }, Math.max(1, Math.floor(Number(timeoutMs) || 1)));
+  });
+  try {
+    return await Promise.race([fetchPromise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 const isReadableSameOriginResponse = (response) => {
   if (response?.type === "opaque" || response?.type === "opaqueredirect") return false;
   if (typeof response?.url !== "string" || !response.url) return true;
@@ -196,8 +219,20 @@ const isReadableSameOriginResponse = (response) => {
   }
 };
 const releaseController = new AbortController();
-const releaseTimeout = setTimeout(() => releaseController.abort(), RELEASE_METADATA_TIMEOUT_MS);
-const releaseInfo = await fetch("./version.json", { cache: "no-cache", signal: releaseController.signal }).then((response) => {
+let releaseFetchTimedOut = false;
+let releaseTimeout;
+const releaseFetch = fetch("./version.json", { cache: "no-cache", signal: releaseController.signal }).then((response) => {
+  if (releaseFetchTimedOut) cancelTextResponseBody(response);
+  return response;
+});
+const releaseDeadline = new Promise((_, reject) => {
+  releaseTimeout = setTimeout(() => {
+    releaseFetchTimedOut = true;
+    releaseController.abort();
+    reject(new Error("Release metadata request timed out."));
+  }, RELEASE_METADATA_TIMEOUT_MS);
+});
+const releaseInfo = await Promise.race([releaseFetch, releaseDeadline]).then((response) => {
   if (!isReadableSameOriginResponse(response)) throw new Error("Release metadata crossed the app origin boundary.");
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const declaredLength = declaredResponseBytes(response);
@@ -228,7 +263,7 @@ const releaseInfo = await fetch("./version.json", { cache: "no-cache", signal: r
       version: value.version,
       channel: value.channel || "unreleased",
       date: value.date || "",
-      revision: value.revision || "unknown"
+      revision: value.revision ? value.revision.toLowerCase() : "unknown"
     };
   });
 }).catch(() => ({ version: "unknown", channel: "unreleased", date: "", revision: "unknown" }));
@@ -375,17 +410,56 @@ const graphHasContent = (graph) => Boolean(
   || graph?.edges?.length
   || graph?.learning?.examples?.length
 );
+const graphHasRecoverableState = (graph, history = []) => graphHasContent(graph) || history.length > 0;
+const backupCheckpointKey = "llm-field-notes-last-backup-fingerprint";
+const backupFingerprintPattern = /^fnv64-[0-9a-f]{16}-\d+$/;
+let lastBackupFingerprint = "";
+let currentBackupFingerprintCache = { key: "", value: "" };
+try {
+  const storedBackupFingerprint = appStorage.getItem(backupCheckpointKey);
+  if (typeof storedBackupFingerprint === "string" && backupFingerprintPattern.test(storedBackupFingerprint)) {
+    lastBackupFingerprint = storedBackupFingerprint;
+  }
+} catch {
+  // A backup reminder must never prevent the workbench from loading.
+}
+const recordBackupCheckpoint = (backup) => {
+  const fingerprint = backup?.graphFingerprint;
+  if (typeof fingerprint !== "string" || !backupFingerprintPattern.test(fingerprint)) return;
+  try {
+    appStorage.setItem(backupCheckpointKey, fingerprint);
+    lastBackupFingerprint = fingerprint;
+  } catch {
+    // Keep the reminder visible when the checkpoint cannot be persisted.
+  }
+};
+const reconcileBackupCheckpoint = () => {
+  try {
+    const storedBackupFingerprint = appStorage.getItem(backupCheckpointKey);
+    if (typeof storedBackupFingerprint === "string"
+      && backupFingerprintPattern.test(storedBackupFingerprint)
+      && storedBackupFingerprint !== lastBackupFingerprint) {
+      lastBackupFingerprint = storedBackupFingerprint;
+      renderWorkbench();
+    }
+  } catch {
+    // A checkpoint reconciliation failure must not affect the workbench.
+  }
+  backupCheckpointSyncTimer = setTimeout(reconcileBackupCheckpoint, 1000);
+};
 window.addEventListener("beforeunload", (event) => {
   const queuedFiles = pendingFiles.length > 0;
   const unsavedDocumentDraft = hasUnsavedDocumentDraft();
   if (!queuedFiles && !unsavedDocumentDraft && hasPersistentStorage && hasDurableStorage && !storageDurabilityFailure) return;
   let graph;
+  let history = [];
   try {
     graph = graphStore.read();
+    history = graphStore.readHistory();
   } catch {
     graph = null;
   }
-  if (!queuedFiles && !unsavedDocumentDraft && !graphHasContent(graph)) return;
+  if (!queuedFiles && !unsavedDocumentDraft && !graphHasRecoverableState(graph, history)) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -694,7 +768,7 @@ openNoteFromLocation();
 
 // --- Knowledge workbench ---------------------------------------------------
 // This is intentionally provider-agnostic. The local extractor is the
-// zero-configuration path; a model-backed adapter can replace extractGraph()
+// zero-configuration path; the server-side model adapter can replace it
 // without changing the graph schema, renderer, or export formats.
 const lexicalCompare = (left, right) => {
   const leftText = String(left);
@@ -773,7 +847,8 @@ async function readBrowserFileText(file, maxBytes, errorMessage = `That file exc
 }
 const graphStoreOptions = (graph) => ({
   expectedVersion: graph.version,
-  expectedFingerprint: fingerprintBackup(graph)
+  expectedFingerprint: fingerprintBackup(graph),
+  expectedHistoryFingerprint: fingerprintBackup(defaultGraph(), graphStore.readHistory())
 });
 const extractorEndpointInput = document.querySelector("#extractor-endpoint");
 const privacyNote = document.querySelector("#privacy-note");
@@ -835,6 +910,13 @@ browserStorage.subscribe((event) => {
     updatePrivacyNote();
     return;
   }
+  if (event.external && event.key === backupCheckpointKey) {
+    lastBackupFingerprint = typeof event.newValue === "string" && backupFingerprintPattern.test(event.newValue)
+      ? event.newValue
+      : "";
+    renderWorkbench();
+    return;
+  }
   if (!event.external || ![GRAPH_KEY, HISTORY_KEY].includes(event.key)) return;
   if (event.key === HISTORY_KEY) {
     renderWorkbench();
@@ -864,7 +946,8 @@ browserStorage.subscribe((event) => {
     const repaired = graphStore.write(lastRenderedGraphState.graph, {
       recordHistory: false,
       expectedVersion: incomingGraph.version,
-      expectedFingerprint: fingerprintBackup(incomingGraph)
+      expectedFingerprint: fingerprintBackup(incomingGraph),
+      expectedHistoryFingerprint: fingerprintBackup(defaultGraph(), graphStore.readHistory())
     });
     document.querySelector("#ingest-status").textContent = repaired
       ? "Ignored a stale graph update from another tab; the newer representation was preserved."
@@ -963,23 +1046,34 @@ cancelExtractionButton.addEventListener("click", () => {
   activeExtractionController?.abort();
 });
 let persistenceRequested = false;
+let persistenceRequestInFlight = false;
 const PERSISTENCE_REQUEST_TIMEOUT_MS = 3000;
 async function requestPersistentStorage() {
-  const storageManager = navigator.storage;
-  if (persistenceRequested || typeof storageManager?.persist !== "function") return;
-  persistenceRequested = true;
+  let storageManager;
+  try {
+    storageManager = navigator.storage;
+  } catch {
+    // Some privacy-restricted browsers expose a throwing storage getter.
+    return;
+  }
+  if (persistenceRequested || persistenceRequestInFlight || typeof storageManager?.persist !== "function") return;
+  persistenceRequestInFlight = true;
   let timeout;
   const timeoutPromise = new Promise((_, reject) => {
     timeout = setTimeout(() => reject(new Error("Persistent storage request timed out.")), PERSISTENCE_REQUEST_TIMEOUT_MS);
   });
   try {
     if (typeof storageManager.persisted === "function"
-      && await Promise.race([storageManager.persisted(), timeoutPromise])) return;
-    await Promise.race([storageManager.persist(), timeoutPromise]);
+      && await Promise.race([storageManager.persisted(), timeoutPromise])) {
+      persistenceRequested = true;
+      return;
+    }
+    persistenceRequested = await Promise.race([storageManager.persist(), timeoutPromise]) === true;
   } catch {
     // Persistence is an enhancement; normal local storage remains usable.
   } finally {
     clearTimeout(timeout);
+    persistenceRequestInFlight = false;
   }
 }
 let graphSearchQuery = "";
@@ -1108,6 +1202,38 @@ const buildGraphCorrectionUrl = () => {
   correctionUrl.searchParams.set("template", "graph_correction.yml");
   return correctionUrl.toString();
 };
+const buildGraphCorrectionTemplate = (kind, id) => {
+  const graph = graphStore.read();
+  const item = kind === "node"
+    ? graph.nodes.find((candidate) => candidate.id === id)
+    : kind === "edge"
+      ? graph.edges.find((candidate) => candidate.id === id)
+      : graph.documents.find((candidate) => candidate.id === id);
+  if (!item) throw new Error("That graph item is no longer available.");
+  const fingerprint = fingerprintBackup(graph);
+  const representation = kind === "node"
+    ? `label: ${safeMarkdownLabel(item.label)}\ntype: ${safeMarkdownLabel(item.type)}\nstatus: ${safeMarkdownLabel(item.status)}`
+    : kind === "edge"
+      ? `source: ${safeMarkdownLabel(item.source)}\ntarget: ${safeMarkdownLabel(item.target)}\nlabel: ${safeMarkdownLabel(item.label)}\nstatus: ${safeMarkdownLabel(item.status)}`
+      : `source id: ${safeMarkdownLabel(item.id)}`;
+  return [
+    "## Graph correction",
+    "",
+    "Privacy-safe correction context. Do not paste private source text, evidence, credentials, or personal data.",
+    "",
+    `graph fingerprint: ${fingerprint}`,
+    `item kind: ${kind}`,
+    `item id: ${safeMarkdownLabel(id)}`,
+    representation,
+    "",
+    "### Proposed change",
+    "",
+    "### Public evidence or reproducible observation",
+    "",
+    "### Why this improves the representation",
+    ""
+  ].join("\n");
+};
 async function shareGraphItem(kind, id) {
   const shareData = buildGraphItemShareData(kind, id);
   if (typeof navigator.share === "function") {
@@ -1163,7 +1289,7 @@ function renderInspector(graph) {
       ? `<button type="button" data-inspector-feedback="restore" data-node-id="${escapeHtml(node.id)}">↺ restore</button>`
       : `<button type="button" data-inspector-feedback="up" data-node-id="${escapeHtml(node.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-node-id="${escapeHtml(node.id)}">− dismiss</button>`;
     panel.innerHTML = `
-      <div class="inspector-header"><span>CONCEPT / ${escapeHtml(node.status.toUpperCase())}</span><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback${node.feedback === 1 ? "" : "s"}${node.lastReviewedAt ? ` · reviewed ${escapeHtml(node.lastReviewedAt)}` : ""}${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
+      <div class="inspector-header"><span>CONCEPT / ${escapeHtml(node.status.toUpperCase())}</span><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback${node.feedback === 1 ? "" : "s"}${node.lastReviewedAt ? ` · reviewed ${escapeHtml(node.lastReviewedAt)}` : ""}${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">copy item link</button><button type="button" class="text-button" data-copy-graph-correction="node" data-graph-item-id="${escapeHtml(node.id)}">copy correction template</button><button type="button" class="text-button" data-share-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
       <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
       <div class="inspector-edit"><label for="inspector-node-label">EDIT LABEL</label><div><input id="inspector-node-label" class="inspector-edit-input" value="${escapeHtml(node.label)}" maxlength="120" /><button type="button" data-edit-node="${escapeHtml(node.id)}">save</button></div></div>
       ${mergeTargets.length ? `<div class="inspector-merge"><label for="inspector-merge-target">MERGE INTO</label><div><select id="inspector-merge-target" class="inspector-edit-input">${mergeTargets.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.label)}</option>`).join("")}</select><button type="button" data-merge-node="${escapeHtml(node.id)}">merge</button></div><small>Keep the selected concept as the stable ID; evidence, aliases, and relations will be combined. This can be undone.</small></div>` : ""}
@@ -1192,7 +1318,7 @@ function renderInspector(graph) {
     const reviewedDate = source.lastReviewedAt ? source.lastReviewedAt.slice(0, 10) : "";
     const maximumReviewDate = new Date().toISOString().slice(0, 10);
     panel.innerHTML = `
-      <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
+      <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">copy item link</button><button type="button" class="text-button" data-copy-graph-correction="source" data-graph-item-id="${escapeHtml(source.id)}">copy correction template</button><button type="button" class="text-button" data-share-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
       <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="${MAX_DOCUMENT_TITLE_CHARS}" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" max="${maximumReviewDate}" /><button type="button" data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
       <button type="button" class="text-button" data-review-source="${escapeHtml(source.id)}">mark reviewed today (UTC)</button>
       <button type="button" class="replace-source" data-replace-source="${escapeHtml(source.id)}">Replace source with a newer file</button>
@@ -1213,7 +1339,7 @@ function renderInspector(graph) {
     ? `<button type="button" data-inspector-feedback="restore" data-edge-id="${escapeHtml(edge.id)}">↺ restore</button>`
     : `<button type="button" data-inspector-feedback="up" data-edge-id="${escapeHtml(edge.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-edge-id="${escapeHtml(edge.id)}">− dismiss</button>`;
   panel.innerHTML = `
-  <div class="inspector-header"><span>RELATION / ${escapeHtml(edge.status.toUpperCase())}</span><strong>${escapeHtml(source?.label || edge.source)} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(target?.label || edge.target)}</strong><small>${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback${edge.feedback === 1 ? "" : "s"} · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}${edge.lastReviewedAt ? ` · reviewed ${escapeHtml(edge.lastReviewedAt)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
+  <div class="inspector-header"><span>RELATION / ${escapeHtml(edge.status.toUpperCase())}</span><strong>${escapeHtml(source?.label || edge.source)} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(target?.label || edge.target)}</strong><small>${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback${edge.feedback === 1 ? "" : "s"} · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}${edge.lastReviewedAt ? ` · reviewed ${escapeHtml(edge.lastReviewedAt)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">copy item link</button><button type="button" class="text-button" data-copy-graph-correction="edge" data-graph-item-id="${escapeHtml(edge.id)}">copy correction template</button><button type="button" class="text-button" data-share-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
     <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
     <div class="inspector-edit"><label for="inspector-edge-label">EDIT RELATION</label><div><input id="inspector-edge-label" class="inspector-edit-input" value="${escapeHtml(edge.label)}" maxlength="80" /><button type="button" data-edit-edge="${escapeHtml(edge.id)}">save</button></div></div>
     <div class="inspector-evidence"><span class="inspector-label">EVIDENCE</span>${edge.evidence.length ? `<ul>${edge.evidence.map(evidenceMarkup).join("")}</ul>` : "<p class=\"inspector-muted\">No evidence captured.</p>"}</div>`;
@@ -1271,6 +1397,7 @@ function renderWorkbenchUnsafe() {
   document.querySelector("#hero-node-count").textContent = positions.length;
   document.querySelector("#hero-edge-count").textContent = activeEdges.length;
   document.querySelector("#hero-source-count").textContent = graph.documents.length;
+  const history = graphStore.readHistory();
   const recoveryAvailable = Boolean(graphStore.readRecovery());
   const historyRecoveryAvailable = Boolean(graphStore.readHistoryRecovery());
   const recoverySuppressed = Boolean(graphStore.hasRecoverySuppression?.());
@@ -1278,12 +1405,34 @@ function renderWorkbenchUnsafe() {
   const reducedHistory = storageMode === "without-history" || storageMode === "without-new-history";
   const ephemeralStorage = !hasPersistentStorage;
   const fallbackStorage = hasPersistentStorage && !hasDurableStorage;
+  const backupFingerprintCacheKey = [
+    graph.version,
+    graph.updatedAt,
+    graph.committedAt,
+    history.length,
+    history.at(-1)?.version || "",
+    history.at(-1)?.timestamp || ""
+  ].join("|");
+  if (currentBackupFingerprintCache.key !== backupFingerprintCacheKey) {
+    currentBackupFingerprintCache = {
+      key: backupFingerprintCacheKey,
+      value: fingerprintBackup(graph, history)
+    };
+  }
+  const currentBackupFingerprint = currentBackupFingerprintCache.value;
+  const backupCheckpointStale = graphHasRecoverableState(graph, history) && lastBackupFingerprint !== currentBackupFingerprint;
+  const backupCheckpointMessage = graphHasContent(graph)
+    ? "Full backup checkpoint is missing or out of date"
+    : "Undo history is not included in a full backup checkpoint";
   const storageWarning = [
     ephemeralStorage ? "<small class=\"storage-warning\">Browser storage unavailable; changes last only this tab</small>" : "",
     fallbackStorage ? "<small class=\"storage-warning\">Durable IndexedDB unavailable; browser storage may be evicted</small>" : "",
     reducedHistory ? "<small class=\"storage-warning\">Saved with reduced undo history</small>" : "",
     storageDurabilityFailure ? "<small class=\"storage-warning\">Durable storage unavailable</small>" : "",
-    ephemeralStorage || fallbackStorage || reducedHistory || storageDurabilityFailure ? `<button type="button" data-storage-action="backup">download backup</button>` : ""
+    backupCheckpointStale ? `<small class="storage-warning">${backupCheckpointMessage}</small>` : "",
+    ephemeralStorage || fallbackStorage || reducedHistory || storageDurabilityFailure || backupCheckpointStale
+      ? `<button type="button" data-storage-action="backup">download backup</button>`
+      : ""
   ].filter(Boolean).join("");
   const truncationDetails = [
     health.truncatedDocumentTitle ? `${health.truncatedDocumentTitle} document title${health.truncatedDocumentTitle === 1 ? "" : "s"} clipped` : "",
@@ -1403,7 +1552,6 @@ function renderWorkbenchUnsafe() {
     ? `<details${wasRevisionOpen ? " open" : ""}><summary><span>MEMORY</span><small>${graph.revisions.length} retained revision${graph.revisions.length === 1 ? "" : "s"}</small></summary><div class="revision-items">${graph.revisions.map((revision) => `<div><b>v${revision.version}</b><span>${escapeHtml(revision.reason)}</span><small>${escapeHtml(revision.timestamp)} · ${escapeHtml(revision.operation || "unknown")}${revision.extractor && revision.extractor !== "unknown" ? ` · ${escapeHtml(revision.extractor)} extractor` : ""} · ${revision.nodes} nodes · ${revision.edges} relations</small></div>`).join("")}</div></details>`
     : "<span>MEMORY</span><small>No revisions yet.</small>";
   const revisionDiffPreview = document.querySelector("#revision-diff-preview");
-  const history = graphStore.readHistory();
   if (!history.length) {
     revisionDiffPreview.innerHTML = "";
   } else {
@@ -1957,50 +2105,37 @@ function buildProjectionPaths(graph) {
   return { nodes, sources, relations };
 }
 
-function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
-  assertGraphTextExportBudget([graph]);
-  const graphFingerprint = fingerprintBackup(graph);
-  const generatedAt = graph.updatedAt || DEFAULT_GRAPH_TIMESTAMP;
-  const normalizedAppVersion = typeof appVersion === "string" && appVersion.trim()
-    ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS)
-    : "unknown";
-  const compare = (left, right) => {
-    const leftText = String(left);
-    const rightText = String(right);
-    return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
-  };
-  const projectedNodes = [...graph.nodes].sort((left, right) => compare(left.id, right.id));
-  const projectedDocuments = [...graph.documents].sort((left, right) => compare(left.id, right.id));
-  const projectedEdges = [...graph.edges].sort((left, right) => compare(
-    `${left.id}\u0000${left.source}\u0000${left.target}`,
-    `${right.id}\u0000${right.source}\u0000${right.target}`
-  ));
-  const projectedGraph = {
-    ...graph,
-    nodes: projectedNodes,
-    documents: projectedDocuments,
-    edges: projectedEdges
-  };
-  const paths = buildProjectionPaths(graph);
-  const nodeById = new Map(projectedNodes.map((node) => [node.id, node]));
-  const sourceById = new Map(projectedDocuments.map((doc) => [doc.id, doc]));
-  const nodeDisplay = (id) => safeMarkdownLabel(nodeById.get(id)?.label || id);
-  const sourceDisplay = (id) => safeMarkdownLabel(sourceById.get(id)?.title || id);
-  const conceptLink = (id, label = nodeDisplay(id)) => {
-    const path = paths.nodes.get(id);
-    return path ? `[[${path}|${label}]]` : `Unresolved concept: ${label}`;
-  };
-  const canvasNodes = projectedNodes.map((node, index) => ({
-    id: `concept-${index}`,
-    type: "file",
-    file: paths.nodes.get(node.id),
-    x: (index % 4) * 360,
-    y: Math.floor(index / 4) * 240,
-    width: 300,
-    height: 180,
-    color: node.status === "accepted" ? "4" : node.status === "rejected" ? "1" : "5"
-  }));
-  const canvasNodeIds = new Map(projectedNodes.map((node, index) => [node.id, canvasNodes[index].id]));
+function buildCanvasProjectionContent(projectedNodes, projectedEdges, paths, { standalone = false, graphFingerprint = "" } = {}) {
+  const canvasNodes = projectedNodes.map((node, index) => {
+    const base = {
+      id: `concept-${index}`,
+      x: (index % 4) * 360,
+      y: Math.floor(index / 4) * 240,
+      width: 300,
+      height: standalone ? 220 : 180,
+      color: node.status === "accepted" ? "4" : node.status === "rejected" ? "1" : "5"
+    };
+    if (!standalone) return { ...base, type: "file", file: paths.nodes.get(node.id) };
+    const evidence = safeMarkdownLabel(sliceTextAtCodePointBoundary(node.evidence?.[0]?.text || "No evidence excerpt recorded.", 400));
+    return {
+      ...base,
+      type: "text",
+      text: `# ${safeMarkdownLabel(node.label)}\n\n${node.status} · ${(node.confidence * 100).toFixed(0)}% confidence\n\n${evidence}`
+    };
+  });
+  if (standalone) {
+    canvasNodes.unshift({
+      id: "projection-provenance",
+      type: "text",
+      text: `# LLM Field Notes\n\nStandalone knowledge-graph projection\n\nGraph fingerprint: ${safeMarkdownLabel(graphFingerprint)}`,
+      x: 0,
+      y: -260,
+      width: 660,
+      height: 150,
+      color: "6"
+    });
+  }
+  const canvasNodeIds = new Map(projectedNodes.map((node, index) => [node.id, `concept-${index}`]));
   const unresolvedCanvasNodes = [];
   const ensureCanvasEndpoint = (endpointId) => {
     if (canvasNodeIds.has(endpointId)) return canvasNodeIds.get(endpointId);
@@ -2042,10 +2177,50 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
     if (node.type === "file" && (typeof node.file !== "string" || !node.file.startsWith("Concepts/"))) {
       throw new Error("The Obsidian Canvas projection contains an invalid concept note path.");
     }
+    if (node.type === "text" && (typeof node.text !== "string" || !node.text.trim())) {
+      throw new Error("The standalone Obsidian Canvas projection contains an empty text card.");
+    }
   });
   if (canvasEdges.some((edge) => !canvasNodeIdsSet.has(edge.fromNode) || !canvasNodeIdsSet.has(edge.toNode))) {
     throw new Error("The Obsidian Canvas projection contains an unresolved edge reference.");
   }
+  return JSON.stringify({ nodes: canvasNodes, edges: canvasEdges }, null, 2);
+}
+
+function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
+  assertGraphTextExportBudget([graph]);
+  const graphFingerprint = fingerprintBackup(graph);
+  const generatedAt = graph.updatedAt || DEFAULT_GRAPH_TIMESTAMP;
+  const normalizedAppVersion = typeof appVersion === "string" && appVersion.trim()
+    ? sliceTextAtCodePointBoundary(appVersion.trim(), MAX_PRODUCER_VERSION_CHARS)
+    : "unknown";
+  const compare = (left, right) => {
+    const leftText = String(left);
+    const rightText = String(right);
+    return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+  };
+  const projectedNodes = [...graph.nodes].sort((left, right) => compare(left.id, right.id));
+  const projectedDocuments = [...graph.documents].sort((left, right) => compare(left.id, right.id));
+  const projectedEdges = [...graph.edges].sort((left, right) => compare(
+    `${left.id}\u0000${left.source}\u0000${left.target}`,
+    `${right.id}\u0000${right.source}\u0000${right.target}`
+  ));
+  const projectedGraph = {
+    ...graph,
+    nodes: projectedNodes,
+    documents: projectedDocuments,
+    edges: projectedEdges
+  };
+  const paths = buildProjectionPaths(graph);
+  const nodeById = new Map(projectedNodes.map((node) => [node.id, node]));
+  const sourceById = new Map(projectedDocuments.map((doc) => [doc.id, doc]));
+  const nodeDisplay = (id) => safeMarkdownLabel(nodeById.get(id)?.label || id);
+  const sourceDisplay = (id) => safeMarkdownLabel(sourceById.get(id)?.title || id);
+  const conceptLink = (id, label = nodeDisplay(id)) => {
+    const path = paths.nodes.get(id);
+    return path ? `[[${path}|${label}]]` : `Unresolved concept: ${label}`;
+  };
+  const canvasContent = buildCanvasProjectionContent(projectedNodes, projectedEdges, paths);
   const relatedByNode = new Map(projectedNodes.map((node) => [node.id, []]));
   projectedEdges.forEach((edge) => {
     relatedByNode.get(edge.source)?.push(edge);
@@ -2097,7 +2272,7 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
   addVaultFile({ name: "_index.md", content: buildMarkdown(projectedGraph, { graphFingerprint }) });
   addVaultFile({
     name: "Graph.canvas",
-    content: JSON.stringify({ nodes: canvasNodes, edges: canvasEdges }, null, 2)
+    content: canvasContent
   });
   const learningDecisionExamples = buildFeedbackDataset(projectedGraph).examples;
   const learningDecisionLines = learningDecisionExamples.map((example) => {
@@ -2245,6 +2420,27 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
   return files;
 }
 
+function buildCanvasProjection(graph) {
+  const compare = (left, right) => {
+    const leftText = String(left);
+    const rightText = String(right);
+    return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+  };
+  const projectedNodes = [...graph.nodes].sort((left, right) => compare(left.id, right.id));
+  const projectedEdges = [...graph.edges].sort((left, right) => compare(
+    `${left.id}\u0000${left.source}\u0000${left.target}`,
+    `${right.id}\u0000${right.source}\u0000${right.target}`
+  ));
+  const content = buildCanvasProjectionContent(projectedNodes, projectedEdges, buildProjectionPaths(graph), {
+    standalone: true,
+    graphFingerprint: fingerprintBackup(graph)
+  });
+  if (textEncoder.encode(content).byteLength > MAX_EXPORT_BYTES) {
+    throw new Error("The standalone Canvas projection exceeds the 50 MB safety limit.");
+  }
+  return content;
+}
+
 async function buildLearningVaultFiles({ estimatedArchiveBytes = 22 } = {}) {
   const files = [];
   const failures = [];
@@ -2261,7 +2457,12 @@ async function buildLearningVaultFiles({ estimatedArchiveBytes = 22 } = {}) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), Math.min(LEARNING_NOTE_TIMEOUT_MS, remainingMs));
       try {
-        const response = await fetch(`./notes/${encodeURIComponent(note.id)}.md`, { cache: "no-cache", signal: controller.signal });
+        const response = await fetchWithAbortDeadline(
+          `./notes/${encodeURIComponent(note.id)}.md`,
+          { cache: "no-cache", signal: controller.signal },
+          controller,
+          Math.min(LEARNING_NOTE_TIMEOUT_MS, remainingMs)
+        );
       if (!isReadableSameOriginResponse(response)) throw new Error("learning note response crossed the app origin boundary");
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const content = await readBoundedTextResponse(response, MAX_LEARNING_NOTE_CHARS, "note exceeds the 1 MB safety limit", controller.signal);
@@ -2681,6 +2882,8 @@ function exportBackupSnapshot() {
   const content = JSON.stringify(backup, null, 2);
   if (textEncoder.encode(content).byteLength > MAX_BACKUP_IMPORT_BYTES) throw new Error("The backup exceeds the bounded safety limit after envelope overhead.");
   downloadFile("llm-field-notes-backup.json", content, "application/json");
+  recordBackupCheckpoint(backup);
+  renderWorkbench();
   return backup;
 }
 function downloadRuntimeRecovery() {
@@ -2915,6 +3118,40 @@ document.querySelector("#clear-graph").addEventListener("click", () => {
     }
   }
 });
+document.querySelector("#forget-local-data").addEventListener("click", async () => {
+  const status = document.querySelector("#ingest-status");
+  if (workbenchBusy()) {
+    status.textContent = "A graph build is in progress. Cancel it before forgetting local data.";
+    return;
+  }
+  if (!window.confirm("Forget all local LLM Field Notes data? This removes the graph, Undo history, drafts, recovery snapshots, learning progress, endpoint settings, and backup checkpoints. Download a backup first if you may need anything later.")) {
+    status.textContent = "Local data was kept.";
+    return;
+  }
+  try {
+    browserStorage.storage.clear();
+    await browserStorage.flush?.();
+    pendingFiles = [];
+    document.querySelector("#document-file").value = "";
+    document.querySelector("#document-title").value = "";
+    document.querySelector("#document-uri").value = "";
+    document.querySelector("#document-input").value = "";
+    document.querySelector("#extractor-endpoint").value = "";
+    committedDocumentDraft = readDocumentDraft();
+    lastBackupFingerprint = "";
+    currentBackupFingerprintCache = { key: "", value: "" };
+    renderFileQueue();
+    renderNotes();
+    renderPath();
+    updatePrivacyNote();
+    renderWorkbench();
+    status.textContent = browserStorage.storageFailure || (browserStorage.persistent && !browserStorage.durable)
+      ? "All local data forgotten from available browser storage, but durable deletion could not be verified. Retry this action after storage recovers before treating the purge as complete."
+      : "All local data forgotten. The workbench is empty.";
+  } catch (error) {
+    status.textContent = boundedOperationDiagnostic(error, "Local data could not be forgotten completely.");
+  }
+});
 document.querySelector("#undo-graph").addEventListener("click", () => {
   const status = document.querySelector("#ingest-status");
   const currentGraph = graphStore.read();
@@ -2960,6 +3197,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
         const expectedGraph = graphStore.read();
         const expectedVersion = expectedGraph.version;
         const expectedFingerprint = fingerprintBackup(expectedGraph);
+        const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
       const text = await readBrowserFileText(file, importLimit, `That JSON import exceeds the ${Math.round(importLimit / 1000000)} MB safety limit.`);
       let imported = parseJsonWithUniqueKeys(text, "Imported graph");
       if (isEncryptedBackup(imported)) {
@@ -3010,7 +3248,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
           renderFileQueue();
           return;
         }
-        if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
+        if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
           throw new Error(graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while feedback was loading. The feedback was not written."
             : "The feedback dataset could not be saved in this browser.");
@@ -3040,7 +3278,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
           renderFileQueue();
           return;
         }
-        if (!graphStore.restore(importedGraph, importedHistory, { expectedVersion, expectedFingerprint, preserveCurrent: true })) {
+        if (!graphStore.restore(importedGraph, importedHistory, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint, preserveCurrent: true })) {
           throw new Error(graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while the backup was loading. The backup was not restored."
             : "The backup could not be restored in this browser.");
@@ -3076,7 +3314,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
         renderFileQueue();
         return;
       }
-      if (!graphStore.write(importedGraph, { expectedVersion, expectedFingerprint })) {
+      if (!graphStore.write(importedGraph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
         throw new Error(graphStore.getLastWriteMode() === "conflict"
           ? "The graph changed in another tab while the import was loading. The import was not written."
           : "The graph could not be saved in this browser.");
@@ -3154,6 +3392,7 @@ async function buildGraphFromInput() {
         const currentGraph = graphStore.read();
         const expectedVersion = currentGraph.version;
         const expectedFingerprint = fingerprintBackup(currentGraph);
+        const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
         const vaultBytes = await readBrowserFileBytes(files[0], MAX_ZIP_BYTES, "The vault archive is larger than the 50 MB safety limit.");
         const vault = parseObsidianVault(vaultBytes);
         if (vault.invalidFeedbackFiles?.length) {
@@ -3207,7 +3446,7 @@ async function buildGraphFromInput() {
             : "No matching graph items or changes were found in that vault.");
           return;
         }
-        if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
+        if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
           status.textContent = graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while the vault was loading. Vault feedback was not written."
             : "Obsidian vault feedback could not be saved. Your prior graph is still intact.";
@@ -3226,6 +3465,7 @@ async function buildGraphFromInput() {
     const currentGraph = graphStore.read();
     const expectedVersion = currentGraph.version;
     const expectedFingerprint = fingerprintBackup(currentGraph);
+    const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
     let fileTexts;
     try {
       const declaredFeedbackBytes = files.reduce((total, file) => total + (Number.isFinite(file.size) ? file.size : 0), 0);
@@ -3273,7 +3513,7 @@ async function buildGraphFromInput() {
           : "No matching graph items or changes were found in those Obsidian notes.");
         return;
       }
-      if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
+      if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
         status.textContent = graphStore.getLastWriteMode() === "conflict"
           ? "The graph changed in another tab while the notes were loading. Obsidian feedback was not written."
           : "Obsidian feedback could not be saved. Your prior graph is still intact.";
@@ -3309,6 +3549,7 @@ async function buildGraphFromInput() {
     let graph = graphStore.read();
     const expectedVersion = graph.version;
     const expectedFingerprint = fingerprintBackup(graph);
+    const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
     let added = 0;
     let duplicates = 0;
     let batchChars = 0;
@@ -3372,7 +3613,7 @@ async function buildGraphFromInput() {
         }
       }
     }
-    if (added && !graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
+    if (added && !graphStore.write(graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
       status.textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab while this batch was running. Your batch was not written; reload the graph and try again."
         : "The batch could not be saved. Your browser may be out of storage.";
@@ -3408,6 +3649,7 @@ async function buildGraphFromInput() {
   const currentGraph = graphStore.read();
   const expectedVersion = currentGraph.version;
   const expectedFingerprint = fingerprintBackup(currentGraph);
+  const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
   let extraction;
   try {
     ensureBuildActive();
@@ -3449,7 +3691,7 @@ async function buildGraphFromInput() {
       : `The graph has reached its ${limit} limit. Remove or merge existing knowledge before adding more.`;
     return;
   }
-  if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint })) {
+  if (!graphStore.write(result.graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
     status.textContent = graphStore.getLastWriteMode() === "conflict"
       ? "The graph changed in another tab while extraction was running. The document was not written; reload and try again."
       : "The graph could not be saved. Your browser may be out of storage.";
@@ -3548,11 +3790,16 @@ async function rebuildSavedSources() {
   activeBuildController = new AbortController();
   const expectedVersion = initialGraph.version;
   const expectedFingerprint = fingerprintBackup(initialGraph);
+  const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
   const rebuildFeedback = buildExtractorFeedback(initialGraph, { includeStale: false });
+  const suppressedRejectedDecisions = new Set(rebuildFeedback
+    .filter((example) => example.status === "rejected")
+    .map((example) => `${example.kind === "concept" ? "node" : "edge"}|${example.id}`));
   try {
     const result = await rebuildSources(initialGraph, {
       revisionExtractor: extractorEndpointInput.value.trim() ? "remote" : "local",
       signal: activeBuildController.signal,
+      suppressedRejectedDecisions,
       onProgress: ({ sourceIndex, source, total }) => {
         status.textContent = `Rebuilding source ${sourceIndex + 1} of ${total} · ${source.title}`;
       },
@@ -3569,7 +3816,7 @@ async function rebuildSavedSources() {
     });
     const { graph, rebuilt, rebuildDetails, failures, canceled } = result;
     const offlineCanceled = consumeOfflineExtractionCancellation();
-    if (rebuilt && !graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
+    if (rebuilt && !graphStore.write(graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
       status.textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab while rebuilding. No rebuilt sources were written; reload and try again."
         : "The rebuilt sources could not be saved. Your prior graph is still intact.";
@@ -3643,6 +3890,7 @@ function commitManualGraph(graph, reason) {
   void requestPersistentStorage();
   const expectedVersion = graph.version;
   const expectedFingerprint = fingerprintBackup(graph);
+  const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
   if (!advanceGraphVersion(graph)) {
     document.querySelector("#ingest-status").textContent = "This graph has reached its revision limit. Export a backup and start a fresh graph before editing it.";
     return false;
@@ -3650,7 +3898,7 @@ function commitManualGraph(graph, reason) {
   graph.updatedAt = new Date().toISOString();
   graph.revisions.unshift({ id: `rev-${graph.version}`, version: graph.version, timestamp: graph.updatedAt, reason, operation: "manual", nodes: graph.nodes.length, edges: graph.edges.length });
   graph.revisions = graph.revisions.slice(0, MAX_GRAPH_REVISIONS);
-  if (!graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
+  if (!graphStore.write(graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
     document.querySelector("#ingest-status").textContent = graphWriteFailureMessage(
       "The manual change could not be saved.",
       "The graph changed in another tab. Your manual change was not written; reload and try again."
@@ -3929,6 +4177,21 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     }
     return;
   }
+  const copyGraphCorrectionButton = event.target.closest("[data-copy-graph-correction]");
+  if (copyGraphCorrectionButton) {
+    const feedback = document.querySelector("#ingest-status");
+    try {
+      copyText(buildGraphCorrectionTemplate(
+        copyGraphCorrectionButton.dataset.copyGraphCorrection,
+        copyGraphCorrectionButton.dataset.graphItemId
+      ))
+        .then(() => { feedback.textContent = "Privacy-safe correction template copied; add public evidence before submitting."; })
+        .catch((error) => { feedback.textContent = boundedOperationDiagnostic(error, "The correction template could not be copied."); });
+    } catch (error) {
+      feedback.textContent = boundedOperationDiagnostic(error, "The correction template could not be copied.");
+    }
+    return;
+  }
   const feedbackButton = event.target.closest("[data-inspector-feedback]");
   if (feedbackButton) {
     const kind = feedbackButton.dataset.nodeId ? "node" : "edge";
@@ -4007,6 +4270,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         const fileTitle = file.name.replace(/\.[^/.]+$/, "").trim() || "Untitled document";
         if (fileTitle.length > MAX_DOCUMENT_TITLE_CHARS) throw new Error(`Replacement document titles must be no longer than ${MAX_DOCUMENT_TITLE_CHARS} characters.`);
         const currentGraph = graphStore.read();
+        const expectedStoreOptions = graphStoreOptions(currentGraph);
         const endpoint = extractorEndpointInput.value.trim();
         let extraction;
         const usingRemoteExtractor = Boolean(endpoint);
@@ -4050,7 +4314,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
             : `The replacement could not fit within the graph ${result.limited} limit; the current source was kept.`;
           return;
         }
-        if (!result.replaced || !graphStore.write(result.graph, graphStoreOptions(currentGraph))) {
+        if (!result.replaced || !graphStore.write(result.graph, expectedStoreOptions)) {
           status.textContent = graphStore.getLastWriteMode() === "conflict"
             ? "The graph changed in another tab while the replacement was running. The source was not replaced."
             : "The replacement could not be saved; the current source was kept.";
@@ -4139,6 +4403,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
   let graph = graphStore.read();
   const expectedVersion = graph.version;
   const expectedFingerprint = fingerprintBackup(graph);
+  const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
   const input = document.querySelector(".inspector-edit-input");
   const nextLabel = input?.value.trim();
   if (!nextLabel) return;
@@ -4222,7 +4487,7 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
     edges: graph.edges.length
   });
   graph.revisions = graph.revisions.slice(0, MAX_GRAPH_REVISIONS);
-  if (!graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
+  if (!graphStore.write(graph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
     document.querySelector("#ingest-status").textContent = graphWriteFailureMessage(
       "The edit could not be saved.",
       "The graph changed in another tab. This edit was not written; reload and try again."
@@ -4346,6 +4611,30 @@ document.querySelector("#download-vault").addEventListener("click", async () => 
     }
   });
 });
+document.querySelector("#download-canvas").addEventListener("click", () => {
+  try {
+    const graph = graphStore.read();
+    const graphFingerprint = fingerprintBackup(graph);
+    const canvas = buildCanvasProjection(graph);
+    assertVaultGraphUnchanged(graphFingerprint);
+    downloadFile("Graph.canvas", canvas, "application/json");
+    document.querySelector("#projection-status").textContent = "Graph.canvas downloaded; open it in Obsidian to view the projected graph.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The Graph.canvas projection could not be exported.");
+  }
+});
+document.querySelector("#download-redacted-canvas").addEventListener("click", () => {
+  try {
+    const graph = graphStore.read();
+    const graphFingerprint = fingerprintBackup(graph);
+    const canvas = buildCanvasProjection(redactGraph(graph));
+    assertVaultGraphUnchanged(graphFingerprint);
+    downloadFile("Graph-redacted.canvas", canvas, "application/json");
+    document.querySelector("#projection-status").textContent = "Redacted Graph.canvas downloaded; source text, evidence, and URIs were removed.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The redacted Graph.canvas projection could not be exported.");
+  }
+});
 document.querySelector("#download-redacted-vault").addEventListener("click", async () => {
   await withVaultExport(async () => {
     try {
@@ -4434,6 +4723,8 @@ document.querySelector("#download-encrypted-backup").addEventListener("click", a
     const content = JSON.stringify(encrypted, null, 2);
     if (textEncoder.encode(content).byteLength > MAX_ENCRYPTED_BACKUP_BYTES) throw new Error("The encrypted backup exceeds the bounded safety limit after encryption overhead.");
     downloadFile("llm-field-notes-encrypted-backup.json", content, "application/json", MAX_ENCRYPTED_BACKUP_BYTES);
+    recordBackupCheckpoint(backup);
+    renderWorkbench();
     document.querySelector("#projection-status").textContent = `Encrypted backup downloaded · ${backup.history.length} undo snapshot${backup.history.length === 1 ? "" : "s"}.`;
   } catch (error) {
     document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The encrypted backup could not be exported.");
@@ -4532,6 +4823,7 @@ window.addEventListener("error", (event) => reportRuntimeError(event.error || ne
 window.addEventListener("unhandledrejection", (event) => reportRuntimeError(event.reason || new Error("Unexpected asynchronous error.")));
 renderWorkbench();
 syncGraphItemFromLocation();
+reconcileBackupCheckpoint();
 
 let serviceWorkerManager = null;
 try {
@@ -4556,7 +4848,12 @@ if (location.protocol !== "file:"
           if (completedWorkers.has(worker)) return;
           completedWorkers.add(worker);
           if (!navigator.serviceWorker.controller) {
-            worker.postMessage({ type: "SKIP_WAITING" });
+            try {
+              worker.postMessage({ type: "SKIP_WAITING" });
+            } catch {
+              // A terminated or restricted first-install worker must not
+              // surface as an application error; offline support is optional.
+            }
           } else {
             showServiceWorkerUpdate(registration);
           }

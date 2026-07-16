@@ -59,6 +59,7 @@ export function createGraphStore(storage, {
     const { committedAt, ...content } = graph;
     return JSON.stringify(content);
   };
+  const historyFingerprint = (history) => fingerprintBackup(defaultGraph(), history);
   const trimHistory = (history) => historyCapacity === 0 ? [] : history.slice(-historyCapacity);
   const isGraphRecord = (value) => value
     && typeof value === "object"
@@ -208,7 +209,7 @@ export function createGraphStore(storage, {
     clearHistoryRecovery,
     hasRecoverySuppression: () => suppressedRecoveryKeys.size > 0,
     getLastWriteMode: () => lastWriteMode,
-    write(graph, { recordHistory = true, expectedVersion, expectedFingerprint } = {}) {
+    write(graph, { recordHistory = true, expectedVersion, expectedFingerprint, expectedHistoryFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       let normalizedRaw;
@@ -231,7 +232,8 @@ export function createGraphStore(storage, {
         previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
-          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)
+          || (typeof expectedHistoryFingerprint === "string" && historyFingerprint(readHistory()) !== expectedHistoryFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }
@@ -289,7 +291,7 @@ export function createGraphStore(storage, {
     canUndo() {
       return readHistory().length > 0;
     },
-    undo({ expectedVersion, expectedFingerprint } = {}) {
+    undo({ expectedVersion, expectedFingerprint, expectedHistoryFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       try {
@@ -302,7 +304,8 @@ export function createGraphStore(storage, {
         previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
-          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)
+          || (typeof expectedHistoryFingerprint === "string" && historyFingerprint(readHistory()) !== expectedHistoryFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }
@@ -323,7 +326,7 @@ export function createGraphStore(storage, {
         return false;
       }
     },
-    restore(graph, history = [], { expectedVersion, expectedFingerprint, preserveCurrent = false } = {}) {
+    restore(graph, history = [], { expectedVersion, expectedFingerprint, expectedHistoryFingerprint, preserveCurrent = false } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       const rawGraph = (() => {
@@ -405,7 +408,8 @@ export function createGraphStore(storage, {
         previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
-          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)
+          || (typeof expectedHistoryFingerprint === "string" && historyFingerprint(readHistory()) !== expectedHistoryFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }
@@ -435,7 +439,7 @@ export function createGraphStore(storage, {
         }
       }
     },
-    clear({ expectedVersion, expectedFingerprint } = {}) {
+    clear({ expectedVersion, expectedFingerprint, expectedHistoryFingerprint } = {}) {
       let previousGraphRaw;
       let previousHistoryRaw;
       let nextHistoryRaw = null;
@@ -449,7 +453,8 @@ export function createGraphStore(storage, {
         previousHistoryRaw = snapshot.history;
         const current = read();
         if ((Number.isInteger(expectedVersion) && current.version !== expectedVersion)
-          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)) {
+          || (typeof expectedFingerprint === "string" && fingerprintBackup(current) !== expectedFingerprint)
+          || (typeof expectedHistoryFingerprint === "string" && historyFingerprint(readHistory()) !== expectedHistoryFingerprint)) {
           lastWriteMode = "conflict";
           return false;
         }

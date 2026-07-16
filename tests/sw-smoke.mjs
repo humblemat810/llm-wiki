@@ -4,6 +4,19 @@ import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../sw.js", import.meta.url), "utf8");
 const packageManifest = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+assert.match(source, /const PRECACHE_DEADLINE_MS = 60000;/, "service-worker installation should have an aggregate precache deadline");
+assert.match(source, /withOperationDeadline\(/, "service-worker installation should enforce its aggregate precache deadline");
+assert.match(source, /APP_SHELL\.includes\("\.\/asset-manifest\.json"\)/, "Pages deployments should promote the injected asset manifest to a required shell asset");
+const requiredShellSource = source.slice(
+  source.indexOf("const REQUIRED_SHELL_ASSETS ="),
+  source.indexOf("\nconst SHELL_PATHS =", source.indexOf("const REQUIRED_SHELL_ASSETS ="))
+);
+const requiredShellAssets = vm.runInNewContext(`(() => {
+  const APP_SHELL = ["./asset-manifest.json"];
+  ${requiredShellSource}
+  return [...REQUIRED_SHELL_ASSETS];
+})()`);
+assert(requiredShellAssets.includes("./asset-manifest.json"), "a built Pages shell should require its injected asset manifest during installation");
 const activeCache = `llm-field-notes-v${packageManifest.version}`;
 const location = new URL("https://notes.example.test/wiki/sw.js");
 const handlers = new Map();
@@ -47,6 +60,7 @@ const cachesApi = {
 };
 let online = true;
 let hanging = false;
+let ignoreNetworkAbort = false;
 let networkStatus = 200;
 let stalledBody = false;
 let stalledBodyCancel = false;
@@ -54,6 +68,7 @@ let malformedBody = false;
 let crossOriginResponse = false;
 let opaqueResponse = false;
 let htmlForAssetResponse = false;
+let nonHtmlForHtmlShellResponse = false;
 let discardableErrorResponse = false;
 let discardableErrorBodyCancelCalls = 0;
 let declaredResponseLength = null;
@@ -66,6 +81,7 @@ let skipWaitingCalls = 0;
 let precacheMode = false;
 let precacheActive = 0;
 let maxPrecacheActive = 0;
+let precacheFailureAsset = "";
 const context = {
   URL,
   Request,
@@ -87,9 +103,14 @@ const context = {
       await new Promise((resolve) => setTimeout(resolve, 1));
       precacheActive -= 1;
     }
+    if (precacheMode && precacheFailureAsset && new URL(request.url).pathname.endsWith(precacheFailureAsset.replace(/^\.\//, ""))) {
+      throw new Error("synthetic optional precache failure");
+    }
     if (hanging) {
       return new Promise((resolve, reject) => {
-        options.signal.addEventListener("abort", () => reject(new Error("network timeout")), { once: true });
+        if (!ignoreNetworkAbort) {
+          options.signal.addEventListener("abort", () => reject(new Error("network timeout")), { once: true });
+        }
       });
     }
     if (!online) throw new Error("offline");
@@ -106,6 +127,12 @@ const context = {
     }
     if (htmlForAssetResponse) {
       return earlyResponse({ headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    if (nonHtmlForHtmlShellResponse) {
+      return new Response(`wrong:${request.url}`, {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
     }
     if (discardableErrorResponse) {
       const reader = {
@@ -157,10 +184,12 @@ const context = {
       return response;
     }
     if (bodyUnavailable) return new Response(null, { status: networkStatus });
-    return new Response(`fresh:${request.url}`, {
-      status: networkStatus,
-      headers: declaredResponseLength === null ? undefined : { "content-length": String(declaredResponseLength) }
-    });
+    const shellPath = new URL(request.url).pathname;
+    const headers = shellPath.endsWith("/") || shellPath.endsWith(".html")
+      ? { "content-type": "text/html; charset=utf-8" }
+      : {};
+    if (declaredResponseLength !== null) headers["content-length"] = String(declaredResponseLength);
+    return new Response(`fresh:${request.url}`, { status: networkStatus, headers });
   },
   self: {
     location,
@@ -188,6 +217,21 @@ assert(entries.has(new URL("./evaluation.js", location).toString()), "install sh
 assert(entries.has(new URL("./SECURITY.md", location).toString()), "install should precache security guidance");
 assert(entries.has(new URL("./social-card.svg", location).toString()), "install should precache the social share card");
 assert(maxPrecacheActive > 1 && maxPrecacheActive <= 4, "shell precaching should use bounded parallelism");
+precacheMode = true;
+precacheFailureAsset = "./notes/tokens.md";
+const optionalFailureInstall = [];
+handlers.get("install")({ waitUntil(promise) { optionalFailureInstall.push(promise); } });
+await Promise.all(optionalFailureInstall);
+precacheFailureAsset = "./app.js";
+const requiredFailureInstall = [];
+handlers.get("install")({ waitUntil(promise) { requiredFailureInstall.push(promise); } });
+await assert.rejects(
+  Promise.all(requiredFailureInstall),
+  /synthetic optional precache failure/,
+  "core shell failures must still reject service-worker installation"
+);
+precacheFailureAsset = "";
+precacheMode = false;
 const activateWaits = [];
 handlers.get("activate")({ waitUntil(promise) { activateWaits.push(promise); } });
 await Promise.all(activateWaits);
@@ -218,6 +262,14 @@ assert(fresh, "shell requests should be intercepted");
 assert.equal(await fresh.text(), `fresh:${new URL("./app.js", location).toString()}`);
 assert(networkCalls > 0, "online shell requests should prefer the network");
 assert.equal(lastFetchOptions?.cache, "no-cache", "online shell requests should revalidate HTTP-cached assets");
+const networkTimeoutStartedAt = Date.now();
+hanging = true;
+ignoreNetworkAbort = true;
+const timedOutNetwork = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
+assert(Date.now() - networkTimeoutStartedAt < 4000, "service-worker fetches should settle by the explicit network deadline when abort is ignored");
+assert.equal(await timedOutNetwork.text(), `fresh:${new URL("./app.js", location).toString()}`, "network timeout should fall back to the cached shell");
+hanging = false;
+ignoreNetworkAbort = false;
 const versionedFresh = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js?cache-bust=online", location).toString() });
 assert.equal(await versionedFresh.text(), `fresh:${new URL("./app.js?cache-bust=online", location).toString()}`);
 assert([...entries.keys()].every((key) => !key.includes("?")), "shell cache keys should ignore query strings to prevent duplicate cache growth");
@@ -323,6 +375,10 @@ const htmlForScriptShell = await dispatchFetch({ method: "GET", mode: "cors", ur
 assert.equal(await htmlForScriptShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "HTML responses must not replace non-HTML shell assets with a cached login or error page");
 assert.equal(earlyResponseCancelCalls, htmlCancelCallsBefore + 1, "HTML shell responses should cancel their unread bodies before fallback");
 htmlForAssetResponse = false;
+nonHtmlForHtmlShellResponse = true;
+const wrongHtmlShell = await dispatchFetch({ method: "GET", mode: "navigate", url: new URL("./index.html", location).toString() });
+assert.equal(await wrongHtmlShell.text(), `fresh:${new URL("./index.html", location).toString()}`, "non-HTML responses must not replace HTML shell assets");
+nonHtmlForHtmlShellResponse = false;
 declaredResponseLength = -1;
 const invalidLengthCancelCallsBefore = earlyResponseCancelCalls;
 const invalidLengthShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });

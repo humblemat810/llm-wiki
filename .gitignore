@@ -10,3 +10,4 @@ llm-field-notes-*.zip
 knowledge-graph.json
 knowledge-graph.md
 dist/
+sbom.spdx.json

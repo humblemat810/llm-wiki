@@ -647,10 +647,36 @@ function preferImportedDecision(existing, incoming) {
   return existing;
 }
 
+function retainNewestLearningExamples(examples) {
+  if (!Array.isArray(examples) || examples.length <= MAX_FEEDBACK_EXAMPLES) return examples || [];
+  const ranked = examples.map((example, index) => ({
+    example,
+    index,
+    timestamp: trustedReviewTime(example?.lastReviewedAt)
+  }));
+  ranked.sort((left, right) => {
+    if (Number.isFinite(left.timestamp) && Number.isFinite(right.timestamp) && left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+    if (Number.isFinite(left.timestamp) !== Number.isFinite(right.timestamp)) {
+      return Number.isFinite(left.timestamp) ? -1 : 1;
+    }
+    if (Number.isFinite(left.timestamp) && Number.isFinite(right.timestamp)) {
+      return lexicalCompare(learningExampleTieBreak(left.example), learningExampleTieBreak(right.example))
+        || right.index - left.index;
+    }
+    return right.index - left.index;
+  });
+  return ranked
+    .slice(0, MAX_FEEDBACK_EXAMPLES)
+    .sort((left, right) => left.index - right.index)
+    .map(({ example }) => example);
+}
+
 function normalizeLearning(value) {
   const examples = new Map();
   const boundedExamples = Array.isArray(value?.examples)
-    ? value.examples.slice(-MAX_FEEDBACK_EXAMPLES)
+    ? value.examples.slice(-MAX_FEEDBACK_FINGERPRINT_EXAMPLES)
     : [];
   boundedExamples.forEach((item) => {
     const example = normalizeLearningExample(item);
@@ -667,7 +693,7 @@ function normalizeLearning(value) {
       }
     }
   });
-  return { examples: [...examples.values()] };
+  return { examples: retainNewestLearningExamples([...examples.values()]) };
 }
 
 function canonicalDocumentText(text) {
@@ -2326,7 +2352,9 @@ export function mergeExtraction(graph, extraction, { revisionReason, revisionOpe
 
 export function replaceSource(value, sourceId, extraction, {
   revisionExtractor = "unknown",
-  preserveSourceCategories = false
+  preserveSourceCategories = false,
+  preservedLearningDecisionKeys = new Set(),
+  preserveSourceContent = false
 } = {}) {
   const graph = normalizeGraph(value);
   const importLimit = importIntegrityLimit(graph);
@@ -2359,8 +2387,15 @@ export function replaceSource(value, sourceId, extraction, {
     source: {
       ...normalizedExtraction.source,
       id: normalizedSourceId,
+      ...(preserveSourceContent ? {
+        title: source.title,
+        text: source.text,
+        fingerprint: source.fingerprint
+      } : {}),
       addedAt: source.addedAt,
-      uri: normalizedExtraction.source.uri || source.uri || null,
+      uri: preserveSourceContent
+        ? source.uri
+        : normalizedExtraction.source.uri || source.uri || null,
       quality: source.quality,
       lastReviewedAt: null
     },
@@ -2377,7 +2412,14 @@ export function replaceSource(value, sourceId, extraction, {
   };
   const acceptedNodeIds = new Set(graph.nodes.filter((node) => node.status === "accepted" && node.sources.includes(normalizedSourceId)).map((node) => node.id));
   const acceptedEdgeIds = new Set(graph.edges.filter((edge) => edge.status === "accepted" && edge.sources.includes(normalizedSourceId)).map((edge) => edge.id));
+  const learningDecisionKey = (example) => `${example.kind === "concept" ? "node" : "edge"}|${example.id}`;
+  const preservedLearningExamples = graph.learning.examples
+    .filter((example) => preservedLearningDecisionKeys instanceof Set
+      && preservedLearningDecisionKeys.has(learningDecisionKey(example)));
   const removed = removeSource(graph, normalizedSourceId, { recordRevision: false });
+  const learningExamples = new Map(removed.graph.learning.examples.map((example) => [learningDecisionKey(example), example]));
+  preservedLearningExamples.forEach((example) => learningExamples.set(learningDecisionKey(example), example));
+  removed.graph.learning.examples = retainNewestLearningExamples([...learningExamples.values()]);
   removed.graph.nodes = removed.graph.nodes.map((node) => acceptedNodeIds.has(node.id)
     ? { ...node, sources: mergeSourceIds(node.sources, [normalizedSourceId]) }
     : node);
@@ -2725,7 +2767,7 @@ export function mergeConcepts(value, sourceId, targetId) {
       : example;
     setRemappedLearning(nextExample);
   });
-  graph.learning.examples = [...remappedLearning.values()].slice(-MAX_FEEDBACK_EXAMPLES);
+  graph.learning.examples = retainNewestLearningExamples([...remappedLearning.values()]);
   rememberLearningItem(graph, "node", target);
   appendRevision(graph, `Merged concept ${source.label} into ${target.label}`, "manual");
   return { graph, changed: true, mergedId: normalizedTargetId };
@@ -2785,7 +2827,7 @@ function updateLearningMemory(graph, kind, item) {
       examples.set(key, preferred);
     }
   } else examples.delete(key);
-  graph.learning.examples = [...examples.values()].slice(-MAX_FEEDBACK_EXAMPLES);
+  graph.learning.examples = retainNewestLearningExamples([...examples.values()]);
 }
 
 export function rememberLearningItem(graph, kind, item) {
@@ -3068,7 +3110,7 @@ export function applyFeedbackDataset(value, examples) {
     return !before || !after || !learningExamplesEquivalent(before, after) || before.lastReviewedAt !== after.lastReviewedAt;
   }).length;
   if (learned) {
-    graph.learning.examples = [...finalLearning.values()].slice(-MAX_FEEDBACK_EXAMPLES);
+    graph.learning.examples = retainNewestLearningExamples([...finalLearning.values()]);
     if (!updates && !appendRevision(graph, `Stored ${learned} reusable learning example${learned === 1 ? "" : "s"}${conflictingKeys.size ? `; detected ${conflictingKeys.size} contradictory reviewed decision${conflictingKeys.size === 1 ? "" : "s"} and selected a deterministic value` : ""}`, "learning")) {
       return { graph: originalGraph, updates: 0, learned: 0, skipped, conflicts: conflictingKeys.size, changed: false, limited: "version" };
     }

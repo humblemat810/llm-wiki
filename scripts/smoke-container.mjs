@@ -20,7 +20,7 @@ export function parseContainerConfig(environment = process.env) {
     ? environment.CONTAINER_IMAGE.trim()
     : DEFAULT_IMAGE;
   const revision = typeof environment.CONTAINER_EXPECTED_REVISION === "string" && environment.CONTAINER_EXPECTED_REVISION.trim()
-    ? environment.CONTAINER_EXPECTED_REVISION.trim()
+    ? environment.CONTAINER_EXPECTED_REVISION.trim().toLowerCase()
     : DEFAULT_REVISION;
   const version = typeof environment.CONTAINER_EXPECTED_VERSION === "string" && environment.CONTAINER_EXPECTED_VERSION.trim()
     ? environment.CONTAINER_EXPECTED_VERSION.trim()
@@ -130,6 +130,13 @@ export async function smokeContainer(environment = process.env) {
       "SIGTERM",
       "container must preserve graceful SIGTERM shutdown"
     );
+    const imageEnvironment = runDocker(["image", "inspect", "--format", "{{json .Config.Env}}", config.image], { quiet: true }).trim();
+    assert.match(imageEnvironment, /"NODE_ENV=production"/, "container must bake the production Node environment");
+    assert.doesNotMatch(imageEnvironment, /EXTRACTOR_AUTH_TOKEN|METRICS_AUTH_TOKEN/, "container image metadata must not bake authentication secrets");
+    const imageHealthcheck = runDocker(["image", "inspect", "--format", "{{json .Config.Healthcheck.Test}}", config.image], { quiet: true }).trim();
+    assert.match(imageHealthcheck, /\/readyz/, "container image must retain its readiness healthcheck");
+    assert.match(imageHealthcheck, /parseConfiguredBoundedInteger/, "container healthcheck must reuse the server's bounded configuration parser");
+    assert.match(imageHealthcheck, /setting\.valid/, "container healthcheck must fail closed on invalid runtime configuration");
     assert.equal(
       runDocker(["image", "inspect", "--format", "{{index .Config.Labels \"org.opencontainers.image.version\"}}", config.image], { quiet: true }).trim(),
       config.version,
@@ -150,17 +157,28 @@ export async function smokeContainer(environment = process.env) {
       config.documentation,
       "container documentation metadata must identify the runbook"
     );
-    runDocker(["run", "--rm", "--entrypoint", "sh", config.image, "-c", "test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/experiments/verify-backup.mjs"]);
+    runDocker(["run", "--rm", "--entrypoint", "sh", config.image, "-c", "test ! -e /app/.git && test ! -e /app/.codex && test ! -e /app/.env && test ! -e /app/node_modules && test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/backups && test ! -e /app/exports && test ! -e /app/sbom.spdx.json && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/experiments/tiny-training.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/scripts/sample-graph-page.mjs && test -f /app/experiments/verify-backup.mjs"]);
     runDocker([
       "run", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "--env", `PUBLIC_ORIGIN=${baseUrl}`,
+      // The container serves plain HTTP directly; the HTTPS logical origin
+      // keeps the production-mode origin contract honest while this probe
+      // exercises the service behind the TLS gateway boundary used in real
+      // deployments.
+      "--env", `PUBLIC_ORIGIN=https://127.0.0.1:${port}`,
       "--env", `PUBLIC_REPOSITORY_URL=${config.source}`,
       "--env", `EXTRACTOR_AUTH_TOKEN=${config.extractorToken}`,
       "--env", `METRICS_AUTH_TOKEN=${config.metricsToken}`,
       "--detach", "--name", containerName, "--publish", `${port}:8000`, config.image
     ]);
     containerStarted = true;
+    assert.equal(
+      runDocker(["inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", containerName], { quiet: true }).trim(),
+      "true",
+      "container must record a read-only root filesystem"
+    );
+    const tmpfsMounts = runDocker(["inspect", "--format", "{{json .HostConfig.Tmpfs}}", containerName], { quiet: true }).trim();
+    assert.match(tmpfsMounts, /"\/tmp"/, "container must provide the bounded writable /tmp mount");
     const capDrop = runDocker(["inspect", "--format", "{{json .HostConfig.CapDrop}}", containerName], { quiet: true }).trim();
     assert.match(capDrop, /ALL/, "container must drop all Linux capabilities");
     const securityOptions = runDocker(["inspect", "--format", "{{json .HostConfig.SecurityOpt}}", containerName], { quiet: true }).trim();
@@ -189,6 +207,9 @@ export async function smokeContainer(environment = process.env) {
     const readinessPayload = await readiness.json();
     assert.equal(readinessPayload.version, config.version);
     assert.equal(readinessPayload.revision, config.revision);
+    const liveness = await fetchWithTimeout(`${baseUrl}/livez`);
+    assert.equal(liveness.status, 200, "container liveness should remain available independently of readiness");
+    assert.equal((await liveness.json()).live, true, "container liveness should expose the liveness contract");
     const securityMetadata = await fetchWithTimeout(`${baseUrl}/.well-known/security.txt`);
     const securityText = await securityMetadata.text();
     assert.equal(securityMetadata.status, 200);
@@ -245,6 +266,7 @@ export async function smokeContainer(environment = process.env) {
     runDocker(["stop", "--timeout", "5", containerName]);
     const exitCode = runDocker(["inspect", "--format", "{{.State.ExitCode}}", containerName], { quiet: true }).trim();
     assert.equal(exitCode, "0", "container must exit cleanly after SIGTERM");
+    runDocker(["rm", containerName], { quiet: true });
     containerStarted = false;
     return { image: config.image, port, version: config.version, revision: config.revision };
   } catch (error) {
@@ -259,8 +281,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   try {
     const result = await smokeContainer();
     console.log(`container smoke ok: ${result.image} ${result.version} ${result.revision}`);
+    // Native fetch may retain an idle undici connection after every response
+    // body has been consumed. This is a standalone probe, not a long-lived
+    // service, so terminate explicitly after the container is fully stopped.
+    process.exit(0);
   } catch (error) {
     console.error(`container smoke failed: ${error.message}`);
-    process.exitCode = 1;
+    process.exit(1);
   }
 }

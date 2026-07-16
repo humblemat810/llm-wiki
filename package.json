@@ -13,6 +13,7 @@
     "smoke:server": "node scripts/smoke-server.mjs",
     "browser:smoke": "npm run runtime:check && node scripts/browser-smoke.mjs",
     "smoke:container": "node scripts/smoke-container.mjs",
+    "deployment:check": "node scripts/check-deployment-config.mjs",
     "load:server": "node scripts/load-server.mjs",
     "build:pages": "node scripts/build-pages.mjs",
     "serve:pages": "npm run build:pages && python3 -m http.server 8000 --directory dist",
@@ -21,6 +22,9 @@
     "health": "node experiments/inspect-graph.mjs",
     "health:sample": "node experiments/inspect-graph.mjs examples/sample-graph.json --min-provenance 100 --max-orphaned 0 --max-ambiguous 0 --max-conflicting-items 0 --max-unsupported-nodes 0 --max-unsupported-edges 0 --max-review-candidates 25 --max-review-queue-truncated 0 --max-evidence-grounding-truncated 0 --max-feedback-context-truncated 0 --max-stale-review-candidates 10 --max-stale-learning-examples 25 --max-withheld-guidance 25 --max-unanchored-evidence 0 --max-truncated-items 0 --max-dropped-items 0",
     "production:check": "node scripts/production-check.mjs",
+    "workflows:check": "node scripts/check-workflows.mjs",
+    "sbom:generate": "node scripts/generate-sbom.mjs",
+    "verify:sbom": "node scripts/verify-sbom.mjs",
     "runtime:check": "node scripts/check-runtime.mjs",
     "learning:loop": "node experiments/learning-loop.mjs",
     "learning:check": "node scripts/check-learning-loop.mjs",
@@ -30,6 +34,8 @@
     "verify:graph": "node experiments/verify-graph.mjs",
     "verify:backup": "node experiments/verify-backup.mjs",
     "verify:diff": "node experiments/verify-diff.mjs",
+    "verify:canvas": "node scripts/verify-canvas.mjs examples/sample-graph.canvas",
+    "verify:service-health": "node scripts/verify-service-health.mjs examples/sample-service-health.json readiness",
     "release:check": "node scripts/check-release.mjs",
     "release:tag:check": "node scripts/check-release-tag.mjs",
     "contracts:check": "node scripts/check-contracts.mjs",
@@ -46,6 +52,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "playwright": "^1.52.0"
+    "playwright": "^1.61.1",
+    "yaml": "^2.9.0"
   }
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { verifyServiceHealth } from "../scripts/verify-service-health.mjs";
 
 process.env.BUILD_REVISION = "abcdef1234567890";
 const { createAppServer } = await import("../server.mjs");
@@ -17,6 +18,7 @@ try {
   assert.equal(healthResponse.status, 200);
   assert.deepEqual(await healthResponse.json(), {
     ok: true,
+    live: true,
     schema: "llm-field-notes/graph@1",
     version: "0.1.0",
     revision: "abcdef1234567890"
@@ -26,6 +28,19 @@ try {
 }
 
 console.log("build revision smoke ok");
+
+process.env.BUILD_REVISION = "ABCDEF1234567890";
+const uppercaseRevisionModule = await import(`../server.mjs?uppercase-build-revision=${Date.now()}`);
+const uppercaseRevisionServer = uppercaseRevisionModule.createAppServer();
+await new Promise((resolve) => uppercaseRevisionServer.listen(0, "127.0.0.1", resolve));
+try {
+  const uppercaseLiveness = await fetch(`http://127.0.0.1:${uppercaseRevisionServer.address().port}/livez`);
+  const uppercasePayload = await uppercaseLiveness.json();
+  verifyServiceHealth(uppercasePayload, "uppercase revision liveness", "liveness");
+  assert.equal(uppercasePayload.revision, "abcdef1234567890", "runtime health metadata should canonicalize hexadecimal revisions to lowercase");
+} finally {
+  uppercaseRevisionServer.close();
+}
 
 const externallyBoundServer = createAppServer({
   publicOrigin: "https://wiki.example.test",

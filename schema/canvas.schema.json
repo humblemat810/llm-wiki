@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.example/schema/canvas.schema.json",
+  "title": "LLM Field Notes native Obsidian Canvas projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nodes", "edges"],
+  "properties": {
+    "nodes": {
+      "type": "array",
+      "maxItems": 5001,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/fileNode" },
+          { "$ref": "#/$defs/textNode" }
+        ]
+      }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/edge" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "coordinate": {
+      "type": "number",
+      "minimum": -1000000000,
+      "maximum": 1000000000
+    },
+    "dimension": {
+      "type": "number",
+      "finite": true,
+      "exclusiveMinimum": 0,
+      "maximum": 1000000
+    },
+    "color": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16
+    },
+    "nodeGeometry": {
+      "type": "object",
+      "properties": {
+        "x": { "$ref": "#/$defs/coordinate" },
+        "y": { "$ref": "#/$defs/coordinate" },
+        "width": { "$ref": "#/$defs/dimension" },
+        "height": { "$ref": "#/$defs/dimension" },
+        "color": { "$ref": "#/$defs/color" }
+      }
+    },
+    "fileNode": {
+      "allOf": [
+        { "$ref": "#/$defs/nodeGeometry" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "file", "x", "y", "width", "height"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "type": { "const": "file" },
+            "file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+            ,
+            "x": { "$ref": "#/$defs/coordinate" },
+            "y": { "$ref": "#/$defs/coordinate" },
+            "width": { "$ref": "#/$defs/dimension" },
+            "height": { "$ref": "#/$defs/dimension" },
+            "color": { "$ref": "#/$defs/color" }
+          }
+        }
+      ]
+    },
+    "textNode": {
+      "allOf": [
+        { "$ref": "#/$defs/nodeGeometry" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "text", "x", "y", "width", "height"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "type": { "const": "text" },
+            "text": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "x": { "$ref": "#/$defs/coordinate" },
+            "y": { "$ref": "#/$defs/coordinate" },
+            "width": { "$ref": "#/$defs/dimension" },
+            "height": { "$ref": "#/$defs/dimension" },
+            "color": { "$ref": "#/$defs/color" }
+          }
+        }
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "fromNode", "toNode", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "fromNode": { "$ref": "#/$defs/id" },
+        "toNode": { "$ref": "#/$defs/id" },
+        "fromSide": {
+          "enum": ["top", "right", "bottom", "left"]
+        },
+        "toSide": {
+          "enum": ["top", "right", "bottom", "left"]
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 120
+        }
+      }
+    }
+  }
+}

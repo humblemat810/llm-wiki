@@ -7,6 +7,11 @@ assert.equal(defaults.port, 0);
 assert.equal(defaults.skipBuild, false);
 assert.equal(defaults.version, "0.1.0");
 assert.equal(defaults.revision, "abcdef1234567890");
+assert.equal(
+  parseContainerConfig({ CONTAINER_EXPECTED_REVISION: "ABCDEF1234567890" }).revision,
+  "abcdef1234567890",
+  "container smoke should canonicalize hexadecimal revisions to lowercase"
+);
 
 const configured = parseContainerConfig({
   CONTAINER_IMAGE: "llm-field-notes:release",

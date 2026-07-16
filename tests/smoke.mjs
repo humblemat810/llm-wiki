@@ -368,6 +368,23 @@ const recencyBoundedLearning = normalizeGraph({
 assert.equal(recencyBoundedLearning.learning.examples.length, MAX_FEEDBACK_EXAMPLES, "normalized learning memory should remain bounded");
 assert(!recencyBoundedLearning.learning.examples.some((example) => example.id === "recency-0"), "learning normalization should evict the oldest example");
 assert(recencyBoundedLearning.learning.examples.some((example) => example.id === `recency-${MAX_FEEDBACK_EXAMPLES}`), "learning normalization should retain the newest correction");
+const outOfOrderLearningRecency = normalizeGraph({
+  schema: GRAPH_SCHEMA,
+  learning: {
+    examples: [
+      { kind: "concept", id: "newest-out-of-order", label: "Newest out of order", status: "accepted", lastReviewedAt: "2026-07-01T00:00:00.000Z" },
+      ...Array.from({ length: MAX_FEEDBACK_EXAMPLES }, (_, index) => ({
+        kind: "concept",
+        id: `older-out-of-order-${index}`,
+        label: `Older out of order ${index}`,
+        status: "accepted",
+        lastReviewedAt: "2025-01-01T00:00:00.000Z"
+      }))
+    ]
+  }
+});
+assert(outOfOrderLearningRecency.learning.examples.some((example) => example.id === "newest-out-of-order"), "learning normalization should retain the newest reviewed correction even when it appears before older memory");
+assert.equal(outOfOrderLearningRecency.learning.examples.length, MAX_FEEDBACK_EXAMPLES, "timestamp-aware learning retention should remain bounded");
 const timestampedLearningCollision = normalizeGraph({
   schema: GRAPH_SCHEMA,
   learning: {
@@ -1234,6 +1251,56 @@ assert.equal(
   "same-version divergent graphs should fail the fingerprint precondition"
 );
 assert.equal(graphStore.getLastWriteMode(), "conflict");
+const historyConflictStorage = new Map();
+const historyConflictStore = createGraphStore({
+  getItem: (key) => historyConflictStorage.has(key) ? historyConflictStorage.get(key) : null,
+  setItem: (key, value) => historyConflictStorage.set(key, String(value)),
+  removeItem: (key) => historyConflictStorage.delete(key)
+}, {
+  graphKey: "history-conflict-graph",
+  historyKey: "history-conflict-history"
+});
+assert.equal(historyConflictStore.write(merged), true);
+const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), historyConflictStore.readHistory());
+historyConflictStorage.set("history-conflict-history", JSON.stringify([defaultGraph(), merged]));
+const historyConflictGraph = historyConflictStore.read();
+assert.equal(
+  historyConflictStore.write(defaultGraph(), {
+    expectedVersion: historyConflictGraph.version,
+    expectedFingerprint: fingerprintBackup(historyConflictGraph),
+    expectedHistoryFingerprint
+  }),
+  false,
+  "graph writes should reject a concurrent history-only mutation"
+);
+assert.equal(historyConflictStore.getLastWriteMode(), "conflict", "history-only conflicts should expose the conflict write mode");
+assert.equal(
+  historyConflictStore.undo({
+    expectedVersion: historyConflictGraph.version,
+    expectedFingerprint: fingerprintBackup(historyConflictGraph),
+    expectedHistoryFingerprint
+  }),
+  false,
+  "undo should reject a concurrent history-only mutation"
+);
+assert.equal(
+  historyConflictStore.restore(defaultGraph(), [], {
+    expectedVersion: historyConflictGraph.version,
+    expectedFingerprint: fingerprintBackup(historyConflictGraph),
+    expectedHistoryFingerprint
+  }),
+  false,
+  "restore should reject a concurrent history-only mutation"
+);
+assert.equal(
+  historyConflictStore.clear({
+    expectedVersion: historyConflictGraph.version,
+    expectedFingerprint: fingerprintBackup(historyConflictGraph),
+    expectedHistoryFingerprint
+  }),
+  false,
+  "clear should reject a concurrent history-only mutation"
+);
 storage.delete("graph");
 localStorage.failWrites = true;
 assert.equal(graphStore.write(merged), false, "storage failure should be reported");
@@ -2518,8 +2585,19 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 vm.runInNewContext(`const slugify = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 70);
 ${app.slice(projectionStart, projectionEnd)}
-globalThis.__projectionTest = { buildVaultFiles, zipStore, downloadBytes, buildMarkdown, buildFeedbackDataset, buildCompactFeedbackDataset };`, sandbox);
-const { buildVaultFiles, zipStore, downloadBytes, buildMarkdown, buildFeedbackDataset, buildCompactFeedbackDataset } = sandbox.__projectionTest;
+globalThis.__projectionTest = { buildVaultFiles, buildCanvasProjection, zipStore, downloadBytes, buildMarkdown, buildFeedbackDataset, buildCompactFeedbackDataset };`, sandbox);
+const { buildVaultFiles, buildCanvasProjection, zipStore, downloadBytes, buildMarkdown, buildFeedbackDataset, buildCompactFeedbackDataset } = sandbox.__projectionTest;
+const canvasOnlyGraph = {
+  ...merged,
+  documents: merged.documents.map((document) => ({ ...document, text: "source ".repeat(8 * 1024 * 1024) }))
+};
+assert.doesNotThrow(() => buildCanvasProjection(canvasOnlyGraph), "direct Canvas export should not serialize full source text or inherit the full-vault text budget");
+const standaloneCanvas = JSON.parse(buildCanvasProjection(merged));
+assert(standaloneCanvas.nodes.every((node) => node.type === "text" && typeof node.text === "string"), "direct Canvas exports should be self-contained text cards rather than references to absent vault files");
+assert(standaloneCanvas.nodes.some((node) => node.id === "projection-provenance" && node.text.includes(fingerprintBackup(merged))), "direct Canvas exports should carry the authoritative graph fingerprint for traceability");
+assert(standaloneCanvas.edges.every((edge) => edge.fromNode !== "projection-provenance" && edge.toNode !== "projection-provenance"), "direct Canvas relations should resolve to concept cards, never the provenance card");
+const redactedStandaloneCanvas = JSON.parse(buildCanvasProjection(redactGraph(canvasOnlyGraph)));
+assert(redactedStandaloneCanvas.nodes.every((node) => !node.text.includes("source ") && !node.text.includes("SECRET")), "redacted Canvas exports should remove source-bearing text from standalone cards");
 assert(buildMarkdown(oversizedImportedGraph).includes("Import truncation: 10 items omitted"), "Markdown projections should disclose bounded-import truncation");
 assert(buildMarkdown(oversizedImportedGraph).includes("Visual graph omits 4850 concepts and 9700 relations"), "Markdown projections should disclose bounded Mermaid omissions");
 assert(buildMarkdown(malformedImportedGraph).includes("Malformed import entries: 6 items dropped"), "Markdown projections should disclose dropped malformed import entries");

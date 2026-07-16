@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
 import { createServer } from "node:http";
-import { cp, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
 
@@ -17,7 +17,7 @@ process.once("exit", () => {
 });
 const sourceNotes = await readFile(new URL("../notes/tokens.md", import.meta.url), "utf8");
 const pagesBuilder = await readFile(new URL("../scripts/build-pages.mjs", import.meta.url), "utf8");
-assert(pagesBuilder.includes("mkdtemp") && pagesBuilder.includes("publishPages") && pagesBuilder.includes("rename(buildOutput, output)") && !pagesBuilder.includes("await rm(output, { recursive: true, force: true });"), "Pages builds must stage and swap output instead of deleting the previous bundle before generation");
+assert(pagesBuilder.includes("mkdtemp") && pagesBuilder.includes("publishPages") && pagesBuilder.includes("outputMetadata.isSymbolicLink()") && pagesBuilder.includes("rename(buildOutput, output)") && !pagesBuilder.includes("await rm(output, { recursive: true, force: true });"), "Pages builds must stage and swap output, reject symlinked roots, and avoid deleting the previous bundle before generation");
 await rm(root, { recursive: true, force: true });
 async function collectFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -45,6 +45,32 @@ assert.throws(
   "Pages builds must reject unsafe public origins before publication"
 );
 await rm(invalidOriginOutput, { recursive: true, force: true });
+const insecureOriginOutput = resolve(root, "../dist-insecure-origin");
+assert.throws(
+  () => execFileSync(process.execPath, ["scripts/build-pages.mjs", insecureOriginOutput], {
+    stdio: "pipe",
+    env: { ...process.env, PUBLIC_ORIGIN: "http://wiki.example.test/field-notes" }
+  }),
+  /must use HTTPS outside loopback/,
+  "Pages builds must reject non-loopback HTTP origins before publishing insecure crawler metadata"
+);
+await rm(insecureOriginOutput, { recursive: true, force: true });
+const symlinkedOutput = resolve(root, "../dist-symlinked-output");
+const symlinkedOutputTarget = resolve(root, "../dist-symlinked-output-target");
+try {
+  await rm(symlinkedOutput, { recursive: true, force: true });
+  await rm(symlinkedOutputTarget, { recursive: true, force: true });
+  await mkdir(symlinkedOutputTarget, { recursive: true });
+  await symlink(symlinkedOutputTarget, symlinkedOutput);
+  assert.throws(
+    () => execFileSync(process.execPath, ["scripts/build-pages.mjs", symlinkedOutput], { stdio: "pipe" }),
+    /Pages output must not be a symbolic link/,
+    "Pages builds must reject a symlinked output root before swapping artifacts"
+  );
+} finally {
+  await rm(symlinkedOutput, { recursive: true, force: true });
+  await rm(symlinkedOutputTarget, { recursive: true, force: true });
+}
 const invalidRepositoryOutput = resolve(root, "../dist-invalid-repository");
 assert.throws(
   () => execFileSync(process.execPath, ["scripts/build-pages.mjs", invalidRepositoryOutput], {
@@ -72,11 +98,27 @@ const pagesBuildOutput = execFileSync(process.execPath, ["scripts/build-pages.mj
     PUBLIC_REPOSITORY_URL: "https://github.com/example/forked-wiki"
   }
 });
-assert(pagesBuildOutput.includes("artifact check ok: 18 public cards"), "direct Pages builds should execute the artifact consistency gate");
+assert(pagesBuildOutput.includes("artifact check ok: 20 public cards"), "direct Pages builds should execute the artifact consistency gate");
 execFileSync(process.execPath, ["scripts/verify-pages.mjs", root], {
   stdio: "ignore",
   env: { ...process.env, BUILD_REVISION: "abcdef1234567890", PUBLIC_ORIGIN: "https://wiki.example.test/field-notes" }
 });
+const symlinkedVerifyOutput = resolve(root, "../dist-symlinked-verify-output");
+try {
+  await unlink(symlinkedVerifyOutput).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+  await symlink(root, symlinkedVerifyOutput);
+  assert.throws(
+    () => execFileSync(process.execPath, ["scripts/verify-pages.mjs", symlinkedVerifyOutput], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    (error) => String(error?.stderr).includes("Pages output must not be a symbolic link"),
+    "Pages verification must reject a symlinked output root before reading the manifest"
+  );
+} finally {
+  await unlink(symlinkedVerifyOutput).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+}
 const escapedManifestRoot = resolve(root, "../dist-escaped-manifest");
 const escapedManifestTarget = resolve(root, "../pages-verifier-outside.json");
 try {
@@ -247,7 +289,11 @@ assert(indexText.includes("LLM Field Notes"));
   const sampleGraphPage = await fetch(`http://127.0.0.1:${port}/sample-graph.html`);
   assert.equal(sampleGraphPage.status, 200);
   const sampleGraphPageText = await sampleGraphPage.text();
-  assert(sampleGraphPageText.includes("A document,") && sampleGraphPageText.includes("CONCEPTS WITH EVIDENCE") && sampleGraphPageText.includes("RELATIONS WITH GROUNDS") && sampleGraphPageText.includes("fnv64-") && sampleGraphPageText.includes("script-src 'none'") && sampleGraphPageText.includes("https://wiki.example.test/field-notes/#sample"), "Pages should publish a script-free, origin-aware sample graph explainer with evidence, relations, fingerprint, and workbench entry point");
+  assert(sampleGraphPageText.includes("A document,") && sampleGraphPageText.includes("CONCEPTS WITH EVIDENCE") && sampleGraphPageText.includes("RELATIONS WITH GROUNDS") && sampleGraphPageText.includes("fnv64-") && sampleGraphPageText.includes("script-src 'none'") && sampleGraphPageText.includes("https://wiki.example.test/field-notes/#sample") && sampleGraphPageText.includes("https://wiki.example.test/field-notes/examples/sample-graph.canvas"), "Pages should publish a script-free, origin-aware sample graph explainer with evidence, relations, fingerprint, workbench entry point, and direct Canvas projection");
+  const sampleGraphCanvas = await fetch(`http://127.0.0.1:${port}/examples/sample-graph.canvas`);
+  assert.equal(sampleGraphCanvas.status, 200, "Pages should publish the sample Graph.canvas projection");
+  const sampleGraphCanvasText = await sampleGraphCanvas.text();
+  assert(sampleGraphCanvasText.includes('"type": "text"') && (await fetch(`http://127.0.0.1:${port}/examples/sample-graph.json`)).status === 200, "Pages should serve the native Canvas and source graph exports together");
   const noteIds = (await readdir(join(root, "notes"))).filter((file) => file.endsWith(".md") && file !== "README.md").map((file) => file.slice(0, -3));
   assert(noteIds.length > 0, "the learning map should contain at least one note");
   for (const noteId of noteIds) {

@@ -15,6 +15,9 @@ scripts/*.mjs
 !scripts/public-origin.mjs
 !scripts/public-repository.mjs
 !scripts/service-worker-cache.mjs
+!scripts/sample-graph-page.mjs
+!scripts/verify-canvas.mjs
+!scripts/verify-service-health.mjs
 experiments/*.mjs
 !experiments/bounded-file.mjs
 !experiments/compare-evaluations.mjs
@@ -52,6 +55,7 @@ knowledge-graph.json
 *.p12
 *.pfx
 *.secret
+sbom.spdx.json
 exports
 backups
 knowledge-graph.md

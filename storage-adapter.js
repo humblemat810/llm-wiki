@@ -5,15 +5,19 @@ const DATABASE_NAME = "llm-field-notes";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "values";
 const CHANNEL_NAME = "llm-field-notes-storage";
+export const STORAGE_MESSAGE_FORMAT = "llm-field-notes/storage@1";
 const HYDRATION_TIMEOUT_MS = 1500;
 const GRAPH_VALUE_KEY = `${STORAGE_PREFIX}knowledge-graph`;
 const HISTORY_VALUE_KEY = `${STORAGE_PREFIX}knowledge-graph-history`;
 export const IDB_OPERATION_TIMEOUT_MS = 5000;
 export const PENDING_WRITES_KEY = `${STORAGE_PREFIX}pending-writes`;
 export const PENDING_WRITE_MARKER_PREFIX = `${PENDING_WRITES_KEY}:`;
+export const CLEAR_PENDING_KEY = `${STORAGE_PREFIX}clear-pending`;
 export const MAX_STORAGE_KEY_CHARS = 256;
 export const MAX_BROADCAST_VALUE_CHARS = 50 * 1024 * 1024;
 export const MAX_BROADCAST_VALUE_BYTES = 50 * 1024 * 1024;
+export const MAX_STORAGE_ENTRIES = 256;
+export const MAX_STORAGE_TOTAL_BYTES = 256 * 1024 * 1024;
 const MAX_PENDING_WRITES = 100;
 let storageInstanceSequence = 0;
 const utf8Encoder = new TextEncoder();
@@ -30,17 +34,33 @@ export function createMemoryStorage() {
 
 function readLocalValues(storage) {
   const values = new Map();
+  values.invalid = false;
+  let totalBytes = 0;
   if (!storage) return values;
   try {
     for (let index = 0; index < storage.length; index += 1) {
       const key = storage.key(index);
-      if (isValidStorageKey(key) && key !== PENDING_WRITES_KEY) {
+      if (isNamespacedStorageKey(key) && key !== PENDING_WRITES_KEY && key !== CLEAR_PENDING_KEY) {
+        if (!isValidStorageKey(key)) {
+          values.invalid = true;
+          continue;
+        }
         const value = storage.getItem(key);
-        if (isValidBroadcastValue(value)) values.set(key, value);
+        if (!isValidBroadcastValue(value)) {
+          values.invalid = true;
+          continue;
+        }
+        const valueBytes = utf8Encoder.encode(value).byteLength;
+        if (values.size >= MAX_STORAGE_ENTRIES || totalBytes + valueBytes > MAX_STORAGE_TOTAL_BYTES) {
+          values.invalid = true;
+          continue;
+        }
+        values.set(key, value);
+        totalBytes += valueBytes;
       }
     }
   } catch {
-    // The caller already has the storage fallback path.
+    values.invalid = true;
   }
   return values;
 }
@@ -150,6 +170,22 @@ export function isExternalStorageRemoval(event, key) {
   return event?.external === true && event.key === key && event.newValue === null;
 }
 
+function fitsLocalStorageAggregate(storage, key, value) {
+  const valueBytes = utf8Encoder.encode(value).byteLength;
+  let entries = 0;
+  let totalBytes = valueBytes;
+  for (let index = 0; index < storage.length; index += 1) {
+    const candidateKey = storage.key(index);
+    if (!isValidStorageKey(candidateKey) || candidateKey === key) continue;
+    const candidateValue = storage.getItem(candidateKey);
+    if (!isValidBroadcastValue(candidateValue)) continue;
+    entries += 1;
+    totalBytes += utf8Encoder.encode(candidateValue).byteLength;
+  }
+  const addsEntry = storage.getItem(key) === null ? 1 : 0;
+  return entries + addsEntry <= MAX_STORAGE_ENTRIES && totalBytes <= MAX_STORAGE_TOTAL_BYTES;
+}
+
 const isValidBroadcastValue = (value) => isValidStorageValue(value);
 
 function committedAtFromGraphValue(value) {
@@ -171,11 +207,21 @@ function shouldPreferLocalGraph(localValue, durableValue) {
     && (!Number.isFinite(durableTimestamp) || localTimestamp >= durableTimestamp);
 }
 
+function isStaleExternalGraphValue(key, currentValue, incomingValue) {
+  return key === GRAPH_VALUE_KEY
+    && typeof incomingValue === "string"
+    && shouldPreferLocalGraph(currentValue, incomingValue);
+}
+
 function isValidStorageKey(key) {
   return typeof key === "string"
     && key.length <= MAX_STORAGE_KEY_CHARS
     && key.startsWith(STORAGE_PREFIX)
     && !isPendingWriteMarkerKey(key);
+}
+
+function isNamespacedStorageKey(key) {
+  return typeof key === "string" && key.startsWith(STORAGE_PREFIX);
 }
 
 function assertStorageKey(key) {
@@ -208,13 +254,24 @@ function readDatabaseValues(database) {
     const transaction = database.transaction(STORE_NAME, "readonly");
     const request = transaction.objectStore(STORE_NAME).openCursor();
     const values = new Map();
+    let totalBytes = 0;
     request.onsuccess = () => {
       const cursor = request.result;
       if (!cursor) {
         resolve(values);
         return;
       }
-      if (isValidStorageKey(cursor.key) && isValidBroadcastValue(cursor.value)) values.set(cursor.key, cursor.value);
+      if (!isValidStorageKey(cursor.key) || !isValidBroadcastValue(cursor.value)) {
+        reject(Object.assign(new Error("IndexedDB storage contains an invalid entry."), { code: "STORAGE_INVALID" }));
+        return;
+      }
+      const valueBytes = utf8Encoder.encode(cursor.value).byteLength;
+      if (values.size >= MAX_STORAGE_ENTRIES || totalBytes + valueBytes > MAX_STORAGE_TOTAL_BYTES) {
+        reject(Object.assign(new Error("IndexedDB storage exceeds the aggregate safety limit."), { code: "STORAGE_LIMIT" }));
+        return;
+      }
+      values.set(cursor.key, cursor.value);
+      totalBytes += valueBytes;
       cursor.continue();
     };
     request.onerror = () => reject(request.error || new Error("IndexedDB could not be read."));
@@ -271,7 +328,7 @@ function createDurableStorage(owner, localStorage) {
   let database = null;
   let hydrated = false;
   let durable = false;
-  let storageFailure = false;
+  let storageFailure = values.invalid === true;
   let writeQueue = Promise.resolve();
   let channel = null;
   let channelMessageHandler = null;
@@ -299,9 +356,18 @@ function createDurableStorage(owner, localStorage) {
       }
     });
   };
+  const fitsAggregateStorageLimit = (key, value) => {
+    const valueBytes = utf8Encoder.encode(value).byteLength;
+    if (!values.has(key) && values.size >= MAX_STORAGE_ENTRIES) return false;
+    let totalBytes = valueBytes;
+    values.forEach((currentValue, currentKey) => {
+      if (currentKey !== key) totalBytes += utf8Encoder.encode(currentValue).byteLength;
+    });
+    return totalBytes <= MAX_STORAGE_TOTAL_BYTES;
+  };
   const publish = (key, value) => {
     try {
-      channel?.postMessage({ key, value });
+      channel?.postMessage({ format: STORAGE_MESSAGE_FORMAT, key, value });
     } catch {
       // BroadcastChannel is an optional synchronization enhancement.
     }
@@ -314,10 +380,54 @@ function createDurableStorage(owner, localStorage) {
       // The graph store reports the write failure through its own adapter.
     }
   };
+  const readPendingClearToken = () => {
+    try {
+      const value = fallbackStorage.getItem(CLEAR_PENDING_KEY);
+      if (value === "1") return value;
+      return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : null;
+    } catch {
+      return null;
+    }
+  };
+  const hasPendingClear = () => Boolean(readPendingClearToken());
+  const pendingTokenParts = (token) => {
+    if (typeof token !== "string" || token === "1" || token === "legacy") return null;
+    const match = token.match(/^(\d+)-(.+)-(\d+)$/);
+    if (!match) return null;
+    const timestamp = Number(match[1]);
+    const sequence = Number(match[3]);
+    return Number.isSafeInteger(timestamp) && Number.isSafeInteger(sequence)
+      ? { timestamp, instance: match[2], sequence }
+      : null;
+  };
+  const isWriteAfterClear = (writeToken, clearToken) => {
+    const write = pendingTokenParts(writeToken);
+    const clear = pendingTokenParts(clearToken);
+    if (!write || !clear) return false;
+    if (write.timestamp !== clear.timestamp) return write.timestamp > clear.timestamp;
+    if (write.instance === clear.instance) return write.sequence > clear.sequence;
+    // Equal-millisecond writes from another tab cannot be ordered safely.
+    // Preserve them rather than risking loss of data written after the clear.
+    return true;
+  };
+  const markPendingClear = () => {
+    pendingSequence += 1;
+    const token = `${Date.now()}-${instanceId}-${pendingSequence}`;
+    fallbackWrite(CLEAR_PENDING_KEY, token);
+    return token;
+  };
+  const clearPendingClear = () => fallbackWrite(CLEAR_PENDING_KEY, null);
   const pendingWrites = readPendingWrites(fallbackStorage);
   const pendingMarkers = readPendingWriteMarkers(fallbackStorage);
   pendingMarkers.forEach((token, key) => pendingWrites.set(key, token));
   pendingWrites.invalid = pendingWrites.invalid || pendingMarkers.invalid;
+  const clearPendingWriteMetadata = () => {
+    readNamespacedKeys(fallbackStorage).forEach((key) => {
+      if (key === PENDING_WRITES_KEY || isPendingWriteMarkerKey(key)) fallbackWrite(key, null);
+    });
+    pendingWrites.clear();
+    pendingWrites.invalid = false;
+  };
   const refreshPendingValidity = () => {
     const latestLegacy = readPendingWrites(fallbackStorage);
     const latestMarkers = readPendingWriteMarkers(fallbackStorage);
@@ -406,6 +516,11 @@ function createDurableStorage(owner, localStorage) {
     writeQueue = writeQueue.then(async () => {
       if (!database) return;
       await clearDatabaseValues(database);
+      clearPendingWriteMetadata();
+      clearPendingClear();
+      durable = true;
+      storageFailure = false;
+      notifyStatus();
     }).catch(() => {
       durable = false;
       storageFailure = true;
@@ -438,6 +553,9 @@ function createDurableStorage(owner, localStorage) {
       if (!isValidBroadcastValue(normalized)) {
         throw new Error("Storage value exceeds the safety limit.");
       }
+      if (!fitsAggregateStorageLimit(key, normalized)) {
+        throw new Error("Storage namespace exceeds the aggregate safety limit.");
+      }
       values.set(key, normalized);
       if (!hydrated) dirtyBeforeReady.set(key, normalized);
       const pendingToken = owner.indexedDB ? markPending(key) : null;
@@ -463,23 +581,58 @@ function createDurableStorage(owner, localStorage) {
         ...readNamespacedKeys(fallbackStorage)
       ]);
       keys.delete(PENDING_WRITES_KEY);
+      keys.delete(CLEAR_PENDING_KEY);
+      markPendingClear();
       if (!hydrated) clearRequestedBeforeReady = true;
       keys.forEach((key) => {
         if (isValidStorageKey(key)) storage.removeItem(key);
         else fallbackWrite(key, null);
       });
-      pendingWrites.clear();
-      pendingWrites.invalid = false;
-      fallbackWrite(PENDING_WRITES_KEY, null);
-      if (durable && database) enqueueDurableClear();
+      clearPendingWriteMetadata();
+      if (database) enqueueDurableClear();
+      else if (!owner.indexedDB) clearPendingClear();
     }
   };
 
   const onStorage = (event) => {
     if (localStorage && event.storageArea && event.storageArea !== localStorage) return;
-    if (!isValidStorageKey(event.key) || event.key === PENDING_WRITES_KEY) return;
+    if (event.key === CLEAR_PENDING_KEY) {
+      if (event.newValue === "1") {
+        storageFailure = true;
+        if (!hydrated) clearRequestedBeforeReady = true;
+        else if (database) enqueueDurableClear();
+        notifyStatus();
+      }
+      return;
+    }
+    if (!isValidStorageKey(event.key)) {
+      if (isNamespacedStorageKey(event.key) && event.key !== PENDING_WRITES_KEY && event.key !== CLEAR_PENDING_KEY) {
+        storageFailure = true;
+        notifyStatus();
+      }
+      return;
+    }
+    if (event.key === PENDING_WRITES_KEY) return;
+    if (!isValidBroadcastValue(event.newValue)) {
+      storageFailure = true;
+      notifyStatus();
+      return;
+    }
+    const currentValue = event.oldValue ?? values.get(event.key);
+    if (isStaleExternalGraphValue(event.key, currentValue, event.newValue)) {
+      fallbackWrite(event.key, currentValue);
+      return;
+    }
     if (event.newValue === null) values.delete(event.key);
-    else if (isValidBroadcastValue(event.newValue)) values.set(event.key, event.newValue);
+    else if (isValidBroadcastValue(event.newValue)) {
+      if (!fitsAggregateStorageLimit(event.key, event.newValue)) {
+        fallbackWrite(event.key, currentValue);
+        storageFailure = true;
+        notifyStatus();
+        return;
+      }
+      values.set(event.key, event.newValue);
+    }
     else return;
     const pendingToken = owner.indexedDB ? markPending(event.key) : null;
     if (!hydrated) dirtyBeforeReady.set(event.key, event.newValue);
@@ -493,12 +646,39 @@ function createDurableStorage(owner, localStorage) {
   try {
     channel = typeof owner.BroadcastChannel === "function" ? new owner.BroadcastChannel(CHANNEL_NAME) : null;
     channelMessageHandler = (event) => {
+      if (event.data?.format !== STORAGE_MESSAGE_FORMAT) return;
       const key = event.data?.key;
-      if (!isValidStorageKey(key) || key === PENDING_WRITES_KEY) return;
+      if (!isValidStorageKey(key)) {
+        if (isNamespacedStorageKey(key) && key !== PENDING_WRITES_KEY && key !== CLEAR_PENDING_KEY) {
+          storageFailure = true;
+          notifyStatus();
+        }
+        return;
+      }
+      if (key === PENDING_WRITES_KEY || key === CLEAR_PENDING_KEY) return;
       const value = event.data.value;
-      if (!isValidBroadcastValue(value)) return;
-      if (value === null) values.delete(key);
-      else values.set(key, value);
+      if (!isValidBroadcastValue(value)) {
+        storageFailure = true;
+        notifyStatus();
+        return;
+      }
+      if (isStaleExternalGraphValue(key, values.get(key), value)) {
+        fallbackWrite(key, values.get(key));
+        return;
+      }
+      if (value === null) {
+        values.delete(key);
+        fallbackWrite(key, null);
+      } else {
+        if (!fitsAggregateStorageLimit(key, value)) {
+          fallbackWrite(key, values.get(key) ?? null);
+          storageFailure = true;
+          notifyStatus();
+          return;
+        }
+        values.set(key, value);
+        fallbackWrite(key, value);
+      }
       const pendingToken = owner.indexedDB ? markPending(key) : null;
       if (!hydrated) dirtyBeforeReady.set(key, value);
       else if (durable && database) {
@@ -538,7 +718,25 @@ function createDurableStorage(owner, localStorage) {
       const { opened, storedValues } = await Promise.race([hydrationPromise, timeout]);
       const localValues = new Map(values);
       const pendingValues = new Map(dirtyBeforeReady);
-      const pendingKeys = new Set([...pendingWrites.keys(), ...pendingValues.keys()]);
+      let pendingKeys = new Set([...pendingWrites.keys(), ...pendingValues.keys()]);
+      const pendingClearToken = readPendingClearToken();
+      if (pendingClearToken) {
+        storedValues.clear();
+        const postClearKeys = new Set(
+          [...pendingWrites.entries()]
+            .filter(([, token]) => isWriteAfterClear(token, pendingClearToken))
+            .map(([key]) => key)
+        );
+        for (const key of localValues.keys()) {
+          if (!postClearKeys.has(key)) localValues.delete(key);
+        }
+        for (const key of pendingValues.keys()) {
+          if (!postClearKeys.has(key)) pendingValues.delete(key);
+        }
+        pendingKeys = new Set([...pendingWrites.keys(), ...pendingValues.keys()]);
+        clearRequestedBeforeReady = true;
+        storageFailure = true;
+      }
       if (shouldPreferLocalGraph(localValues.get(GRAPH_VALUE_KEY), storedValues.get(GRAPH_VALUE_KEY))) {
         // localStorage is the synchronous mirror and may contain a newer
         // committed graph than IndexedDB when a cross-tab durable write
@@ -546,10 +744,6 @@ function createDurableStorage(owner, localStorage) {
         // newer mirror before declaring hydration complete.
         pendingKeys.add(GRAPH_VALUE_KEY);
         pendingKeys.add(HISTORY_VALUE_KEY);
-      }
-      if (clearRequestedBeforeReady) {
-        storedValues.clear();
-        localValues.clear();
       }
       if (pendingWrites.invalid) {
         localValues.forEach((_, key) => pendingKeys.add(key));
@@ -599,14 +793,39 @@ function createDurableStorage(owner, localStorage) {
       pendingKeys.forEach((key) => {
         if (!values.has(key)) enqueueDurableWrite(key, pendingWrites.get(key), () => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
       });
-    } catch {
+    } catch (error) {
       hydrationAbandoned = true;
-      closeHydrationDatabase();
+      if (error?.code === "STORAGE_INVALID" && openedDatabase) {
+        // Keep the opened database available only so a confirmed local-data
+        // purge can remove malformed entries. It remains non-durable until
+        // the user clears the store and a later hydration succeeds.
+        database = openedDatabase;
+        hydrationAdopted = true;
+      } else {
+        closeHydrationDatabase();
+      }
       durable = false;
       storageFailure = true;
       hydrated = true;
       // The synchronous localStorage or memory adapter remains usable if
       // IndexedDB is blocked, unavailable, or too slow to initialize.
+      const pendingClearToken = readPendingClearToken();
+      if (pendingClearToken && database) {
+        const postClearKeys = new Set(
+          [...pendingWrites.entries()]
+            .filter(([, token]) => isWriteAfterClear(token, pendingClearToken))
+            .map(([key]) => key)
+        );
+        for (const key of values.keys()) {
+          if (!postClearKeys.has(key)) values.delete(key);
+        }
+        enqueueDurableClear();
+        for (const [key, value] of values) {
+          if (postClearKeys.has(key)) {
+            enqueueDurableWrite(database, pendingWrites.get(key), () => writeDatabaseValue(database, key, value), () => fallbackWrite(key, value));
+          }
+        }
+      }
       notifyStatus();
     } finally {
       dirtyBeforeReady.clear();
@@ -667,20 +886,65 @@ export function getBrowserStorage(owner = globalThis) {
   if (owner.indexedDB) return createDurableStorage(owner, localStorage);
   if (localStorage) {
     const subscribers = new Set();
+    const initialLocalValues = readLocalValues(localStorage);
+    let storageFailure = initialLocalValues.invalid === true;
+    const notifyStatus = () => {
+      const event = { type: "status", durable: false, storageFailure };
+      subscribers.forEach((subscriber) => {
+        try {
+          subscriber(event);
+        } catch {
+          // A status subscriber must not break fallback persistence.
+        }
+      });
+    };
     let channel = null;
     let channelMessageHandler = null;
     let disposalPromise = null;
     const publish = (key, value) => {
       try {
-        channel?.postMessage({ key, value });
+        channel?.postMessage({ format: STORAGE_MESSAGE_FORMAT, key, value });
       } catch {
         // BroadcastChannel is an optional synchronization enhancement.
       }
     };
     const notify = (event) => {
       if (event?.storageArea && event.storageArea !== localStorage) return;
-      if (!isValidStorageKey(event?.key) || event.key === PENDING_WRITES_KEY) return;
-      if (!isValidBroadcastValue(event.newValue)) return;
+      if (!isValidStorageKey(event?.key)) {
+        if (isNamespacedStorageKey(event?.key) && event.key !== PENDING_WRITES_KEY) {
+          storageFailure = true;
+          notifyStatus();
+        }
+        return;
+      }
+      if (event.key === PENDING_WRITES_KEY) return;
+      if (!isValidBroadcastValue(event.newValue)) {
+        storageFailure = true;
+        notifyStatus();
+        return;
+      }
+      const currentValue = event.oldValue ?? localStorage.getItem(event.key);
+      if (isStaleExternalGraphValue(event.key, currentValue, event.newValue)) {
+        try {
+          if (currentValue === null) localStorage.removeItem(event.key);
+          else localStorage.setItem(event.key, currentValue);
+        } catch {
+          // Do not notify the application when the newer mirror cannot be
+          // restored after a stale native storage event.
+        }
+        return;
+      }
+      if (event.newValue !== null && !fitsLocalStorageAggregate(localStorage, event.key, event.newValue)) {
+        try {
+          if (currentValue === null) localStorage.removeItem(event.key);
+          else localStorage.setItem(event.key, currentValue);
+        } catch {
+          // The failed external value remains rejected even if restoration fails.
+        }
+        storageFailure = true;
+        notifyStatus();
+        return;
+      }
       const change = {
         type: "change",
         key: event.key,
@@ -701,8 +965,36 @@ export function getBrowserStorage(owner = globalThis) {
     try {
       channel = typeof owner.BroadcastChannel === "function" ? new owner.BroadcastChannel(CHANNEL_NAME) : null;
       channelMessageHandler = (event) => {
+        if (event.data?.format !== STORAGE_MESSAGE_FORMAT) return;
         const key = event.data?.key;
         if (typeof key !== "string") return;
+        if (!isValidStorageKey(key)) {
+          if (isNamespacedStorageKey(key) && key !== PENDING_WRITES_KEY) {
+            storageFailure = true;
+            notifyStatus();
+          }
+          return;
+        }
+        if (key === PENDING_WRITES_KEY) return;
+        const value = event.data.value;
+        if (!isValidBroadcastValue(value)) {
+          storageFailure = true;
+          notifyStatus();
+          return;
+        }
+        const currentValue = localStorage.getItem(key);
+        if (isStaleExternalGraphValue(key, currentValue, value)) return;
+        if (value !== null && !fitsLocalStorageAggregate(localStorage, key, value)) {
+          storageFailure = true;
+          notifyStatus();
+          return;
+        }
+        try {
+          if (value === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, value);
+        } catch {
+          return;
+        }
         notify({ key, newValue: event.data.value, storageArea: localStorage });
       };
       channel?.addEventListener("message", channelMessageHandler);
@@ -720,6 +1012,11 @@ export function getBrowserStorage(owner = globalThis) {
         assertStorageKey(key);
         const normalized = String(value);
         if (!isValidBroadcastValue(normalized)) throw new Error("Storage value exceeds the safety limit.");
+        if (!fitsLocalStorageAggregate(localStorage, key, normalized)) {
+          storageFailure = true;
+          notifyStatus();
+          throw new Error("Storage namespace exceeds the aggregate safety limit.");
+        }
         localStorage.setItem(key, normalized);
         publish(key, normalized);
       },
@@ -741,6 +1038,9 @@ export function getBrowserStorage(owner = globalThis) {
       storage,
       persistent: true,
       durable: false,
+      get storageFailure() {
+        return storageFailure;
+      },
       ready: Promise.resolve(),
       dispose() {
         if (disposalPromise) return disposalPromise;

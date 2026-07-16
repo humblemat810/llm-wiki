@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { defaultGraph, extractGraph, mergeExtraction } from "../graph-core.js";
+import { applyFeedback, buildExtractorFeedback, defaultGraph, extractGraph, mergeExtraction, replaceSource } from "../graph-core.js";
 import { MAX_REBUILD_FAILURE_CHARS, rebuildSources } from "../rebuild-adapter.js";
 
 const sourceText = (topic) => `${topic} uses a bounded representation with evidence and review feedback. The graph keeps the source attached so later learning can improve the internal map.`;
@@ -24,6 +24,55 @@ assert(rebuilt.rebuildDetails.every((detail) => detail.sourceId
 assert.deepEqual(progress, ["1/2:Attention", "2/2:Retrieval"], "saved-source rebuild should report bounded progress in source order");
 assert.deepEqual(rebuilt.graph.documents.map((document) => document.id), originalIds, "saved-source rebuild should preserve stable source identities");
 assert(rebuilt.graph.revisions.slice(0, 2).every((revision) => revision.operation === "rebuild" && revision.extractor === "local"), "saved-source rebuild should preserve bounded extractor provenance in each replacement revision");
+
+const reviewedNode = graph.nodes[0];
+const reviewedNodeSourceId = reviewedNode.sources[0];
+const reviewedNodeSourceTitle = graph.documents.find((document) => document.id === reviewedNodeSourceId)?.title;
+const reviewedGraph = applyFeedback(graph, "node", reviewedNode.id, "up").graph;
+const reviewedRebuild = await rebuildSources(reviewedGraph, {
+  extract: (source) => extractGraph(source.title, `${source.text} Reviewed decisions must survive rebuilds.`),
+  replace: (currentGraph, sourceId, extraction, options) => sourceId === reviewedNodeSourceId
+    ? {
+      replaced: true,
+      graph: {
+        ...currentGraph,
+        nodes: currentGraph.nodes.filter((node) => node.id !== reviewedNode.id),
+        edges: currentGraph.edges.filter((edge) => edge.source !== reviewedNode.id && edge.target !== reviewedNode.id)
+      }
+    }
+    : replaceSource(currentGraph, sourceId, extraction, options)
+});
+assert.equal(reviewedRebuild.rebuilt, 1, "rebuild should retain valid replacements while rejecting the reviewed-decision loss");
+assert.equal(reviewedRebuild.failures.find((failure) => failure.endsWith("replacement removed or changed a reviewed decision")), `${reviewedNodeSourceTitle}: replacement removed or changed a reviewed decision`, "rebuilds should report reviewed concept loss instead of persisting it");
+
+const rejectedNode = graph.nodes.find((node) => node.status === "inferred");
+const rejectedGraph = applyFeedback(graph, "node", rejectedNode.id, "down").graph;
+const rejectedFeedback = buildExtractorFeedback(rejectedGraph);
+const suppressedRejectedDecisions = new Set(rejectedFeedback
+  .filter((example) => example.status === "rejected")
+  .map((example) => `${example.kind === "concept" ? "node" : "edge"}|${example.id}`));
+const suppressionRebuild = await rebuildSources(rejectedGraph, {
+  suppressedRejectedDecisions,
+  extract: (source) => extractGraph(source.title, source.text, { feedback: rejectedFeedback })
+});
+assert.equal(suppressionRebuild.rebuilt, 2, "feedback-guided rebuilds should persist successful source replacements when rejected concepts are intentionally suppressed");
+assert.equal(suppressionRebuild.failures.length, 0, "intentional rejected-item suppression should not be reported as accidental reviewed-decision loss");
+assert(!suppressionRebuild.graph.nodes.some((node) => node.id === rejectedNode.id), "feedback-guided rebuilds should remove a rejected concept that the extractor intentionally suppresses");
+assert(suppressionRebuild.graph.learning.examples.some((example) => example.kind === "concept" && example.id === rejectedNode.id && example.status === "rejected"), "suppressed rejected concepts should remain reusable learning memory after rebuild");
+
+const rejectedEdge = graph.edges[0];
+const rejectedRelationGraph = applyFeedback(graph, "edge", rejectedEdge.id, "down").graph;
+const rejectedRelationFeedback = buildExtractorFeedback(rejectedRelationGraph);
+const suppressedRejectedRelations = new Set(rejectedRelationFeedback
+  .filter((example) => example.status === "rejected")
+  .map((example) => `${example.kind === "concept" ? "node" : "edge"}|${example.id}`));
+const relationSuppressionRebuild = await rebuildSources(rejectedRelationGraph, {
+  suppressedRejectedDecisions: suppressedRejectedRelations,
+  extract: (source) => extractGraph(source.title, source.text, { feedback: rejectedRelationFeedback })
+});
+assert.equal(relationSuppressionRebuild.rebuilt, 2, "feedback-guided rebuilds should also persist intentional rejected-relation suppression");
+assert(!relationSuppressionRebuild.graph.edges.some((edge) => edge.id === rejectedEdge.id), "feedback-guided rebuilds should remove a rejected relation that the extractor intentionally suppresses");
+assert(relationSuppressionRebuild.graph.learning.examples.some((example) => example.kind === "relation" && example.id === rejectedEdge.id && example.status === "rejected"), "suppressed rejected relations should remain reusable learning memory after rebuild");
 
 const failure = await rebuildSources(graph, {
   extract: (source) => {
@@ -102,6 +151,26 @@ const invalidReplacement = await rebuildSources(graph, {
 });
 assert.equal(invalidReplacement.rebuilt, 0, "invalid replacement results must not be counted as rebuilt");
 assert.equal(invalidReplacement.failures[0], "Attention: replacement returned an invalid graph", "invalid replacement results should become bounded failures");
+const originalFirstSourceText = graph.documents[0].text;
+const mutatingReplacement = await rebuildSources(graph, {
+  extract: (source) => extractGraph(source.title, `${source.text} Mutation isolation test.`),
+  replace: (currentGraph) => {
+    currentGraph.documents[0].text = "provider mutated the replacement input";
+    return { replaced: true, graph: null };
+  }
+});
+assert.equal(mutatingReplacement.rebuilt, 0, "mutating invalid replacement results must not be counted as rebuilt");
+assert.equal(mutatingReplacement.failures[0], "Attention: replacement returned an invalid graph", "mutating invalid replacements should remain bounded failures");
+assert.equal(graph.documents[0].text, originalFirstSourceText, "replacement implementations must not mutate the committed graph snapshot");
+const originalSecondSourceText = graph.documents[1].text;
+const mutatingExtractor = await rebuildSources(graph, {
+  extract: (source, currentGraph) => {
+    currentGraph.documents[1].text = "extractor mutated the graph context";
+    return extractGraph(source.title, `${source.text} Extractor isolation test.`);
+  }
+});
+assert.equal(mutatingExtractor.rebuilt, 2, "extractors that mutate only their snapshot should still produce valid rebuilds");
+assert.equal(graph.documents[1].text, originalSecondSourceText, "extractors must not mutate the committed graph context");
 const sourceDroppingReplacement = await rebuildSources(graph, {
   extract: (source) => extractGraph(source.title, `${source.text} Source identity test.`),
   replace: () => ({ replaced: true, graph: { ...defaultGraph(), documents: [] } })
@@ -146,6 +215,23 @@ const unrelatedSourceMutation = await rebuildSources(graph, {
 });
 assert.equal(unrelatedSourceMutation.rebuilt, 0, "rebuild should reject replacements that alter another saved source record");
 assert.equal(unrelatedSourceMutation.failures[0], "Attention: replacement changed saved source records", "rebuild should expose unintended saved-source mutation");
+const sourceContentMutation = await rebuildSources(graph, {
+  extract: (source) => extractGraph(source.title, `${source.text} Source authority test.`),
+  replace: (currentGraph, sourceId, extraction, options) => {
+    assert.equal(options.preserveSourceContent, true, "saved-source rebuilds should preserve authoritative source content");
+    return {
+      replaced: true,
+      graph: {
+        ...replaceSource(currentGraph, sourceId, extraction, options).graph,
+        documents: currentGraph.documents.map((document) => document.id === sourceId
+          ? { ...document, text: `${document.text} tampered by provider` }
+          : document)
+      }
+    };
+  }
+});
+assert.equal(sourceContentMutation.rebuilt, 0, "rebuild should reject replacements that alter the rebuilt source content");
+assert.equal(sourceContentMutation.failures[0], "Attention: replacement changed saved source content", "rebuild should identify source-authority mutations separately from unrelated source changes");
 const emptyReplacement = await rebuildSources(graph, {
   extract: (source) => {
     const extraction = extractGraph(source.title, source.text);
@@ -175,6 +261,21 @@ const adapterGuardedRelationDrop = await rebuildSources(graph, {
 });
 assert.equal(adapterGuardedRelationDrop.rebuilt, 0, "rebuild adapter should reject custom replacements that bypass graph-core category preservation");
 assert.equal(adapterGuardedRelationDrop.failures[0], "Attention: replacement removed all source-linked relations", "rebuild adapter should report relation loss from injected replacement implementations");
+const reviewedEdge = graph.edges[0];
+const reviewedEdgeSourceId = reviewedEdge.sources[0];
+const reviewedEdgeSourceTitle = graph.documents.find((document) => document.id === reviewedEdgeSourceId)?.title;
+const reviewedRelationGraph = applyFeedback(graph, "edge", reviewedEdge.id, "down").graph;
+const reviewedRelationDrop = await rebuildSources(reviewedRelationGraph, {
+  extract: (source) => extractGraph(source.title, source.text),
+  replace: (currentGraph, sourceId, extraction, options) => sourceId === reviewedEdgeSourceId
+    ? {
+      replaced: true,
+      graph: { ...currentGraph, edges: currentGraph.edges.filter((edge) => edge.id !== reviewedEdge.id) }
+    }
+    : replaceSource(currentGraph, sourceId, extraction, options)
+});
+assert.equal(reviewedRelationDrop.rebuilt, 1, "rebuild should retain valid replacements while rejecting reviewed relation loss");
+assert.equal(reviewedRelationDrop.failures.find((failure) => failure.endsWith("replacement removed or changed a reviewed decision")), `${reviewedEdgeSourceTitle}: replacement removed or changed a reviewed decision`, "rebuilds should protect reviewed relation decisions as well as concepts");
 await assert.rejects(
   () => rebuildSources({ ...graph, documents: [{ ...graph.documents[0], id: graph.documents[1].id }, graph.documents[1]] }, { extract: () => null }),
   /normalized graph with source documents/,

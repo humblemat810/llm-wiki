@@ -15,13 +15,14 @@ tenant isolation, cloud graph storage, billing, or hosted backup retention.
 | --- | --- | --- |
 | Local graph and revision history | Ready for single-user use | `graph-core.js`, `graph-store.js`, storage/recovery smoke tests |
 | Obsidian projection and round-trip review | Ready | projection, ZIP, chronology, privacy, and rebuild tests |
-| Optional extraction gateway | Ready for a protected single instance | authenticated readiness, bounded requests, rate/concurrency limits, provider HTTP smoke |
-| Standalone server lifecycle | Ready for the reference process contract | `npm run smoke:server` covers build identity, auth success/rejection, bounded concurrency, readiness, and graceful drain |
-| Static public wiki | Ready for publication | shared Node/Pages asset contract, exact manifest/digest verification, accessibility/performance gates, and deployment probe |
-| Live default Pages deployment | Not currently verified | The repository contains the publication workflow, but the default `https://humblemat810.github.io/llm-wiki/` returned HTTP 404 on July 16, 2026; enable GitHub Pages with the Actions source and run the workflow before calling the public URL production |
+| Optional extraction gateway | Ready for a protected single instance | pre-traffic `npm run deployment:check`, authenticated readiness, bounded requests, rate/concurrency limits, provider HTTP smoke, built-in server-side OpenAI-compatible model adapter |
+| Standalone server lifecycle | Ready for the reference process contract | `npm run smoke:server` covers build identity, liveness/readiness, auth success/rejection, bounded concurrency, and graceful drain |
+| Static public wiki | Ready for publication | shared Node/Pages asset contract, required deployed asset manifest, exact manifest/digest verification, accessibility/performance gates, and deployment probe |
+| Live default Pages deployment | Blocked by external configuration | A direct probe on July 16, 2026 returned HTTP 404 from `https://humblemat810.github.io/llm-wiki/`; enable GitHub Pages with the Actions source, run the publication workflow, and pass `npm run smoke:pages:deployment` before calling the public URL production |
 | Container runtime | Ready for a hardened single instance | `npm run smoke:container` proves non-root, read-only filesystem, capability drop, readiness, health, auth, and drain behavior |
+| Supply-chain evidence | Ready | deterministic SPDX SBOM, parsed workflow/permission checks, immutable action pins, and GitHub artifact attestations for Pages/release manifests |
 | Automated release checks | Ready | locked install, dependency audit, full suite, CodeQL, Scorecard, tag/container gates, Chromium/Firefox/WebKit release-workbench matrix, and retained Pages evidence |
-| Automated browser smoke | Repository gate | `.github/workflows/browser.yml` runs the local workbench smoke across Chromium, Firefox, and WebKit, including manifest, raster-icon, and installed-app metadata delivery, human review→reusable learning, Obsidian ZIP export/import, source-revision identity, and failure screenshots |
+| Automated browser smoke | Repository gate | `.github/workflows/browser.yml` runs the local workbench smoke across Chromium, Firefox, and WebKit, including same-origin model-mode extraction and draft-preserving failure recovery where runner interception is supported, manifest, raster-icon, and installed-app metadata delivery, human review→reusable learning, Obsidian ZIP export/import, source-revision identity, and failure screenshots |
 | Exact-deployment browser smoke | Pages release gate | The Pages workflow runs the browser smoke across Chromium, Firefox, and WebKit against the deployed URL after publication and verifies the deployed source revision |
 | Scheduled browser experience monitor | Daily operator gate | `.github/workflows/browser-monitor.yml` repeats the exact-origin browser smoke across Chromium, Firefox, and WebKit after publication against the default-branch revision |
 | Repeatable deployment capacity probe | Operator gate | `.github/workflows/capacity.yml` runs a health-only bounded duration probe only after explicit target authorization and SLO inputs |
@@ -40,8 +41,20 @@ npm run production:check
 For a public static release, also configure the exact HTTPS `PUBLIC_ORIGIN`,
 build and verify Pages, and wait for the post-deploy smoke probe to pass. For
 the reference server, use TLS at the gateway, configure both authentication
-secrets, enforce gateway identity/CSRF policy, and monitor `/healthz`,
-`/readyz`, and authenticated `/metrics`.
+secrets, enforce gateway identity/CSRF policy, and monitor `/livez`, `/readyz`,
+and authenticated `/metrics`.
+
+The repository cannot enable GitHub Pages through source files. Until the
+repository Settings → Pages source is set to **GitHub Actions** and a
+publication workflow succeeds, the default project URL is an external
+deployment blocker, not evidence against the generated artifact. Verify the
+exact origin and revision with:
+
+```bash
+PAGES_DEPLOYMENT_URL=https://humblemat810.github.io/llm-wiki/ \
+PAGES_EXPECTED_REVISION="$(git rev-parse HEAD)" \
+npm run smoke:pages:deployment
+```
 
 ## Remaining product work
 

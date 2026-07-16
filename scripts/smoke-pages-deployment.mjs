@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { parseJsonWithUniqueKeys } from "../graph-core.js";
 import { computeServiceWorkerCacheRevision, readServiceWorkerCacheName, stripDeploymentCacheRevision } from "./service-worker-cache.mjs";
+import { verifyCanvasProjection } from "./verify-canvas.mjs";
 
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15000;
@@ -11,6 +12,23 @@ const DEFAULT_ATTEMPTS = 12;
 const DEFAULT_RETRY_DELAY_MS = 1000;
 const MANIFEST_FETCH_CONCURRENCY = 4;
 const APP_VERSION = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
+
+function boundedPositiveInteger(name, value, fallback, maximum) {
+  if (value === undefined || value === null || String(value).trim() === "") return fallback;
+  const normalized = String(value).trim();
+  if (!/^\d+$/.test(normalized)) throw new Error(`${name} must be a positive integer.`);
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer.`);
+  return Math.min(parsed, maximum);
+}
+
+export function parsePagesSmokeConfig(environment = process.env) {
+  return {
+    attempts: boundedPositiveInteger("PAGES_SMOKE_ATTEMPTS", environment.PAGES_SMOKE_ATTEMPTS, DEFAULT_ATTEMPTS, 60),
+    retryDelayMs: boundedPositiveInteger("PAGES_SMOKE_RETRY_DELAY_MS", environment.PAGES_SMOKE_RETRY_DELAY_MS, DEFAULT_RETRY_DELAY_MS, 10000),
+    expectedRevision: environment.PAGES_EXPECTED_REVISION || null
+  };
+}
 
 function normalizeDeploymentOrigin(value) {
   let url;
@@ -29,7 +47,7 @@ function normalizeDeploymentOrigin(value) {
   return url;
 }
 
-async function readBoundedBody(response) {
+async function readBoundedBody(response, signal = null) {
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_RESPONSE_BYTES)) {
     throw new Error(`response is larger than the ${MAX_RESPONSE_BYTES}-byte smoke-test limit`);
@@ -40,9 +58,28 @@ async function readBoundedBody(response) {
   const chunks = [];
   let total = 0;
   let completed = false;
+  let abortReject;
+  let abortSettled = false;
+  const abortPromise = signal
+    ? new Promise((_, reject) => {
+      abortReject = reject;
+    })
+    : null;
+  const abortReader = () => {
+    if (abortSettled) return;
+    abortSettled = true;
+    try {
+      Promise.resolve(reader.cancel?.()).catch(() => {});
+    } catch {
+      // Reader cleanup is best-effort; the abort promise still bounds the read.
+    }
+    abortReject?.(Object.assign(new Error("Pages deployment response reading was aborted."), { name: "AbortError" }));
+  };
+  signal?.addEventListener?.("abort", abortReader, { once: true });
+  if (signal?.aborted) abortReader();
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await (abortPromise ? Promise.race([reader.read(), abortPromise]) : reader.read());
       if (done) {
         completed = true;
         break;
@@ -53,8 +90,9 @@ async function readBoundedBody(response) {
       chunks.push(value);
     }
   } finally {
-    if (!completed) await reader.cancel().catch(() => {});
+    if (!completed) await Promise.resolve(reader.cancel?.()).catch(() => {});
     reader.releaseLock();
+    signal?.removeEventListener?.("abort", abortReader);
   }
   const body = new Uint8Array(total);
   let offset = 0;
@@ -69,7 +107,8 @@ async function readBoundedBody(response) {
 }
 
 function contentTypeMatches(response, expected) {
-  return (response.headers.get("content-type") || "").toLowerCase().startsWith(expected);
+  const actual = (response.headers.get("content-type") || "").toLowerCase();
+  return (Array.isArray(expected) ? expected : [expected]).some((candidate) => actual.startsWith(candidate));
 }
 
 function isWithinDeployment(url, base) {
@@ -139,6 +178,7 @@ export async function smokePagesDeployment(deploymentUrl, {
   attempts = DEFAULT_ATTEMPTS,
   retryDelayMs = DEFAULT_RETRY_DELAY_MS,
   expectedRevision = null,
+  requestTimeoutMs = REQUEST_TIMEOUT_MS,
   fetchImpl = globalThis.fetch
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("This smoke test requires fetch.");
@@ -146,6 +186,9 @@ export async function smokePagesDeployment(deploymentUrl, {
     throw new Error("expectedRevision must be unknown or a 7–64 character hexadecimal source revision.");
   }
   const base = normalizeDeploymentOrigin(deploymentUrl);
+  const timeoutMs = Number.isSafeInteger(requestTimeoutMs) && requestTimeoutMs >= 1
+    ? Math.min(REQUEST_TIMEOUT_MS, requestTimeoutMs)
+    : REQUEST_TIMEOUT_MS;
   const checks = [
     {
       path: "",
@@ -223,6 +266,17 @@ export async function smokePagesDeployment(deploymentUrl, {
         && body.includes("script-src 'none'")
     },
     {
+      path: "examples/sample-graph.canvas",
+      contentType: ["application/json", "application/octet-stream"],
+      validate: (body) => {
+        const canvas = parseJsonWithUniqueKeys(body, "deployed sample Graph.canvas");
+        verifyCanvasProjection(canvas, "deployed sample Graph.canvas");
+        return canvas.nodes.length > 0
+          && canvas.edges.length > 0
+          && canvas.nodes.every((node) => node.type === "text" && typeof node.text === "string");
+      }
+    },
+    {
       path: "artifacts.html",
       contentType: "text/html",
       validate: (body) => body.includes("Community artifacts")
@@ -243,11 +297,25 @@ export async function smokePagesDeployment(deploymentUrl, {
       for (const check of checks) {
         const expectedUrl = new URL(check.path, base);
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        let timedOut = false;
+        let timeoutReject;
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutReject = reject;
+        });
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          timeoutReject?.(Object.assign(new Error("Pages deployment request timed out."), { name: "AbortError" }));
+          void cancelResponseBody(response);
+        }, timeoutMs);
         let response;
         let bodyConsumed = false;
         try {
-          response = await fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal });
+          const fetchPromise = Promise.resolve().then(() => fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal }));
+          fetchPromise.then((lateResponse) => {
+            if (timedOut) void cancelResponseBody(lateResponse);
+          }, () => {});
+          response = await Promise.race([fetchPromise, timeoutPromise]);
           if (!response.ok) {
             if (!check.path && response.status === 404) {
               throw new Error("deployed Pages root returned HTTP 404; enable GitHub Pages with the Actions source and run the publication workflow");
@@ -258,7 +326,10 @@ export async function smokePagesDeployment(deploymentUrl, {
           if (!contentTypeMatches(response, check.contentType)) {
             throw new Error(`${check.path || "/"} returned ${response.headers.get("content-type") || "no content type"} instead of ${check.contentType}`);
           }
-          const body = new TextDecoder("utf-8", { fatal: true }).decode(await readBoundedBody(response));
+          const body = new TextDecoder("utf-8", { fatal: true }).decode(await Promise.race([
+            readBoundedBody(response, controller.signal),
+            timeoutPromise
+          ]));
           bodyConsumed = true;
           if (check.path === "asset-manifest.json") deployedManifest = parseDeployedManifest(body);
           if (check.path === "sw.js") deployedServiceWorker = body;
@@ -271,14 +342,28 @@ export async function smokePagesDeployment(deploymentUrl, {
       const verifiedAssets = await mapWithConcurrency(deployedManifest.files, MANIFEST_FETCH_CONCURRENCY, async (entry) => {
         const expectedUrl = new URL(entry.path, base);
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        let timedOut = false;
+        let timeoutReject;
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutReject = reject;
+        });
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          timeoutReject?.(Object.assign(new Error("Pages deployment asset request timed out."), { name: "AbortError" }));
+          void cancelResponseBody(response);
+        }, timeoutMs);
         let response;
         let bodyConsumed = false;
         try {
-          response = await fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal });
+          const fetchPromise = Promise.resolve().then(() => fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal }));
+          fetchPromise.then((lateResponse) => {
+            if (timedOut) void cancelResponseBody(lateResponse);
+          }, () => {});
+          response = await Promise.race([fetchPromise, timeoutPromise]);
           if (!response.ok) throw new Error(`${entry.path} returned HTTP ${response.status}`);
           if (!isWithinDeployment(response.url, base)) throw new Error(`${entry.path} redirected outside the deployment origin`);
-          const body = await readBoundedBody(response);
+          const body = await Promise.race([readBoundedBody(response, controller.signal), timeoutPromise]);
           bodyConsumed = true;
           const digest = createHash("sha256").update(body).digest("hex");
           if (body.byteLength !== entry.bytes || digest !== entry.sha256) {
@@ -297,7 +382,13 @@ export async function smokePagesDeployment(deploymentUrl, {
       if (!readServiceWorkerCacheName(deployedServiceWorker).endsWith(`-${expectedCacheRevision}`)) {
         throw new Error(`deployed service-worker cache revision does not match the live asset manifest: expected ${expectedCacheRevision}`);
       }
-      return { ok: true, checked: checks.length + verifiedAssets.length, manifestFiles: verifiedAssets.length, origin: base.href };
+      return {
+        ok: true,
+        checked: checks.length + verifiedAssets.length,
+        endpointChecks: checks.length,
+        manifestFiles: verifiedAssets.length,
+        origin: base.href
+      };
     } catch (error) {
       lastError = error;
       if (attempt < attempts) {
@@ -310,8 +401,6 @@ export async function smokePagesDeployment(deploymentUrl, {
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const result = await smokePagesDeployment(process.argv[2] || process.env.PAGES_DEPLOYMENT_URL, {
-    expectedRevision: process.env.PAGES_EXPECTED_REVISION || null
-  });
+  const result = await smokePagesDeployment(process.argv[2] || process.env.PAGES_DEPLOYMENT_URL, parsePagesSmokeConfig());
   console.log(`Pages deployment smoke ok: ${result.checked} checks (${result.origin})`);
 }

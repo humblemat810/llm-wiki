@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { IDB_OPERATION_TIMEOUT_MS, MAX_BROADCAST_VALUE_BYTES, MAX_BROADCAST_VALUE_CHARS, MAX_STORAGE_KEY_CHARS, PENDING_WRITE_MARKER_PREFIX, PENDING_WRITES_KEY, createMemoryStorage, getBrowserStorage, isExternalStorageRemoval, isValidStorageValue } from "../storage-adapter.js";
+import { CLEAR_PENDING_KEY, IDB_OPERATION_TIMEOUT_MS, MAX_BROADCAST_VALUE_BYTES, MAX_BROADCAST_VALUE_CHARS, MAX_STORAGE_ENTRIES, MAX_STORAGE_KEY_CHARS, PENDING_WRITE_MARKER_PREFIX, PENDING_WRITES_KEY, STORAGE_MESSAGE_FORMAT, createMemoryStorage, getBrowserStorage, isExternalStorageRemoval, isValidStorageValue } from "../storage-adapter.js";
 import { MAX_GRAPH_DOCUMENTS } from "../graph-core.js";
 import { MAX_HISTORY_CAPACITY, MAX_PERSISTED_JSON_BYTES, MAX_PERSISTED_JSON_CHARS, MAX_RECOVERY_JSON_CHARS, createGraphStore } from "../graph-store.js";
 
@@ -104,10 +104,11 @@ orderedStorageCalls.length = 0;
 assert.equal(orderedStore.clear(), true, "clear should remain valid in the crash-ordering fixture");
 assert.deepEqual(orderedStorageCalls.slice(-2), ["set:ordered-history", "remove:ordered-graph"], "clear should record undo history before removing the primary graph");
 
-function createFakeIndexedDB(controlWrites = false) {
+function createFakeIndexedDB(controlWrites = false, failClear = false) {
   const values = new Map();
   const pendingCompletions = [];
   let initialized = false;
+  let clearFailure = failClear;
   let closeCount = 0;
   const database = {
     objectStoreNames: { contains: (name) => name === "values" },
@@ -129,9 +130,11 @@ function createFakeIndexedDB(controlWrites = false) {
           else complete();
         },
         clear() {
-          values.clear();
+          if (!clearFailure) values.clear();
           const complete = () => queueMicrotask(() => transaction.oncomplete?.());
-          if (controlWrites) pendingCompletions.push(complete);
+          const fail = () => queueMicrotask(() => transaction.onerror?.(new Error("IndexedDB clear failed.")));
+          if (clearFailure) pendingCompletions.push(fail);
+          else if (controlWrites) pendingCompletions.push(complete);
           else complete();
         },
         openCursor() {
@@ -168,6 +171,7 @@ function createFakeIndexedDB(controlWrites = false) {
       return request;
     },
     seed: (key, value) => values.set(key, value),
+    setFailClear: (value) => { clearFailure = value === true; },
     has: (key) => values.has(key),
     releaseNextWrite: () => pendingCompletions.shift()?.(),
     pendingWriteCount: () => pendingCompletions.length,
@@ -183,6 +187,23 @@ function createLocalStorage(initial = {}) {
     getItem: (key) => values.has(key) ? values.get(key) : null,
     setItem: (key, value) => values.set(key, String(value)),
     removeItem: (key) => values.delete(key)
+  };
+}
+
+function createStorageOwner(localStorage, indexedDB) {
+  const listeners = new Map();
+  return {
+    localStorage,
+    indexedDB,
+    addEventListener(type, callback) {
+      listeners.set(type, callback);
+    },
+    removeEventListener(type, callback) {
+      if (listeners.get(type) === callback) listeners.delete(type);
+    },
+    dispatch(type, event) {
+      listeners.get(type)?.(event);
+    }
   };
 }
 
@@ -217,11 +238,63 @@ const oversizedHydration = getBrowserStorage({
 });
 await oversizedHydration.ready;
 assert.equal(oversizedHydration.storage.getItem("llm-field-notes-knowledge-graph"), null, "oversized localStorage values should be ignored during hydration");
+const oversizedFallback = getBrowserStorage({
+  localStorage: createLocalStorage({ "llm-field-notes-knowledge-graph": oversizedStorageValue })
+});
+assert.equal(oversizedFallback.durable, false, "localStorage-only fallback should disclose its non-durable mode");
+assert.equal(oversizedFallback.storageFailure, true, "localStorage-only fallback should disclose rejected existing values");
+const overlongFallbackKey = `llm-field-notes-${"x".repeat(MAX_STORAGE_KEY_CHARS)}`;
+const overlongFallback = getBrowserStorage({
+  localStorage: createLocalStorage({ [overlongFallbackKey]: "stale value" })
+});
+assert.equal(overlongFallback.storageFailure, true, "localStorage-only fallback should disclose rejected overlong namespaced keys");
 const oversizedDatabase = createFakeIndexedDB();
 oversizedDatabase.seed("llm-field-notes-knowledge-graph", oversizedStorageValue);
 const oversizedDatabaseHydration = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: oversizedDatabase });
 await oversizedDatabaseHydration.ready;
+assert.equal(oversizedDatabaseHydration.durable, false, "malformed IndexedDB values should fail closed instead of reporting durable storage");
+assert.equal(oversizedDatabaseHydration.storageFailure, true, "malformed IndexedDB values should expose degraded storage state");
 assert.equal(oversizedDatabaseHydration.storage.getItem("llm-field-notes-knowledge-graph"), null, "oversized IndexedDB values should be ignored during hydration");
+const malformedLocalMirrorWithDurableDb = getBrowserStorage({
+  localStorage: createLocalStorage({ "llm-field-notes-knowledge-graph": oversizedStorageValue }),
+  indexedDB: createFakeIndexedDB()
+});
+await malformedLocalMirrorWithDurableDb.ready;
+assert.equal(malformedLocalMirrorWithDurableDb.durable, true, "a clean IndexedDB should remain usable despite a malformed synchronous mirror");
+assert.equal(malformedLocalMirrorWithDurableDb.storageFailure, true, "a malformed synchronous mirror should remain disclosed alongside durable storage");
+const crowdedDatabase = createFakeIndexedDB();
+for (let index = 0; index <= MAX_STORAGE_ENTRIES; index += 1) {
+  crowdedDatabase.seed(`llm-field-notes-crowded-${index}`, "x");
+}
+const crowdedHydration = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: crowdedDatabase });
+await crowdedHydration.ready;
+assert.equal(crowdedHydration.durable, false, "IndexedDB hydration should fall back when aggregate entry count exceeds its safety limit");
+assert.equal(crowdedHydration.storageFailure, true, "aggregate IndexedDB hydration limits should be observable");
+const boundedWriteStorage = getBrowserStorage({ localStorage: createLocalStorage(), indexedDB: createFakeIndexedDB() });
+await boundedWriteStorage.ready;
+for (let index = 0; index < MAX_STORAGE_ENTRIES; index += 1) {
+  boundedWriteStorage.storage.setItem(`llm-field-notes-write-${index}`, "x");
+}
+assert.throws(
+  () => boundedWriteStorage.storage.setItem("llm-field-notes-write-overflow", "x"),
+  /aggregate safety limit/,
+  "durable storage writes should enforce the aggregate entry ceiling after hydration"
+);
+const boundedFallbackStorage = getBrowserStorage({ localStorage: createLocalStorage() });
+const fallbackStatusEvents = [];
+boundedFallbackStorage.subscribe((event) => {
+  if (event.type === "status") fallbackStatusEvents.push(event);
+});
+for (let index = 0; index < MAX_STORAGE_ENTRIES; index += 1) {
+  boundedFallbackStorage.storage.setItem(`llm-field-notes-fallback-${index}`, "x");
+}
+assert.throws(
+  () => boundedFallbackStorage.storage.setItem("llm-field-notes-fallback-overflow", "x"),
+  /aggregate safety limit/,
+  "localStorage fallback writes should enforce the aggregate entry ceiling"
+);
+assert.equal(boundedFallbackStorage.storageFailure, true, "localStorage aggregate failures should expose degraded state");
+assert(fallbackStatusEvents.some((event) => event.storageFailure === true), "localStorage aggregate failures should notify live status subscribers");
 let fallbackStorageEventHandler = null;
 let fallbackStorageChange = null;
 const fallbackLocalStorage = createLocalStorage();
@@ -248,6 +321,7 @@ const fallbackPersistent = getBrowserStorage({
 const unsubscribeFallback = fallbackPersistent.subscribe((event) => {
   fallbackStorageChange = event;
 });
+const fallbackStorageFailureBeforeExternalInvalid = fallbackPersistent.storageFailure;
 fallbackStorageEventHandler({
   key: "llm-field-notes-knowledge-graph",
   newValue: "external-graph",
@@ -257,10 +331,66 @@ assert.equal(fallbackPersistent.storage.getItem("llm-field-notes-knowledge-graph
 assert.equal(fallbackStorageChange?.key, "llm-field-notes-knowledge-graph", "localStorage fallback should surface external graph changes");
 assert.equal(fallbackStorageChange?.newValue, "external-graph");
 assert.equal(fallbackStorageChange?.external, true);
-fallbackBroadcastHandler({ data: { key: "llm-field-notes-knowledge-graph", value: "broadcast-graph" } });
+fallbackBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: "llm-field-notes-knowledge-graph", value: "broadcast-graph" } });
 assert.equal(fallbackStorageChange?.newValue, "broadcast-graph", "localStorage fallback should surface BroadcastChannel graph changes");
+assert.equal(fallbackPersistent.storage.getItem("llm-field-notes-knowledge-graph"), "broadcast-graph", "BroadcastChannel updates should persist into the fallback localStorage mirror");
+fallbackBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: "llm-field-notes-knowledge-graph", value: { forged: true } } });
+assert.equal(fallbackPersistent.storageFailure, true, "invalid fallback BroadcastChannel values should disclose degraded storage");
+assert.equal(fallbackStorageFailureBeforeExternalInvalid, false, "the fallback should begin healthy before an invalid external value");
 fallbackPersistent.storage.setItem("llm-field-notes-knowledge-graph", "local-graph");
+assert.equal(fallbackBroadcastMessages[0].lastMessage.format, STORAGE_MESSAGE_FORMAT, "localStorage fallback should publish versioned storage messages");
 assert.equal(fallbackBroadcastMessages[0].lastMessage.value, "local-graph", "localStorage fallback should publish local writes to other tabs");
+fallbackStorageChange = null;
+fallbackBroadcastHandler({ data: { key: "llm-field-notes-knowledge-graph", value: "unversioned-forged-value" } });
+assert.equal(fallbackStorageChange, null, "unversioned BroadcastChannel messages should be ignored");
+const newerGraph = JSON.stringify({
+  schema: "llm-field-notes/graph@1",
+  version: 2,
+  committedAt: "2026-02-02T00:00:00.000Z",
+  documents: [],
+  nodes: [{ id: "newer", label: "Newer" }],
+  edges: [],
+  revisions: []
+});
+const staleGraph = JSON.stringify({
+  schema: "llm-field-notes/graph@1",
+  version: 1,
+  committedAt: "2026-02-01T00:00:00.000Z",
+  documents: [],
+  nodes: [{ id: "stale", label: "Stale" }],
+  edges: [],
+  revisions: []
+});
+const staleGraphLocalStorage = createLocalStorage({ "llm-field-notes-knowledge-graph": newerGraph });
+let staleGraphBroadcastHandler = null;
+let staleGraphStorageHandler = null;
+class StaleGraphBroadcastChannel {
+  addEventListener(type, handler) {
+    if (type === "message") staleGraphBroadcastHandler = handler;
+  }
+  postMessage() {}
+}
+const staleGraphStorage = getBrowserStorage({
+  localStorage: staleGraphLocalStorage,
+  addEventListener(type, handler) {
+    if (type === "storage") staleGraphStorageHandler = handler;
+  },
+  BroadcastChannel: StaleGraphBroadcastChannel
+});
+let staleGraphEventCount = 0;
+staleGraphStorage.subscribe(() => { staleGraphEventCount += 1; });
+staleGraphBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: "llm-field-notes-knowledge-graph", value: staleGraph } });
+assert.equal(staleGraphStorage.storage.getItem("llm-field-notes-knowledge-graph"), newerGraph, "stale BroadcastChannel graph values should not overwrite a newer local mirror");
+assert.equal(staleGraphEventCount, 0, "stale BroadcastChannel graph values should not notify subscribers");
+staleGraphStorageHandler({
+  key: "llm-field-notes-knowledge-graph",
+  oldValue: newerGraph,
+  newValue: staleGraph,
+  storageArea: staleGraphLocalStorage
+});
+assert.equal(staleGraphStorage.storage.getItem("llm-field-notes-knowledge-graph"), newerGraph, "stale native storage graph values should not overwrite a newer local mirror");
+assert.equal(staleGraphEventCount, 0, "stale native storage graph values should not notify subscribers");
+await staleGraphStorage.dispose();
 unsubscribeFallback();
 fallbackStorageChange = null;
 let fallbackStorageListenerRemoved = 0;
@@ -316,12 +446,71 @@ const durableClearPersistent = getBrowserStorage({
   indexedDB: durableClearDb
 });
 await durableClearPersistent.ready;
+assert.equal(durableClearPersistent.durable, false, "invalid IndexedDB entries should keep storage degraded until they are purged");
 durableClearPersistent.storage.clear();
 await durableClearPersistent.flush();
 assert.equal(durableClearPersistent.storage.getItem("llm-field-notes-knowledge-graph"), null, "durable clear should remove pending namespace keys even when their values are not hydrated");
 assert.equal(durableClearLocalStorage.getItem("llm-field-notes-corrupt"), null, "durable clear should remove oversized namespaced localStorage remnants");
 assert.equal(durableClearLocalStorage.getItem(durableClearOverlongKey), null, "durable clear should remove overlong namespaced localStorage keys");
 assert.equal(durableClearDb.has("llm-field-notes-hidden-invalid"), false, "durable clear should purge malformed IndexedDB namespace entries");
+assert.equal(durableClearPersistent.durable, true, "a successful purge should restore durable storage capability");
+assert.equal(durableClearPersistent.storageFailure, false, "a successful purge should clear the degraded storage state");
+const durableClearMarkers = [];
+for (let index = 0; index < durableClearLocalStorage.length; index += 1) {
+  const key = durableClearLocalStorage.key(index);
+  if (key?.startsWith(PENDING_WRITE_MARKER_PREFIX)) durableClearMarkers.push(key);
+}
+assert.deepEqual(durableClearMarkers, [], "durable clear should remove pending-write marker keys");
+const failedClearDb = createFakeIndexedDB(false, true);
+failedClearDb.seed("llm-field-notes-hidden-invalid", { forged: true });
+const failedClearLocalStorage = createLocalStorage({ "llm-field-notes-visible": "local mirror" });
+const failedClearStorage = getBrowserStorage({
+  localStorage: failedClearLocalStorage,
+  indexedDB: failedClearDb
+});
+const failedClearStatus = [];
+failedClearStorage.subscribe((event) => failedClearStatus.push(event));
+await failedClearStorage.ready;
+failedClearStorage.storage.clear();
+await failedClearStorage.flush();
+assert.equal(failedClearStorage.durable, false, "a failed durable clear should demote storage to its synchronous fallback");
+assert.equal(failedClearStorage.storageFailure, true, "a failed durable clear should disclose that deletion could not be verified");
+assert(failedClearStatus.some((event) => event.type === "status" && event.storageFailure), "a failed durable clear should emit a storage failure status event");
+assert.equal(failedClearDb.has("llm-field-notes-hidden-invalid"), true, "a failed durable clear should not claim that the durable namespace was purged");
+assert.match(failedClearLocalStorage.getItem(CLEAR_PENDING_KEY) || "", /^\d+-/, "a failed durable clear should retain a generation-bearing retry marker across reloads");
+failedClearStorage.storage.setItem("llm-field-notes-after-failed-clear", "new state");
+failedClearDb.setFailClear(false);
+const failedClearReload = getBrowserStorage({
+  localStorage: failedClearLocalStorage,
+  indexedDB: failedClearDb
+});
+await failedClearReload.ready;
+await failedClearReload.flush();
+assert.equal(failedClearReload.storage.getItem("llm-field-notes-hidden-invalid"), null, "a reloaded workspace should not adopt durable state while a clear retry is pending");
+assert.equal(failedClearReload.storage.getItem("llm-field-notes-after-failed-clear"), "new state", "writes made after a failed clear should survive the retry while stale durable state is purged");
+assert.equal(failedClearDb.has("llm-field-notes-hidden-invalid"), false, "a reloaded workspace should retry and complete a previously failed durable clear");
+assert.equal(failedClearDb.has("llm-field-notes-after-failed-clear"), true, "post-clear writes should be committed after the durable purge completes");
+assert.equal(failedClearLocalStorage.getItem(CLEAR_PENDING_KEY), null, "a successful retry should remove the clear marker");
+assert.equal(failedClearReload.storageFailure, false, "a successful retry after reload should restore healthy durability");
+const crossTabClearDb = createFakeIndexedDB();
+crossTabClearDb.seed("llm-field-notes-stale", "stale durable state");
+const crossTabClearLocalStorage = createLocalStorage();
+const crossTabClearOwner = createStorageOwner(crossTabClearLocalStorage, crossTabClearDb);
+const crossTabClearStorage = getBrowserStorage(crossTabClearOwner);
+await crossTabClearStorage.ready;
+crossTabClearOwner.dispatch("storage", {
+  key: CLEAR_PENDING_KEY,
+  newValue: "1",
+  storageArea: crossTabClearLocalStorage
+});
+await crossTabClearStorage.flush();
+assert.equal(crossTabClearDb.has("llm-field-notes-stale"), false, "a live tab should retry a clear intent received from another tab");
+assert.equal(crossTabClearStorage.storageFailure, false, "a successful cross-tab clear retry should restore healthy durability");
+failedClearStorage.storage.clear();
+await failedClearStorage.flush();
+assert.equal(failedClearStorage.durable, true, "a later successful durable clear should restore durable storage");
+assert.equal(failedClearStorage.storageFailure, false, "a later successful durable clear should clear the prior storage failure");
+assert.equal(failedClearDb.has("llm-field-notes-hidden-invalid"), false, "a later successful durable clear should purge the previously retained durable entry");
 const duplicatePendingLocalStorage = createLocalStorage({
   "llm-field-notes-knowledge-graph": "newer-local-mirror",
   [PENDING_WRITES_KEY]: '{"llm-field-notes-knowledge-graph":"older","llm-field-notes-knowledge-graph":"newer"}'
@@ -449,6 +638,7 @@ storageEventHandler({
 });
 await externalBeforeHydration.ready;
 assert.equal(externalBeforeHydration.storage.getItem(overlongExternalKey), null, "overlong native storage events should be ignored before hydration");
+assert.equal(externalBeforeHydration.storageFailure, true, "overlong native storage events should disclose degraded storage");
 assert.equal(externalBeforeHydration.storage.getItem("llm-field-notes-progress"), "[4,5,6]", "external updates before hydration should win over stale durable state");
 storageEventHandler({
   key: "llm-field-notes-progress",
@@ -598,14 +788,15 @@ const durableChannel = getBrowserStorage({
 const durableChannelEvents = [];
 durableChannel.subscribe((event) => durableChannelEvents.push(event));
 await durableChannel.ready;
-durableBroadcastHandler({ data: { key: PENDING_WRITES_KEY, value: "{\"forged\":true}" } });
+durableBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: PENDING_WRITES_KEY, value: "{\"forged\":true}" } });
 assert.equal(durableChannel.storage.getItem(PENDING_WRITES_KEY), null, "durable BroadcastChannel updates must ignore the internal pending-write marker");
 assert.equal(durableChannelEvents.length, 0, "ignored pending-write broadcasts must not notify storage subscribers");
-durableBroadcastHandler({ data: { key: "llm-field-notes-knowledge-graph", value: { forged: true } } });
+durableBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: "llm-field-notes-knowledge-graph", value: { forged: true } } });
 assert.equal(durableChannel.storage.getItem("llm-field-notes-knowledge-graph"), null, "durable BroadcastChannel updates must reject non-string values");
-assert.equal(durableChannelEvents.length, 0, "rejected BroadcastChannel values must not notify storage subscribers");
-durableBroadcastHandler({ data: { key: `${"llm-field-notes-"}${"x".repeat(MAX_STORAGE_KEY_CHARS)}`, value: "forged" } });
-assert.equal(durableChannelEvents.length, 0, "overlong BroadcastChannel keys must not notify storage subscribers");
+assert.equal(durableChannelEvents.filter((event) => event.type === "change").length, 0, "rejected BroadcastChannel values must not notify storage subscribers as changes");
+assert.equal(durableChannel.storageFailure, true, "rejected durable BroadcastChannel values should disclose degraded storage");
+durableBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: `${"llm-field-notes-"}${"x".repeat(MAX_STORAGE_KEY_CHARS)}`, value: "forged" } });
+assert.equal(durableChannelEvents.filter((event) => event.type === "change").length, 0, "overlong BroadcastChannel keys must not notify storage subscribers");
 assert.equal(MAX_STORAGE_KEY_CHARS, 256, "cross-tab storage keys should have an explicit bounded name ceiling");
 assert.equal(MAX_BROADCAST_VALUE_CHARS, 50 * 1024 * 1024, "cross-tab value bounds should match the persisted graph character ceiling");
 assert.equal(MAX_BROADCAST_VALUE_BYTES, 50 * 1024 * 1024, "cross-tab value bounds should match the persisted graph byte ceiling");

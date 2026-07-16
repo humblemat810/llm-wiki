@@ -10,27 +10,31 @@ const DEFAULT_REQUESTS = 32;
 const DEFAULT_CONCURRENCY = 8;
 const EXTRACTION_TEXT = "Attention uses context to create a useful graph representation for review.";
 
-const boundedInteger = (value, fallback, maximum) => {
-  const numeric = Number(value);
-  return Number.isSafeInteger(numeric) && numeric >= 1
-    ? Math.min(maximum, numeric)
-    : fallback;
+const boundedInteger = (name, value, fallback, maximum) => {
+  if (value === undefined || value === null || String(value).trim() === "") return fallback;
+  const normalized = String(value).trim();
+  if (!/^\d+$/.test(normalized)) throw new Error(`${name} must be a positive integer.`);
+  const numeric = Number(normalized);
+  if (!Number.isSafeInteger(numeric) || numeric < 1) throw new Error(`${name} must be a positive integer.`);
+  return Math.min(maximum, numeric);
 };
 
-const optionalBoundedInteger = (value, maximum) => {
+const optionalBoundedInteger = (name, value, maximum) => {
   if (value === undefined || value === null || String(value).trim() === "") return null;
-  const numeric = Number(value);
-  return Number.isSafeInteger(numeric) && numeric >= 0
-    ? Math.min(maximum, numeric)
-    : null;
+  const normalized = String(value).trim();
+  if (!/^\d+$/.test(normalized)) throw new Error(`${name} must be a non-negative integer.`);
+  const numeric = Number(normalized);
+  if (!Number.isSafeInteger(numeric)) throw new Error(`${name} must be a non-negative integer.`);
+  return Math.min(maximum, numeric);
 };
 
-const optionalPositiveBoundedInteger = (value, maximum) => {
+const optionalPositiveBoundedInteger = (name, value, maximum) => {
   if (value === undefined || value === null || String(value).trim() === "") return null;
-  const numeric = Number(value);
-  return Number.isSafeInteger(numeric) && numeric >= 1
-    ? Math.min(maximum, numeric)
-    : null;
+  const normalized = String(value).trim();
+  if (!/^\d+$/.test(normalized)) throw new Error(`${name} must be a non-negative integer.`);
+  const numeric = Number(normalized);
+  if (!Number.isSafeInteger(numeric) || numeric < 0) throw new Error(`${name} must be a non-negative integer.`);
+  return numeric === 0 ? null : Math.min(maximum, numeric);
 };
 
 export function parseLoadConfig(environment = process.env) {
@@ -46,26 +50,62 @@ export function parseLoadConfig(environment = process.env) {
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error("LOAD_TEST_URL must be an HTTP(S) URL without credentials, query, or fragment.");
   }
+  const allowedOrigin = typeof environment.LOAD_TEST_ALLOWED_ORIGIN === "string"
+    ? environment.LOAD_TEST_ALLOWED_ORIGIN.trim()
+    : "";
+  if (allowedOrigin) {
+    let parsedAllowedOrigin;
+    try {
+      parsedAllowedOrigin = new URL(allowedOrigin);
+    } catch {
+      throw new Error("LOAD_TEST_ALLOWED_ORIGIN must be a valid HTTP(S) origin.");
+    }
+    if (!["http:", "https:"].includes(parsedAllowedOrigin.protocol)
+      || parsedAllowedOrigin.username
+      || parsedAllowedOrigin.password
+      || parsedAllowedOrigin.search
+      || parsedAllowedOrigin.hash) {
+      throw new Error("LOAD_TEST_ALLOWED_ORIGIN must be an HTTP(S) origin or deployment URL without credentials, query, or fragment.");
+    }
+    if (url.origin !== parsedAllowedOrigin.origin) {
+      throw new Error("LOAD_TEST_URL does not match LOAD_TEST_ALLOWED_ORIGIN.");
+    }
+  }
   const isLoopback = ["127.0.0.1", "::1", "localhost"].includes(url.hostname.toLowerCase());
+  if (!isLoopback && url.protocol !== "https:") {
+    throw new Error("Non-loopback load probes must use HTTPS.");
+  }
   if (!isLoopback && environment.LOAD_TEST_CONFIRM !== "I_UNDERSTAND") {
     throw new Error("Non-loopback load probes require LOAD_TEST_CONFIRM=I_UNDERSTAND.");
   }
   const token = typeof environment.EXTRACTOR_AUTH_TOKEN === "string"
     ? environment.EXTRACTOR_AUTH_TOKEN
     : "";
-  const durationMs = optionalPositiveBoundedInteger(environment.LOAD_TEST_DURATION_MS, MAX_DURATION_MS);
+  const durationMs = optionalPositiveBoundedInteger("LOAD_TEST_DURATION_MS", environment.LOAD_TEST_DURATION_MS, MAX_DURATION_MS);
   const requestMaximum = durationMs === null ? MAX_REQUESTS : MAX_DURATION_REQUESTS;
   return {
     url,
-    requests: boundedInteger(environment.LOAD_TEST_REQUESTS, durationMs === null ? DEFAULT_REQUESTS : MAX_DURATION_REQUESTS, requestMaximum),
-    concurrency: boundedInteger(environment.LOAD_TEST_CONCURRENCY, DEFAULT_CONCURRENCY, MAX_CONCURRENCY),
+    requests: boundedInteger("LOAD_TEST_REQUESTS", environment.LOAD_TEST_REQUESTS, durationMs === null ? DEFAULT_REQUESTS : MAX_DURATION_REQUESTS, requestMaximum),
+    concurrency: boundedInteger("LOAD_TEST_CONCURRENCY", environment.LOAD_TEST_CONCURRENCY, DEFAULT_CONCURRENCY, MAX_CONCURRENCY),
     mode: token ? "extract-graph" : "healthz",
     token,
     durationMs,
-    maxFailures: optionalBoundedInteger(environment.LOAD_TEST_MAX_FAILURES, MAX_REQUESTS),
-    maxP95Ms: optionalBoundedInteger(environment.LOAD_TEST_MAX_P95_MS, MAX_DURATION_MS),
+    maxFailures: optionalBoundedInteger("LOAD_TEST_MAX_FAILURES", environment.LOAD_TEST_MAX_FAILURES, MAX_REQUESTS),
+    maxP95Ms: optionalBoundedInteger("LOAD_TEST_MAX_P95_MS", environment.LOAD_TEST_MAX_P95_MS, MAX_DURATION_MS),
+    allowedOrigin: allowedOrigin
+      ? new URL(allowedOrigin).origin
+      : null,
     deadlineMs: MAX_DURATION_MS
   };
+}
+
+export function buildLoadProbeUrl(baseUrl, route) {
+  const base = new URL(baseUrl);
+  const basePath = base.pathname.replace(/\/+$/, "");
+  base.pathname = `${basePath}/`;
+  base.search = "";
+  base.hash = "";
+  return new URL(String(route).replace(/^\/+/, ""), base);
 }
 
 const percentile = (values, fraction) => {
@@ -74,7 +114,7 @@ const percentile = (values, fraction) => {
   return ordered[Math.min(ordered.length - 1, Math.ceil(ordered.length * fraction) - 1)];
 };
 
-const readBoundedResponse = async (response) => {
+const readBoundedResponse = async (response, signal = null) => {
   const declaredLength = response.headers?.get?.("content-length");
   if (declaredLength !== undefined && declaredLength !== null
     && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_RESPONSE_BYTES)) {
@@ -86,9 +126,28 @@ const readBoundedResponse = async (response) => {
     const chunks = [];
     let total = 0;
     let completed = false;
+    let abortReject;
+    let abortSettled = false;
+    const abortPromise = signal
+      ? new Promise((_, reject) => {
+        abortReject = reject;
+      })
+      : null;
+    const abortReader = () => {
+      if (abortSettled) return;
+      abortSettled = true;
+      try {
+        Promise.resolve(reader.cancel?.()).catch(() => {});
+      } catch {
+        // Reader cleanup is best-effort; the abort promise still bounds the read.
+      }
+      abortReject?.(Object.assign(new Error("Load probe response reading was aborted."), { name: "AbortError" }));
+    };
+    signal?.addEventListener?.("abort", abortReader, { once: true });
+    if (signal?.aborted) abortReader();
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await (abortPromise ? Promise.race([reader.read(), abortPromise]) : reader.read());
         if (done) {
           completed = true;
           break;
@@ -103,6 +162,7 @@ const readBoundedResponse = async (response) => {
     } finally {
       if (!completed) await reader.cancel().catch(() => {});
       reader.releaseLock();
+      signal?.removeEventListener?.("abort", abortReader);
     }
     bytes = new Uint8Array(total);
     let offset = 0;
@@ -119,6 +179,14 @@ const readBoundedResponse = async (response) => {
     throw new Error("response body length did not match Content-Length");
   }
   return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+};
+
+const cancelResponseBody = (response) => {
+  try {
+    Promise.resolve(response?.body?.cancel?.()).catch(() => {});
+  } catch {
+    // Response cleanup is best-effort and must not mask the bounded probe result.
+  }
 };
 
 export async function runLoadProbe({
@@ -144,7 +212,22 @@ export async function runLoadProbe({
     inFlight += 1;
     peakInFlight = Math.max(peakInFlight, inFlight);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(1, config.deadlineMs - (now() - startedAt)));
+    const deadlineMs = Number.isFinite(Number(config.deadlineMs)) && Number(config.deadlineMs) >= 1
+      ? Math.floor(Number(config.deadlineMs))
+      : MAX_DURATION_MS;
+    const timeoutMs = Math.max(1, deadlineMs - (now() - startedAt));
+    let timedOut = false;
+    let response = null;
+    let timeoutReject;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutReject = reject;
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      timeoutReject?.(Object.assign(new Error("Load probe request timed out."), { name: "AbortError" }));
+      cancelResponseBody(response);
+    }, timeoutMs);
     let requestFailed = false;
     const recordFailure = (message) => {
       requestFailed = true;
@@ -167,17 +250,25 @@ export async function runLoadProbe({
           })
         }
         : {};
-      const response = await fetchImpl(new URL(config.mode === "extract-graph" ? "/api/extract-graph" : "/healthz", config.url), {
+      const fetchPromise = Promise.resolve().then(() => fetchImpl(buildLoadProbeUrl(
+        config.url,
+        config.mode === "extract-graph" ? "api/extract-graph" : "healthz"
+      ), {
         ...options,
         signal: controller.signal
-      });
+      }));
+      fetchPromise.then((lateResponse) => {
+        if (timedOut) cancelResponseBody(lateResponse);
+      }, () => {});
+      response = await Promise.race([fetchPromise, timeoutPromise]);
       statuses.set(response.status, (statuses.get(response.status) || 0) + 1);
       if (!response.ok) recordFailure(`request ${requestIndex + 1}: HTTP ${response.status}`);
       if (config.mode === "extract-graph" && response.ok) {
         let payload;
         try {
-          payload = JSON.parse(await readBoundedResponse(response));
-        } catch {
+          payload = JSON.parse(await Promise.race([readBoundedResponse(response, controller.signal), timeoutPromise]));
+        } catch (error) {
+          if (timedOut || error?.name === "AbortError") throw error;
           recordFailure(`request ${requestIndex + 1}: invalid JSON response`);
         }
         if (payload?.schema !== "llm-field-notes/graph@1" || !payload?.extraction || typeof payload.extraction !== "object") {
@@ -186,18 +277,19 @@ export async function runLoadProbe({
       } else if (config.mode === "healthz" && response.ok) {
         let payload;
         try {
-          payload = JSON.parse(await readBoundedResponse(response));
-        } catch {
+          payload = JSON.parse(await Promise.race([readBoundedResponse(response, controller.signal), timeoutPromise]));
+        } catch (error) {
+          if (timedOut || error?.name === "AbortError") throw error;
           recordFailure(`request ${requestIndex + 1}: invalid JSON response`);
         }
         if (payload?.ok !== true || payload?.schema !== "llm-field-notes/graph@1" || payload?.ready !== undefined) {
           recordFailure(`request ${requestIndex + 1}: invalid health response contract`);
         }
       } else {
-        await readBoundedResponse(response);
+        await Promise.race([readBoundedResponse(response, controller.signal), timeoutPromise]);
       }
     } catch (error) {
-      recordFailure(`request ${requestIndex + 1}: ${error?.name === "AbortError" ? "timeout" : "network failure"}`);
+      recordFailure(`request ${requestIndex + 1}: ${error?.name === "AbortError" || timedOut ? "timeout" : "network failure"}`);
     } finally {
       if (requestFailed) failedRequests += 1;
       latencies.push(Math.max(0, now() - requestStartedAt));

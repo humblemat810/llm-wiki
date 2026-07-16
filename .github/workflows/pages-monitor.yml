@@ -34,4 +34,6 @@ jobs:
         env:
           PAGES_DEPLOYMENT_URL: ${{ vars.PUBLIC_ORIGIN || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
           PAGES_EXPECTED_REVISION: ${{ steps.revision.outputs.value }}
+          PAGES_SMOKE_ATTEMPTS: "30"
+          PAGES_SMOKE_RETRY_DELAY_MS: "2000"
         run: npm run smoke:pages:deployment

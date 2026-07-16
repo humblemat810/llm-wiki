@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.example/schema/service-health.schema.json",
+  "title": "LLM Field Notes service health response",
+  "oneOf": [
+    { "$ref": "#/$defs/liveness" },
+    { "$ref": "#/$defs/readiness" }
+  ],
+  "$defs": {
+    "liveness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "live", "schema", "version", "revision"],
+      "properties": {
+        "ok": { "const": true },
+        "live": { "const": true },
+        "schema": { "const": "llm-field-notes/graph@1" },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "maxLength": 64
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^(?:unknown|[0-9a-f]{7,64})$"
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "ready", "schema", "version", "revision"],
+      "oneOf": [
+        {
+          "properties": { "ok": { "const": true }, "ready": { "const": true } },
+          "not": { "required": ["error"] }
+        },
+        {
+          "required": ["error"],
+          "properties": { "ok": { "const": false }, "ready": { "const": false } }
+        }
+      ],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "ready": { "type": "boolean" },
+        "schema": { "const": "llm-field-notes/graph@1" },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "maxLength": 64
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^(?:unknown|[0-9a-f]{7,64})$"
+        },
+        "error": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    }
+  }
+}

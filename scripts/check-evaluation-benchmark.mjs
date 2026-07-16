@@ -73,7 +73,7 @@ assert(localReport.overall.rejected.suppressionRate >= 0.99, "local extraction r
 
 if (extractionCases.format !== "llm-field-notes/extraction-cases@1"
   || !Array.isArray(extractionCases.cases)
-  || extractionCases.cases.length < 4) {
+  || extractionCases.cases.length < 5) {
   throw new Error("Extraction quality cases must contain at least five representative reviewed inputs.");
 }
 const requiredCaseIds = new Set(["technical-phrases", "sparse-title", "non-latin", "tool-safety", "relation-quality"]);

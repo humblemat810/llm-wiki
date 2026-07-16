@@ -57,6 +57,8 @@ const health = readSchema("health.schema.json");
 const extractorRequest = readSchema("extractor-request.schema.json");
 const vaultManifest = readSchema("vault-manifest.schema.json");
 const learningLoop = readSchema("learning-loop.schema.json");
+const canvas = readSchema("canvas.schema.json");
+const serviceHealth = readSchema("service-health.schema.json");
 const graphDefs = graph.$defs;
 const feedbackExample = feedback.properties.examples.items;
 const extractorDocument = extractorRequest.properties.document;
@@ -65,6 +67,7 @@ const extractorFeedback = extractorRequest.$defs.feedbackHint;
 const at = (schema, path) => path.reduce((value, key) => value?.[key], schema);
 const maxItems = (schema, path) => at(schema, path)?.maxItems;
 const maxLength = (schema, path) => at(schema, path)?.maxLength;
+const minLength = (schema, path) => at(schema, path)?.minLength;
 const maximum = (schema, path) => at(schema, path)?.maximum;
 
 const checks = [
@@ -149,7 +152,16 @@ const checks = [
   [maximum(learningLoop, ["properties", "stages", "properties", "reviewed", "properties", "guidanceExamples"]), MAX_FEEDBACK_EXAMPLES, "learning-loop guidance examples"],
   [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "baselineConcepts"]), MAX_GRAPH_NODES, "learning-loop baseline concepts"],
   [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "guidedConcepts"]), MAX_GRAPH_NODES, "learning-loop guided concepts"],
-  [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "conceptsRemovedByGuidance"]), MAX_GRAPH_NODES, "learning-loop guidance delta"]
+  [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "conceptsRemovedByGuidance"]), MAX_GRAPH_NODES, "learning-loop guidance delta"],
+  [maxItems(canvas, ["properties", "nodes"]), MAX_GRAPH_NODES + 1, "Canvas nodes"],
+  [maxItems(canvas, ["properties", "edges"]), MAX_GRAPH_EDGES, "Canvas edges"],
+  [maxLength(canvas, ["$defs", "textNode", "allOf", 1, "properties", "text"]), 20000, "Canvas text"],
+  [maxLength(canvas, ["$defs", "fileNode", "allOf", 1, "properties", "file"]), 512, "Canvas file paths"],
+  [maxLength(serviceHealth, ["$defs", "liveness", "properties", "version"]), 64, "liveness versions"],
+  [minLength(serviceHealth, ["$defs", "readiness", "properties", "error"]), 1, "readiness errors"],
+  [maxLength(serviceHealth, ["$defs", "readiness", "properties", "error"]), 256, "readiness errors"],
+  [at(serviceHealth, ["$defs", "liveness", "properties", "live", "const"]), true, "liveness marker"],
+  [at(serviceHealth, ["$defs", "readiness", "properties", "ready", "type"]), "boolean", "readiness marker"]
 ];
 
 for (const [key, expected] of Object.entries(HEALTH_GATE_LIMITS)) {

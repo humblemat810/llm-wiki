@@ -52,6 +52,9 @@ The default application is local-first:
 - The service worker rejects an HTML response for a non-HTML shell asset,
   preventing a gateway login or error page returned with HTTP 200 from being
   cached as executable or structured application content.
+- The service worker also rejects a non-HTML response for an HTML shell asset,
+  preventing a gateway or upstream API representation from replacing the
+  cached workbench document.
 - Online 4xx navigation responses, including the branded 404 route, pass
   through instead of being replaced by the cached workbench shell; offline and
   transient server failures retain the bounded application fallback.
@@ -70,20 +73,68 @@ The default application is local-first:
   malformed body cannot satisfy the byte budget with a forged `byteLength`.
 - Malformed HTTP parser input receives a bounded generic `400` response;
   parser details are not reflected to clients or written to structured logs.
+- `Expect: 100-continue` requests with invalid or oversized declared bodies are
+  rejected before the server sends an interim acceptance, preventing clients
+  from transmitting a body that the extraction boundary cannot accept.
+- Explicitly configured numeric server settings fail startup when malformed or
+  outside their documented bounds instead of silently falling back to a
+  potentially unsafe rate, timeout, concurrency, or port.
+- `npm run deployment:check` provides the same pre-traffic boundary for
+  operators and CI: non-loopback deployments fail before traffic when secure
+  public origin, source revision, extraction authentication, metrics
+  authentication, proxy trust, or bounded numeric settings are incomplete.
+- The production container healthcheck reuses the server's bounded `PORT`
+  parser, so an invalid runtime override cannot make health probe a different
+  port while the process is failing on configuration.
+- The deployment load probe rejects malformed explicit numeric settings before
+  sending traffic, so a typo cannot silently disable an operator-supplied
+  failure or latency budget.
+- The exact-deployment Pages probe rejects malformed retry settings before
+  sending requests, preserving the intended publication verification window.
+- Decoded control characters in static request paths are rejected with a
+  bounded `400` response instead of reaching filesystem resolution or turning
+  malformed URL input into an internal error.
 - HTTP error fallbacks refuse to write after response headers have already been
   sent, preventing a late failure from becoming a secondary header-state error.
 - Cross-tab stale graph repair is conditional on the observed version and
   content fingerprint, preventing delayed browser events from overwriting a
   newer graph.
+- Shared UI graph mutations also bind retained Undo history to a separate
+  fingerprint, preventing a concurrent history-only restore from being
+  overwritten by a stale tab.
 - Browser persistence is restricted to the `llm-field-notes-` namespace and
   bounded key names; unrelated same-origin storage keys are not read or
   written by the adapter.
 - Browser storage values are bounded by both character count and UTF-8 byte
   size during hydration, writes, and cross-tab synchronization, so
   Unicode-heavy values cannot bypass the persistence memory ceiling.
+- IndexedDB hydration also enforces aggregate entry and byte ceilings; an
+  over-capacity application namespace falls back to synchronous storage instead
+  of being fully materialized into memory.
+- Durable writes and cross-tab updates enforce those same aggregate ceilings;
+  over-capacity external state is rejected and the previous local value is
+  restored when possible.
+- The localStorage-only fallback enforces the same namespace ceiling and
+  exposes a degraded-storage signal when an external update is rejected.
+- Persistent-storage requests record success only after the browser grants
+  persistence; denied or timed-out capability requests remain retryable while
+  overlapping attempts are suppressed.
+- A privacy-restricted browser whose `navigator.storage` getter throws is treated
+  like an unavailable persistence enhancement; the local graph remains usable
+  without surfacing an unhandled application error.
 - A user-initiated durable clear removes every application-namespaced
   localStorage and IndexedDB entry, including malformed or oversized remnants,
   and remains ordered correctly when requested before IndexedDB hydration.
+- The workbench exposes that durable purge as a separately confirmed
+  **Forget all local data** action; it clears graph/history, drafts, recovery
+  snapshots, learning progress, endpoint settings, and backup checkpoints
+  without pretending that an undo-preserving graph clear is a full deletion.
+  If IndexedDB is degraded or the durable clear fails, the workbench says that
+  deletion could not be verified instead of claiming a complete purge. A
+  generation-bearing clear-intent marker survives reload and reaches live
+  tabs, forcing a retry before old durable state is adopted while preserving
+  writes made after the failed clear; a successful retry restores the
+  durable-storage status.
 - Pending durable writes are flushed when the workbench is hidden or unloaded;
   the synchronous mirror and recovery markers remain the fallback if the
   browser suspends the page before IndexedDB settles.
@@ -91,6 +142,12 @@ The default application is local-first:
   background suspension paths that may not provide a normal unload window.
 - Mutations that survive only by reducing undo history disclose that degraded
   recovery state immediately and direct the user to export a backup.
+- A destructive clear that leaves Undo history behind still counts as
+  recoverable state: the workbench keeps the full-backup reminder and unload
+  protection active until that history is checkpointed or removed.
+- A full-backup reminder is cleared in memory only after its bounded
+  fingerprint checkpoint has been accepted by local storage, so a failed
+  checkpoint write does not falsely signal that recovery coverage exists.
 - If browser storage is unavailable entirely, the graph remains explicitly
   tab-scoped and the health strip offers the same direct backup action before
   navigation or tab closure.
@@ -100,10 +157,26 @@ The default application is local-first:
 - Service-worker updates do not silently take over an active workbench tab;
   later releases require an explicit reload, reducing mixed-version behavior
   while a graph mutation is in progress.
+- First-install service-worker activation is optional and guarded; a worker
+  that terminates before accepting the activation message cannot interrupt the
+  saved-graph workbench.
 - The app does not accept API keys or credentials.
 - The optional extractor endpoint path is remembered locally only after
   same-origin and embedded-credential validation; endpoint configuration never
   stores a bearer token or provider secret.
+- The reference server's optional model-provider adapter reads
+  `EXTRACTOR_PROVIDER_API_KEY` only at server startup and sends it in the
+  server-side provider request. It is never included in browser configuration,
+  graph state, logs, or model prompts. Provider URLs must be credential-free,
+  and non-loopback production providers must use HTTPS.
+- Model-provider responses are bounded, JSON-only, parsed with duplicate-key
+  rejection, and normalized through the same graph/provenance boundary as
+  local extraction. Provider output cannot replace the saved source document
+  or bypass review status.
+- The built-in model prompt labels document text as untrusted source material
+  and requests deterministic temperature-zero extraction; instructions inside
+  a document are not treated as operator or system instructions. This reduces
+  prompt-injection influence, but human review remains required for correctness.
 - The production Docker build context excludes local Codex artifacts, so agent
   workspace files are not copied into the published container image.
   Application files are copied with ownership assigned to the non-root `node`
@@ -112,6 +185,12 @@ The default application is local-first:
 - The Docker and Git ignore boundaries also exclude Pages staging and rollback
   directories, so interrupted publication work cannot enter the runtime image
   or be mistaken for a source change.
+- Generated SPDX dependency evidence is retained by CI/release workflows but
+  excluded from the Docker context, so runtime images contain only the
+  application contract and not build-time inventory artifacts.
+- Container smoke also inspects the built image metadata to ensure production
+  mode and the `/readyz` healthcheck are present, while authentication secrets
+  remain runtime-only rather than being baked into image configuration.
 - Browser extractor endpoints also reject query strings and fragments, keeping
   credentials and request metadata out of URL configuration and avoiding
   misleading fragment-only endpoint values.
@@ -239,6 +318,9 @@ learning content collected during another.
 They also enforce an aggregate 30-second learning-note collection deadline, so
 degraded note delivery cannot multiply per-note timeouts into an unbounded
 wait.
+Each note fetch is explicitly raced against its remaining deadline, so a
+browser or test transport that ignores abort cannot defeat the aggregate bound;
+late note responses are canceled best-effort.
 Browser release/note readers and remote extractor response readers reject
 malformed or non-safe `Content-Length` headers instead of treating them as
 missing declarations.
@@ -258,6 +340,16 @@ early HTML, malformed-metadata, and declared-size failures.
 The service worker also cancels unread bodies before rejecting early origin,
 media-type, length, or body-availability violations, preventing failed shell
 responses from retaining network streams.
+Service-worker installation requires the interactive core shell but treats
+learning notes, schemas, and public experiments as retryable optional assets;
+a transient optional publication failure cannot prevent the offline workbench
+from installing, and later navigation/fetches can populate the missing cache
+entry.
+The complete precache sequence also has a 60-second aggregate deadline, so
+bounded per-request timeouts cannot multiply into an unbounded install wait.
+Its initial shell fetch is raced against the three-second network deadline as
+well, so a platform that ignores `AbortController` cannot hold offline fallback
+indefinitely; any late response body is canceled best-effort.
 Successful document commits cancel pending draft persistence before clearing
 the recovery marker, so a stale editor snapshot cannot reappear as unfinished
 work after reload.
@@ -267,6 +359,27 @@ the workbench status surface.
 The browser uses it for release metadata, source-review edits, and feedback
 export ordering as well, so UI-visible chronology cannot diverge from the
 validated graph representation.
+IndexedDB hydration also fails closed when its dedicated store contains an
+invalid key or value instead of silently reporting healthy durability. The
+opened database is retained only long enough for a confirmed full-local-data
+purge to remove the corrupt entries. A failed purge retains a bounded
+clear-intent marker, so a later hydration retries the purge rather than
+adopting the old durable state; durable status is restored only after a
+successful clear and subsequent clean hydration.
+The localStorage-only fallback reports the same degraded state when existing
+namespaced values are oversized or exceed the aggregate safety ceiling, so
+rejected state is not presented as a clean fallback.
+It also flags overlong application-owned keys and enumeration/read failures,
+which otherwise could hide stale or inaccessible local state from the
+operator-facing durability warning.
+The same warning is retained when IndexedDB is available, even if the durable
+database itself hydrates successfully, because the rejected synchronous mirror
+still needs explicit cleanup.
+Invalid cross-tab storage events and BroadcastChannel values are rejected and
+also mark storage degraded, so another same-origin tab cannot silently inject
+state that looks durable.
+This includes overlong application-owned synchronization keys, not only
+malformed values.
 
 ## Reference server deployment
 
@@ -275,9 +388,18 @@ deployments set `HOST=0.0.0.0` for connectivity, so public deployments should
 place authentication, TLS, and a shared rate limiter in a trusted reverse
 proxy. The built-in `EXTRACTOR_RATE_LIMIT` is an in-process safety net, not a
 replacement for multi-instance gateway controls.
-The command-line server also fails extraction closed on non-loopback hosts when
-`EXTRACTOR_AUTH_TOKEN` is absent; local loopback development remains available
-without a token.
+The command-line server also fails extraction and metrics closed when either
+the bind host is non-loopback or `PUBLIC_ORIGIN` is externally visible and the
+corresponding bearer token is absent; local loopback development with a
+loopback origin remains available without a token.
+By default the process-local limiter keys on the direct socket address. If the
+reference process is directly behind a controlled reverse proxy, configure
+`TRUST_PROXY_HOPS` to the exact number of proxy hops that overwrite
+`X-Forwarded-For`; only valid IP addresses are accepted, and malformed or
+unconfigured forwarded headers fall back to the socket address. Never enable
+proxy trust where clients can supply that header themselves.
+An explicitly invalid `TRUST_PROXY_HOPS` value fails standalone startup rather
+than silently changing the deployment's identity model.
 Provider concurrency is also capped at 8 in-flight extractions by default;
 configure `EXTRACTOR_CONCURRENCY` between 1 and 1,024 to match provider
 capacity. Requests above the ceiling receive a short-lived 503 response, and
@@ -290,10 +412,15 @@ asynchronous asset validation, so an in-flight probe cannot report a healthy
 instance after shutdown has started. The privacy-safe metrics endpoint also
 exposes a bounded draining gauge so operators can correlate readiness
 transitions with shutdown events without logging document content.
+If a provider ignores the abort signal, the HTTP request still settles with
+that retryable 503 immediately; the late provider promise remains accounted for
+until it settles or the bounded process shutdown deadline is reached.
 The bounded client-key rate limiter expires stale windows on a short periodic
 sweep rather than scanning every tracked client on every request; the map
 capacity remains bounded, and a shared gateway limiter is still required for
-multi-instance deployments.
+multi-instance deployments. The metrics endpoint exposes the normalized
+trusted-hop count so a deployment can verify that its forwarded-identity
+assumption is active.
 
 The CodeQL workflow still analyzes pull requests from forks, but disables SARIF
 publication for those runs because fork-provided workflow tokens are read-only.
@@ -320,9 +447,13 @@ layer; the static app does not receive or persist bearer tokens.
 `PUBLIC_ORIGIN` is used for generated crawler URLs, canonical metadata, and the
 same-origin extraction boundary. If set, it must be the trusted externally
 visible origin; invalid values fail server startup or the Pages build rather
-than silently disabling sitemap and feed projections.
-Non-loopback server hosts additionally fail readiness without a trusted HTTPS
-origin; HTTP is accepted only for loopback development and local smoke tests.
+than silently disabling sitemap and feed projections. Pages publication rejects
+non-loopback HTTP origins so production metadata cannot advertise plaintext
+URLs.
+Non-loopback server hosts, and loopback-bound processes exposed through an
+external `PUBLIC_ORIGIN`, additionally fail readiness without a trusted HTTPS
+origin and both bearer secrets; HTTP is accepted only for loopback development
+with a loopback origin and local smoke tests.
 The server also applies restrictive browser capability and cross-origin
 isolation headers plus legacy clickjacking protection to reduce the impact of
 accidental embedding or cross-origin data exposure.
@@ -400,9 +531,22 @@ reach the browser: returned source titles, text, URIs, quality, review dates,
 identities, fingerprints, concept/relation IDs, review status/timestamps, and
 node/evidence source references cannot rewrite or escape the request's
 provenance envelope. Provider output is inference-only; human review remains
-the authority for accepted/rejected state.
+the authority for accepted/rejected state. Saved-source rebuilds also fail
+closed if a replacement removes or flips an accepted or rejected concept or
+relation decision, or rewrites the saved source record; model improvement
+cannot silently erase the human learning boundary or its provenance source.
+Replacement extensions also receive isolated graph snapshots, so a malformed
+or hostile provider cannot mutate committed saved state before its result is
+validated. Extractor callbacks receive isolated graph context as well.
 Provider diagnostic codes are also allowlisted and length-bounded before they
-reach structured logs.
+reach structured logs. The reference logger additionally uses an explicit
+operational-field allowlist, bounds field count and string length, removes
+control characters, and drops non-primitive values, so document text, titles,
+and future arbitrary fields cannot enter operator logs accidentally.
+The same allowlist applies to process-level uncaught-exception,
+unhandled-rejection, and listen-failure lifecycle records; arbitrary error
+objects or configured host values cannot inject unbounded codes, messages, or
+control characters into operator logs.
 Standalone lifecycle logs include only the release version, sanitized source
 revision, bound host and port, signal, and drain outcome; they do not include
 document content or provider credentials. Prometheus build metadata exposes the
@@ -440,6 +584,14 @@ Before exposing the reference server to real users:
 - Readiness validation is coalesced and cached briefly to prevent repeated
   unauthenticated probes from repeatedly rendering the entire learning-note
   publication.
+- Readiness validation also has a five-second default deadline, capped at
+  30 seconds, and fails closed with `503` if static checks do not finish.
+- Readiness timeouts expose only an aggregate counter and sanitized
+  `READINESS_TIMEOUT` event; no asset paths, document content, or credentials
+  are included.
+- Completed readiness failures expose the same aggregate-only boundary through
+  `READINESS_FAILED`; detailed asset and configuration diagnostics remain
+  server-local.
 - Keep the published asset footprint within the shared 100 MB aggregate budget
   and the 10 MB per-asset limit; these checks protect both Pages publication
   and runtime readiness from unbounded learning-note collections.
@@ -469,6 +621,9 @@ Before exposing the reference server to real users:
   security-extended findings before promoting changes to a public deployment.
 - Keep the Scorecard workflow enabled and review its supply-chain findings,
   especially workflow permissions, dependency pinning, and repository controls.
+- Keep the Pages and tagged-release artifact attestations enabled. Verify the
+  attested asset manifest and associated SBOM before promoting a publication
+  or using retained evidence for rollback.
 - Keep every workflow under the release gate's least-privilege contract:
   explicit permissions, concurrency limits, pinned action revisions, disabled
   checkout credentials, and no `pull_request_target` execution for untrusted
@@ -486,6 +641,9 @@ Before exposing the reference server to real users:
   contract.
 - Keep CI checkout credentials disabled (`persist-credentials: false`) so
   repository test and build tooling cannot reuse a GitHub token from `.git/config`.
+- Browser smoke failure diagnostics must remain inside a real, non-symlinked
+  artifact directory and must not overwrite a symlinked screenshot path; this
+  keeps untrusted workspace contents from redirecting retained CI evidence.
 - For production graph promotion, run the health CLI with
   `--max-review-queue-truncated 0 --max-evidence-grounding-truncated 0
   --max-feedback-context-truncated 0 --max-truncated-items 0

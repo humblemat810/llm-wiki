@@ -1,0 +1,62 @@
+{
+  "nodes": [
+    {
+      "id": "projection-provenance",
+      "type": "text",
+      "text": "# LLM Field Notes\n\nStandalone knowledge-graph projection\n\nGraph fingerprint: fnv64-4d8c362569fbcce7-2627",
+      "x": 0,
+      "y": -260,
+      "width": 660,
+      "height": 150,
+      "color": "6"
+    },
+    {
+      "id": "sample-concept-0",
+      "type": "text",
+      "text": "# Attention\n\n92% confidence · inferred\n\nAttention mixes information across tokens.",
+      "x": 0,
+      "y": 0,
+      "width": 300,
+      "height": 200,
+      "color": "5"
+    },
+    {
+      "id": "sample-concept-1",
+      "type": "text",
+      "text": "# Positional encoding\n\n86% confidence · inferred\n\nPositional encoding gives the sequence an order.",
+      "x": 360,
+      "y": 0,
+      "width": 300,
+      "height": 200,
+      "color": "5"
+    },
+    {
+      "id": "sample-concept-2",
+      "type": "text",
+      "text": "# Weighted lookup\n\n88% confidence · inferred\n\nQueries, keys, and values create a weighted lookup over context.",
+      "x": 720,
+      "y": 0,
+      "width": 300,
+      "height": 200,
+      "color": "5"
+    }
+  ],
+  "edges": [
+    {
+      "id": "sample-relation-0",
+      "fromNode": "sample-concept-0",
+      "toNode": "sample-concept-1",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "complements"
+    },
+    {
+      "id": "sample-relation-1",
+      "fromNode": "sample-concept-0",
+      "toNode": "sample-concept-2",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "uses"
+    }
+  ]
+}

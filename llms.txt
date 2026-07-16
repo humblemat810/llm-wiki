@@ -19,6 +19,16 @@
   graph tooling.
 - [Sample graph export](./examples/sample-graph.json): deterministic starter
   graph for health, diff, and JSON-LD projection commands.
+- [Sample Graph.canvas](./examples/sample-graph.canvas): native Obsidian Canvas
+  projection of the same public starter graph.
+- [Canvas schema](./schema/canvas.schema.json): bounded native Canvas
+  interchange contract for external viewers and importers.
+- [Canvas verifier](./scripts/verify-canvas.mjs): offline strict verifier for
+  Canvas node, edge, size, and endpoint integrity.
+- [Service health schema](./schema/service-health.schema.json): versioned
+  liveness and readiness response contract for operators.
+- [Service health verifier](./scripts/verify-service-health.mjs): offline
+  validation tool for captured health responses.
 - [Sample graph explainer](./sample-graph.html): crawler-readable concepts,
   evidence, relations, and fingerprint for the same starter graph.
 - [Learning loop artifact](./experiments/learning-loop.mjs): a deterministic
@@ -44,6 +54,8 @@
   projection contract for external graph tooling.
 - [Learning-loop schema](./schema/learning-loop.schema.json): versioned
   baseline-versus-guided artifact output contract.
+- [Canvas schema](./schema/canvas.schema.json): bounded native Obsidian
+  projection contract with resolvable node and edge identities.
 - [Rebuild adapter](./rebuild-adapter.js): bounded, cancelable saved-source
   rebuild orchestration with direct smoke coverage.
 - [Learning note pages](./notes/README.md): runnable curriculum notes with

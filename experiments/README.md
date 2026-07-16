@@ -57,12 +57,13 @@ real review data. These fixtures are not substitutes for a domain-sized
 human-reviewed benchmark.
 
 `benchmarks/extraction-cases.json` adds explicitly dated representative
-reviewed cases for technical phrases, sparse title-only documents, and
-non-Latin text. The production gate evaluates every case against a deterministic
-reference time derived from those fixture dates, so local-extractor changes must
-preserve both evidence-backed concepts and intentionally evidence-free title
-metadata without reintroducing rejected phrase fragments. Live promotion
-artifacts still use the actual current time for freshness decisions.
+reviewed cases for technical phrases, sparse title-only documents, non-Latin
+text, tool-safety concepts, and relation quality. The production gate requires
+all five named cases and evaluates every case against a deterministic reference
+time derived from those fixture dates, so local-extractor changes must
+preserve evidence-backed concepts, intentionally evidence-free title metadata,
+safe relation behavior, and rejected phrase fragments. Live promotion artifacts
+still use the actual current time for freshness decisions.
 
 `learning-loop.mjs` is the smallest end-to-end self-improvement walkthrough:
 it extracts a document, applies one accepted and one rejected human decision,

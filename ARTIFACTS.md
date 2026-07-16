@@ -26,6 +26,11 @@ sitting and honest enough to show what failed.
   full backup before sharing or consuming it.
 - [Backup verifier](experiments/verify-backup.mjs) — inspect plaintext or
   encrypted backups without putting a password in command arguments.
+- [Canvas verifier](scripts/verify-canvas.mjs) — verify native Obsidian Canvas
+  nodes, edges, bounds, and endpoint integrity offline.
+- [Service health verifier](scripts/verify-service-health.mjs) — validate
+  captured liveness and readiness responses offline, from a file or bounded
+  stdin.
 - [Sample graph export](examples/sample-graph.json) — start with a small,
   evidence-backed graph for health, diff, and projection tooling.
 - [Sample graph viewer](sample-graph.html) — inspect that same representation
