@@ -12,19 +12,19 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="LLM Field Notes" />
     <meta property="og:url" content="./artifacts.html" />
-    <meta property="og:image" content="social-card.svg" />
-    <meta property="og:image:type" content="image/svg+xml" />
+    <meta property="og:image" content="social-card.png" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="LLM Field Notes: documents into a living map" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Community artifacts · LLM Field Notes" />
     <meta name="twitter:description" content="Runnable experiments, graph tooling, and honest handles for the next curious person." />
-    <meta name="twitter:image" content="social-card.svg" />
+    <meta name="twitter:image" content="social-card.png" />
     <meta name="twitter:image:alt" content="LLM Field Notes: documents into a living map" />
     <link rel="canonical" href="./artifacts.html" />
     <link rel="stylesheet" href="styles.css" />
-    <script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage","@id":"./artifacts.html","url":"./artifacts.html","name":"Community artifacts · LLM Field Notes","description":"Runnable, inspectable artifacts from LLM Field Notes.","mainEntity":{"@type":"ItemList","name":"LLM Field Notes community artifacts","numberOfItems":17,"itemListElement":[{"@type":"ListItem","position":1,"name":"Tiny BPE tokenizer","url":"experiments/tiny-bpe.mjs"},{"@type":"ListItem","position":2,"name":"Tiny attention","url":"experiments/tiny-attention.mjs"},{"@type":"ListItem","position":3,"name":"Tiny training loop","url":"experiments/tiny-training.mjs"},{"@type":"ListItem","position":4,"name":"Tiny transformer","url":"experiments/tiny-transformer.mjs"},{"@type":"ListItem","position":5,"name":"Feedback evaluation","url":"experiments/evaluate-feedback.mjs"},{"@type":"ListItem","position":6,"name":"Learning loop","url":"experiments/learning-loop.mjs"},{"@type":"ListItem","position":7,"name":"Promotion gate","url":"experiments/compare-evaluations.mjs"},{"@type":"ListItem","position":8,"name":"Graph health inspector","url":"experiments/inspect-graph.mjs"},{"@type":"ListItem","position":9,"name":"Graph input boundary","url":"experiments/graph-input.mjs"},{"@type":"ListItem","position":10,"name":"Bounded file reader","url":"experiments/bounded-file.mjs"},{"@type":"ListItem","position":11,"name":"JSON-LD projection","url":"experiments/project-jsonld.mjs"},{"@type":"ListItem","position":12,"name":"JSON-LD verifier","url":"experiments/verify-jsonld.mjs"},{"@type":"ListItem","position":13,"name":"Graph diff","url":"experiments/diff-graphs.mjs"},{"@type":"ListItem","position":14,"name":"Diff verifier","url":"experiments/verify-diff.mjs"},{"@type":"ListItem","position":15,"name":"Graph verifier","url":"experiments/verify-graph.mjs"},{"@type":"ListItem","position":16,"name":"Backup verifier","url":"experiments/verify-backup.mjs"},{"@type":"ListItem","position":17,"name":"Sample graph export","url":"examples/sample-graph.json"}]}}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage","@id":"./artifacts.html","url":"./artifacts.html","name":"Community artifacts · LLM Field Notes","description":"Runnable, inspectable artifacts from LLM Field Notes.","mainEntity":{"@type":"ItemList","name":"LLM Field Notes community artifacts","numberOfItems":18,"itemListElement":[{"@type":"ListItem","position":1,"name":"Tiny BPE tokenizer","url":"experiments/tiny-bpe.mjs"},{"@type":"ListItem","position":2,"name":"Tiny attention","url":"experiments/tiny-attention.mjs"},{"@type":"ListItem","position":3,"name":"Tiny training loop","url":"experiments/tiny-training.mjs"},{"@type":"ListItem","position":4,"name":"Tiny transformer","url":"experiments/tiny-transformer.mjs"},{"@type":"ListItem","position":5,"name":"Feedback evaluation","url":"experiments/evaluate-feedback.mjs"},{"@type":"ListItem","position":6,"name":"Learning loop","url":"experiments/learning-loop.mjs"},{"@type":"ListItem","position":7,"name":"Promotion gate","url":"experiments/compare-evaluations.mjs"},{"@type":"ListItem","position":8,"name":"Graph health inspector","url":"experiments/inspect-graph.mjs"},{"@type":"ListItem","position":9,"name":"Graph input boundary","url":"experiments/graph-input.mjs"},{"@type":"ListItem","position":10,"name":"Bounded file reader","url":"experiments/bounded-file.mjs"},{"@type":"ListItem","position":11,"name":"JSON-LD projection","url":"experiments/project-jsonld.mjs"},{"@type":"ListItem","position":12,"name":"JSON-LD verifier","url":"experiments/verify-jsonld.mjs"},{"@type":"ListItem","position":13,"name":"Graph diff","url":"experiments/diff-graphs.mjs"},{"@type":"ListItem","position":14,"name":"Diff verifier","url":"experiments/verify-diff.mjs"},{"@type":"ListItem","position":15,"name":"Graph verifier","url":"experiments/verify-graph.mjs"},{"@type":"ListItem","position":16,"name":"Backup verifier","url":"experiments/verify-backup.mjs"},{"@type":"ListItem","position":17,"name":"Sample graph export","url":"examples/sample-graph.json"},{"@type":"ListItem","position":18,"name":"Sample graph viewer","url":"sample-graph.html"}]}}</script>
     <title>Artifacts · LLM Field Notes</title>
   </head>
   <body class="artifact-page">
@@ -34,7 +34,11 @@
           <span class="brand-mark">⌁</span>
           <span><strong>LLM FIELD NOTES</strong><small>an open learning map</small></span>
         </a>
-        <a class="text-link" href="CONTRIBUTING.md">Improve the collection ↗</a>
+        <span>
+          <a class="text-link" href="https://github.com/humblemat810/llm-wiki/fork" target="_blank" rel="noopener noreferrer">Fork and improve ↗</a>
+          <a class="text-link" href="CONTRIBUTING.md">Improve the collection ↗</a>
+          <a class="text-link" href="https://github.com/humblemat810/llm-wiki/issues/new?template=artifact.yml" target="_blank" rel="noopener noreferrer">Submit an artifact ↗</a>
+        </span>
       </header>
       <div class="section-label"><span class="section-number">07</span><span>COMMUNITY ARTIFACTS</span></div>
       <h1>Small things<br /><em>worth running.</em></h1>
@@ -57,9 +61,10 @@
         <a class="artifact-card" href="experiments/verify-graph.mjs"><span>PROJECTIONS</span><h2>Graph verifier</h2><p>Verify a graph export or full backup before sharing or consuming it.</p><code>node experiments/verify-graph.mjs --help</code></a>
         <a class="artifact-card" href="experiments/verify-backup.mjs"><span>SAFETY</span><h2>Backup verifier</h2><p>Inspect plaintext or encrypted backups without exposing a password in arguments.</p><code>node experiments/verify-backup.mjs --help</code></a>
         <a class="artifact-card" href="examples/sample-graph.json"><span>START HERE</span><h2>Sample graph export</h2><p>Download a small evidence-backed graph for health, diff, and JSON-LD experiments.</p><code>npm run health -- examples/sample-graph.json</code></a>
+        <a class="artifact-card" href="sample-graph.html"><span>START HERE</span><h2>Sample graph viewer</h2><p>See the same internal representation as a shareable page, then open its Obsidian Graph.canvas projection from the workbench.</p><code>npm run build:pages</code></a>
       </div>
       <footer class="artifact-footer">
-        <p>Want to add one? Use the <a href="ARTIFACT_SUBMISSION.md">portable submission template</a> or read the <a href="ARTIFACTS.md">forkable Markdown index</a>.</p>
+        <p>Want to add one? <a href="https://github.com/humblemat810/llm-wiki/issues/new?template=artifact.yml" target="_blank" rel="noopener noreferrer">Submit an artifact</a>, <a href="https://github.com/humblemat810/llm-wiki/issues/new?template=graph_correction.yml" target="_blank" rel="noopener noreferrer">correct the graph</a>, <a href="https://github.com/humblemat810/llm-wiki/fork" target="_blank" rel="noopener noreferrer">fork the wiki</a>, use the <a href="ARTIFACT_SUBMISSION.md">portable submission template</a>, or read the <a href="ARTIFACTS.md">forkable Markdown index</a>.</p>
         <a href="./">← Back to LLM Field Notes</a>
       </footer>
     </main>

@@ -10,7 +10,7 @@ assert(helperStart >= 0 && helperEnd > helperStart, "graph item deep-link helper
 const helpers = vm.runInNewContext(`(() => {
   const location = new URL("https://notes.example.test/wiki/?private=discarded#workbench");
   ${source.slice(helperStart, helperEnd)}
-  return { parseGraphItemHash, buildGraphItemHash, buildGraphItemUrl, buildGraphItemShareData, shareGraphItem };
+  return { parseGraphItemHash, buildGraphItemHash, buildGraphItemUrl, buildGraphItemShareData, buildGraphCorrectionUrl, shareGraphItem };
 })()`, { URL, navigator: {}, copyText: async () => {} });
 
 const hash = helpers.buildGraphItemHash("node", "concept:attention");
@@ -30,6 +30,22 @@ assert.equal(shareData.title, "LLM Field Notes local graph item");
 assert.equal(shareData.text, "Inspect this local graph item in LLM Field Notes.");
 assert.equal(shareData.url, "https://notes.example.test/wiki/#item=source%3Adoc-private-title");
 assert.equal(Object.keys(shareData).length, 3, "shared graph item links should carry privacy-safe generic metadata instead of source text or titles");
+assert.equal(
+  helpers.buildGraphCorrectionUrl(),
+  "https://github.com/humblemat810/llm-wiki/issues/new?template=graph_correction.yml",
+  "graph correction links should default to the upstream repository without serializing local graph content"
+);
+const forkHelpers = vm.runInNewContext(`(() => {
+  const location = new URL("https://notes.example.test/wiki/");
+  const document = { querySelector: () => ({ getAttribute: () => "https://github.com/example/forked-wiki" }) };
+  ${source.slice(helperStart, helperEnd)}
+  return { buildGraphCorrectionUrl };
+})()`, { URL });
+assert.equal(
+  forkHelpers.buildGraphCorrectionUrl(),
+  "https://github.com/example/forked-wiki/issues/new?template=graph_correction.yml",
+  "graph correction links should follow a validated fork repository from the deployed shell"
+);
 
 let nativeShareData = null;
 let copiedUrl = null;

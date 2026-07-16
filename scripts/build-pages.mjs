@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { MAX_DOCUMENT_TITLE_CHARS, parseJsonWithUniqueKeys } from "../graph-core.js";
 import { MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, PUBLIC_ASSETS, PUBLIC_SITEMAP_ASSETS } from "./public-assets.mjs";
 import { requirePublicOrigin } from "./public-origin.mjs";
+import { DEFAULT_PUBLIC_REPOSITORY, requirePublicRepository } from "./public-repository.mjs";
 import { buildLearningNotePage, MAX_NOTE_SUMMARY_CHARS, sliceTextAtCodePointBoundary } from "./note-page.mjs";
+import { buildSampleGraphPage } from "./sample-graph-page.mjs";
 import { computeServiceWorkerCacheRevision, renderDeploymentServiceWorker } from "./service-worker-cache.mjs";
 await import("./check-artifacts.mjs");
 
@@ -28,6 +30,14 @@ const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW 
 
 const rootRealPath = await realpath(root);
 const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN);
+const publicRepository = requirePublicRepository(process.env.PUBLIC_REPOSITORY_URL);
+const rawBuildRevision = typeof process.env.BUILD_REVISION === "string" && process.env.BUILD_REVISION.trim()
+  ? process.env.BUILD_REVISION.trim().toLowerCase()
+  : "unknown";
+if (!/^(?:unknown|[0-9a-f]{7,64})$/.test(rawBuildRevision)) {
+  throw new Error("BUILD_REVISION must be unknown or a 7–64 character hexadecimal source revision.");
+}
+const buildRevision = rawBuildRevision;
 
 async function readBoundedUtf8(filePath, maxBytes) {
   const byteLimit = Math.max(1, Math.floor(maxBytes));
@@ -136,31 +146,39 @@ function xmlEscape(value) {
     .replaceAll("'", "&apos;");
 }
 
-function renderOriginAwareIndex(content, origin) {
-  if (!origin) return content;
+function renderOriginAwareIndex(content, origin, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  if (!origin && repository === DEFAULT_PUBLIC_REPOSITORY) return content;
+  if (!origin) return content.replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
   const rootUrl = `${origin}/`;
   const rendered = content
     .replace('href="./" />', () => `href="${rootUrl}" />`)
     .replace('href="feed.xml"', () => `href="${origin}/feed.xml"`)
     .replace('content="./" />', () => `content="${rootUrl}" />`)
     .replace('"url": "./"', () => `"url": "${rootUrl}"`)
-    .replace(/content="social-card\.svg"/g, () => `content="${origin}/social-card.svg"`);
+    .replace(/content="social-card\.png"/g, () => `content="${origin}/social-card.png"`)
+    .replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
   const structuredDataMatch = rendered.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
   if (!structuredDataMatch) return rendered;
   const structuredDataCsp = `'sha256-${createHash("sha256").update(structuredDataMatch[1]).digest("base64")}'`;
   return rendered.replace(/'sha256-[^']+'/g, structuredDataCsp);
 }
 
-function renderOriginAwareArtifactPage(content, origin) {
-  if (!origin) return content;
+function renderOriginAwareArtifactPage(content, origin, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  if (!origin && repository === DEFAULT_PUBLIC_REPOSITORY) return content;
+  if (!origin) return content.replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
   return content
     .replace('href="./"', () => `href="${origin}/"`)
     .replace('content="./artifacts.html"', () => `content="${origin}/artifacts.html"`)
-    .replace('content="social-card.svg"', () => `content="${origin}/social-card.svg"`)
+    .replace('content="social-card.png"', () => `content="${origin}/social-card.png"`)
     .replace('href="./artifacts.html"', () => `href="${origin}/artifacts.html"`)
     .replace('"@id":"./artifacts.html"', () => `"@id":"${origin}/artifacts.html"`)
     .replace('"url":"./artifacts.html"', () => `"url":"${origin}/artifacts.html"`)
-    .replace(/"url":"(experiments\/[^"]+)"/g, (_, asset) => `"url":"${origin}/${asset}"`);
+    .replace(/"url":"(experiments\/[^"]+)"/g, (_, asset) => `"url":"${origin}/${asset}"`)
+    .replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
+}
+
+function renderRepositoryAwareSecurityTxt(content, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  return content.toString("utf8").replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
 }
 
 function renderNotFoundPage(content, origin = "") {
@@ -290,8 +308,17 @@ async function buildPages() {
   await preflightPublicAssetBudget();
   await mkdir(buildOutput, { recursive: true });
   await mapWithConcurrency(PUBLIC_FILES, copyPublicFile);
+  const releasePath = resolve(buildOutput, "version.json");
+  const releaseMetadata = parseJsonWithUniqueKeys(await readFile(releasePath, "utf8"), "version.json");
+  await writeFile(releasePath, `${JSON.stringify({ ...releaseMetadata, revision: buildRevision }, null, 2)}\n`, "utf8");
   const learningNotes = await readLearningNotes();
   const generatedNotePages = learningNotes.map((note) => `notes/${note.id}.html`);
+  const sampleGraph = parseJsonWithUniqueKeys(await readBoundedUtf8(resolve(buildOutput, "examples/sample-graph.json"), MAX_STATIC_ASSET_BYTES), "sample graph");
+  const sampleGraphPage = buildSampleGraphPage(sampleGraph, publicOrigin);
+  if (Buffer.byteLength(sampleGraphPage) > MAX_STATIC_ASSET_BYTES) {
+    throw new Error(`Generated sample graph page exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit.`);
+  }
+  await writeFile(resolve(buildOutput, "sample-graph.html"), sampleGraphPage, "utf8");
   await mapWithConcurrency(learningNotes, async (note) => {
   const page = buildLearningNotePage({
     id: note.id,
@@ -311,7 +338,7 @@ async function buildPages() {
   });
   const serviceWorkerPath = resolve(buildOutput, "sw.js");
   let serviceWorker = await readFile(serviceWorkerPath, "utf8");
-  const generatedShellAssets = [`./${ASSET_MANIFEST}`, ...generatedNotePages.map((asset) => `./${asset}`)];
+  const generatedShellAssets = [`./${ASSET_MANIFEST}`, "./sample-graph.html", ...generatedNotePages.map((asset) => `./${asset}`)];
   if (generatedShellAssets.length) {
     const generatedShellLiteral = generatedShellAssets.map((asset) => JSON.stringify(asset)).join(", ");
     const shellMarker = "const APP_SHELL = [";
@@ -325,19 +352,26 @@ async function buildPages() {
   if (publicOrigin) {
     const indexPath = resolve(buildOutput, "index.html");
     const index = await readFile(indexPath, "utf8");
-    const renderedIndex = renderOriginAwareIndex(index, publicOrigin);
+    const renderedIndex = renderOriginAwareIndex(index, publicOrigin, publicRepository);
     if (Buffer.byteLength(renderedIndex) > MAX_STATIC_ASSET_BYTES) {
       throw new Error(`origin-aware index exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit`);
     }
     await writeFile(indexPath, renderedIndex, "utf8");
     const artifactPath = resolve(buildOutput, "artifacts.html");
     const artifact = await readFile(artifactPath, "utf8");
-    const renderedArtifact = renderOriginAwareArtifactPage(artifact, publicOrigin);
+    const renderedArtifact = renderOriginAwareArtifactPage(artifact, publicOrigin, publicRepository);
     if (Buffer.byteLength(renderedArtifact) > MAX_STATIC_ASSET_BYTES) {
       throw new Error(`origin-aware artifact gallery exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit`);
     }
     await writeFile(artifactPath, renderedArtifact, "utf8");
   }
+  const securityPath = resolve(buildOutput, ".well-known/security.txt");
+  const security = await readFile(securityPath, "utf8");
+  const renderedSecurity = renderRepositoryAwareSecurityTxt(security, publicRepository);
+  if (Buffer.byteLength(renderedSecurity) > MAX_STATIC_ASSET_BYTES) {
+    throw new Error("repository-aware security metadata exceeds the 10 MB safety limit");
+  }
+  await writeFile(securityPath, renderedSecurity, "utf8");
   const notFoundPath = resolve(buildOutput, "404.html");
   const notFound = await readFile(notFoundPath, "utf8");
   const renderedNotFound = renderNotFoundPage(notFound, publicOrigin);
@@ -379,7 +413,7 @@ async function buildPages() {
       };
     }
   ));
-  const release = parseJsonWithUniqueKeys(await readFile(resolve(root, "version.json"), "utf8"), "version.json");
+  const release = parseJsonWithUniqueKeys(await readFile(resolve(buildOutput, "version.json"), "utf8"), "version.json");
   const assetManifest = {
     format: "llm-field-notes/assets@1",
     version: release.version,
@@ -387,7 +421,7 @@ async function buildPages() {
   };
   await writeFile(resolve(buildOutput, ASSET_MANIFEST), `${JSON.stringify(assetManifest, null, 2)}\n`, "utf8");
   const finalOutputEntries = await collectFiles(buildOutput);
-  const expected = new Set([...PUBLIC_FILES, ...generatedNotePages, ".nojekyll", "feed.xml", ASSET_MANIFEST, ...(publicOrigin ? ["sitemap.xml"] : [])]);
+  const expected = new Set([...PUBLIC_FILES, "sample-graph.html", ...generatedNotePages, ".nojekyll", "feed.xml", ASSET_MANIFEST, ...(publicOrigin ? ["sitemap.xml"] : [])]);
   for (const entry of finalOutputEntries) {
     if (!expected.has(entry)) throw new Error(`unexpected file in Pages bundle: ${entry}`);
   }
@@ -396,7 +430,7 @@ async function buildPages() {
   if (totalOutputBytes > MAX_PUBLIC_ASSET_BYTES) {
     throw new Error(`Pages bundle exceeds the ${MAX_PUBLIC_ASSET_BYTES / (1024 * 1024)} MB aggregate asset limit.`);
   }
-  return { generatedNotePages, fileCount: PUBLIC_FILES.length + generatedNotePages.length + 3 + (publicOrigin ? 1 : 0) };
+  return { generatedNotePages, fileCount: PUBLIC_FILES.length + generatedNotePages.length + 4 + (publicOrigin ? 1 : 0) };
 }
 
 async function publishPages() {

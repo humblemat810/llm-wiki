@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { runLoadProbe } from "./load-server.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const portProbe = createServer();
@@ -91,6 +92,20 @@ try {
   const health = await fetchWithTimeout("/healthz");
   assert.equal(health.status, 200, "standalone health should be live");
 
+  const healthLoad = await runLoadProbe({
+    config: {
+      url: new URL(`http://127.0.0.1:${port}`),
+      requests: 8,
+      concurrency: 4,
+      mode: "healthz",
+      token: "",
+      deadlineMs: 10000
+    }
+  });
+  assert.equal(healthLoad.failures.length, 0, "standalone health should survive a bounded concurrent load probe");
+  assert.equal(healthLoad.statuses["200"], 8, "standalone health load should return HTTP 200 for every request");
+  assert.equal(healthLoad.peakInFlight, 4, "standalone health load should reach the configured concurrency");
+
   const unauthenticatedExtraction = await fetchWithTimeout("/api/extract-graph", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -121,6 +136,20 @@ try {
   assert.equal(authenticatedExtraction.status, 200, "standalone extraction should accept the configured bearer token");
   const authenticatedPayload = await authenticatedExtraction.json();
   assert.equal(authenticatedPayload.schema, "llm-field-notes/graph@1", "standalone extraction should return the graph contract");
+
+  const extractionLoad = await runLoadProbe({
+    config: {
+      url: new URL(`http://127.0.0.1:${port}`),
+      requests: 8,
+      concurrency: 4,
+      mode: "extract-graph",
+      token: extractorToken,
+      deadlineMs: 10000
+    }
+  });
+  assert.equal(extractionLoad.failures.length, 0, "standalone extraction should survive a bounded authenticated load probe");
+  assert.equal(extractionLoad.statuses["200"], 8, "standalone extraction load should return HTTP 200 for every request");
+  assert.equal(extractionLoad.peakInFlight, 4, "standalone extraction load should reach the configured concurrency");
 
   const concurrentExtractions = await Promise.all(
     Array.from({ length: 4 }, (_, index) => fetchWithTimeout("/api/extract-graph", {

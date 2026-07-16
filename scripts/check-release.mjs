@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { relative } from "node:path";
 import { parseJsonWithUniqueKeys } from "../graph-core.js";
-import { LEARNING_NOTE_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, OFFLINE_SHELL_ASSETS, PUBLIC_ASSETS, PUBLIC_SITEMAP_ASSETS } from "./public-assets.mjs";
+import { GENERATED_PUBLIC_ASSETS, LEARNING_NOTE_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, OFFLINE_SHELL_ASSETS, PUBLIC_ASSETS, PUBLIC_SITEMAP_ASSETS } from "./public-assets.mjs";
 import { readServiceWorkerShellAssets } from "./service-worker-cache.mjs";
 
 const packageManifest = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json");
@@ -16,6 +16,8 @@ const { notes: browserNotes } = await import(new URL("../curriculum.js", import.
 const llms = await readFile(new URL("../llms.txt", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
 const dockerignore = await readFile(new URL("../.dockerignore", import.meta.url), "utf8");
+const graphCorrectionTemplate = await readFile(new URL("../.github/ISSUE_TEMPLATE/graph_correction.yml", import.meta.url), "utf8");
+const securityTxt = await readFile(new URL("../.well-known/security.txt", import.meta.url), "utf8");
 const version = packageManifest.version;
 const workflowDirectory = new URL("../.github/workflows/", import.meta.url);
 const rootRealPath = await realpath(new URL("../", import.meta.url));
@@ -34,6 +36,15 @@ const checkPublicAsset = async (asset) => {
   }
   return metadata.size;
 };
+const checkPngDimensions = async (asset, width, height) => {
+  const bytes = await readFile(new URL(`../${asset}`, import.meta.url));
+  if (bytes.length < 24
+    || !bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    || bytes.readUInt32BE(16) !== width
+    || bytes.readUInt32BE(20) !== height) {
+    throw new Error(`${asset} must be a valid ${width}×${height} PNG`);
+  }
+};
 const localLlmsLinks = [...llms.matchAll(/\]\(([^)]+)\)/g)]
   .map((match) => match[1].trim())
   .filter((target) => target.startsWith("./"));
@@ -43,6 +54,7 @@ for (const target of localLlmsLinks) {
   if (!asset || asset.startsWith("/") || asset.includes("..") || asset.includes("\\")) {
     throw new Error(`llms.txt contains an unsafe local link: ${target}`);
   }
+  if (GENERATED_PUBLIC_ASSETS.includes(asset)) continue;
   try {
     await checkPublicAsset(asset);
   } catch {
@@ -57,7 +69,7 @@ for (const [label, assets] of [["public assets", PUBLIC_ASSETS], ["offline shell
   const duplicates = assets.filter((asset, index) => assets.indexOf(asset) !== index);
   if (duplicates.length) throw new Error(`${label} contain duplicate entries: ${[...new Set(duplicates)].join(", ")}`);
 }
-const unpublishedSitemapAssets = PUBLIC_SITEMAP_ASSETS.filter((asset) => !PUBLIC_ASSETS.includes(asset));
+const unpublishedSitemapAssets = PUBLIC_SITEMAP_ASSETS.filter((asset) => !PUBLIC_ASSETS.includes(asset) && !GENERATED_PUBLIC_ASSETS.includes(asset));
 if (unpublishedSitemapAssets.length) throw new Error(`sitemap assets are not published assets: ${unpublishedSitemapAssets.join(", ")}`);
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`package.json version is not a stable semver triplet: ${version}`);
@@ -93,17 +105,34 @@ if (!serviceWorker.includes(`const CACHE = "llm-field-notes-v${version}"`)) thro
 if (!/^FROM node:22-alpine@sha256:[0-9a-f]{64}$/m.test(dockerfile)) {
   throw new Error("Dockerfile must use the digest-pinned Node 22 Alpine production baseline");
 }
+if (Buffer.byteLength(graphCorrectionTemplate, "utf8") > 100 * 1024
+  || !graphCorrectionTemplate.includes("name: Correct a graph representation")
+  || !graphCorrectionTemplate.includes("id: proposed_change")
+  || !graphCorrectionTemplate.includes("id: evidence")
+  || !graphCorrectionTemplate.includes("id: privacy")
+  || !graphCorrectionTemplate.includes("I removed private source text")) {
+  throw new Error("The graph-correction issue form must remain bounded, actionable, and privacy-aware.");
+}
 if (!dockerignore.split(/\r?\n/).some((entry) => entry.trim() === ".codex")) {
   throw new Error(".dockerignore must exclude .codex");
 }
+if (!securityTxt.includes("Contact: https://github.com/humblemat810/llm-wiki/security/advisories/new")
+  || !securityTxt.includes("Policy: https://github.com/humblemat810/llm-wiki/blob/main/SECURITY.md")
+  || !securityTxt.includes("Canonical: https://github.com/humblemat810/llm-wiki/blob/main/.well-known/security.txt")) {
+  throw new Error(".well-known/security.txt must identify the canonical repository security endpoints");
+}
 const dockerVersion = dockerfile.match(/^ARG APP_VERSION=(\d+\.\d+\.\d+)$/m)?.[1];
 const dockerRevision = dockerfile.match(/^ARG VCS_REF=([^\s]+)$/m)?.[1];
+const dockerRepository = dockerfile.match(/^ARG PUBLIC_REPOSITORY_URL=([^\s]+)$/m)?.[1];
+const dockerDocumentation = dockerfile.match(/^ARG PUBLIC_DOCUMENTATION_URL=([^\s]+)$/m)?.[1];
 if (dockerVersion !== version
   || dockerRevision !== "unknown"
+  || dockerRepository !== "https://github.com/humblemat810/llm-wiki"
+  || dockerDocumentation !== "https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md"
   || !dockerfile.includes('org.opencontainers.image.version="$APP_VERSION"')
   || !dockerfile.includes('org.opencontainers.image.revision="$VCS_REF"')
-  || !dockerfile.includes('org.opencontainers.image.source="https://github.com/humblemat810/llm-wiki"')
-  || !dockerfile.includes('org.opencontainers.image.documentation="https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md"')
+  || !dockerfile.includes('org.opencontainers.image.source="$PUBLIC_REPOSITORY_URL"')
+  || !dockerfile.includes('org.opencontainers.image.documentation="$PUBLIC_DOCUMENTATION_URL"')
   || !dockerfile.includes("ENV BUILD_REVISION=$VCS_REF")
   || !dockerfile.includes('org.opencontainers.image.description=')
   || !dockerfile.includes('org.opencontainers.image.licenses="CC-BY-4.0"')) {
@@ -141,6 +170,9 @@ for (const asset of PUBLIC_ASSETS) {
 if (publicAssetBytes > MAX_PUBLIC_ASSET_BYTES) {
   throw new Error(`public assets exceed the ${MAX_PUBLIC_ASSET_BYTES / (1024 * 1024)} MB aggregate asset limit`);
 }
+await checkPngDimensions("social-card.png", 1200, 630);
+await checkPngDimensions("icon-192.png", 192, 192);
+await checkPngDimensions("icon-512.png", 512, 512);
 const discoveredLearningNotes = (await readdir(new URL("../notes/", import.meta.url), { withFileTypes: true }))
   .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
   .map((entry) => `notes/${entry.name}`)

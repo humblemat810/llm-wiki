@@ -43,6 +43,9 @@ function run(label, args) {
   }
 }
 
+run("Build the Pages artifact for artifact-dependent tests", ["scripts/build-pages.mjs"]);
+run("Verify the Pages artifact for artifact-dependent tests", ["scripts/verify-pages.mjs"]);
+
 for (const file of sourceFiles) {
   run(`Syntax check: ${file}`, ["--check", file]);
 }

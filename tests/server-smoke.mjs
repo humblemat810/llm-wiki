@@ -11,6 +11,9 @@ import { canWriteResponse, createAppServer, MIN_AUTH_TOKEN_CHARS, readBody, read
 import { extractGraph, MAX_GRAPH_NODES } from "../graph-core.js";
 import { FIXED_PUBLIC_ASSETS, MAX_PUBLIC_ASSET_BYTES } from "../scripts/public-assets.mjs";
 
+const expectedBuildRevision = /^(?:unknown|[0-9a-f]{7,64})$/i.test(String(process.env.BUILD_REVISION || "").trim())
+  ? String(process.env.BUILD_REVISION).trim().toLowerCase()
+  : "unknown";
 const sanitizedRevision = execFileSync(
   process.execPath,
   ["--input-type=module", "-e", "const { createAppServer } = await import('./server.mjs'); console.log(createAppServer().getMetrics().buildRevision);"],
@@ -176,12 +179,18 @@ try {
   assert.equal(notModified.headers.get("etag"), indexEtag);
   const serviceWorker = await fetch(`http://127.0.0.1:${port}/sw.js`);
   assert.equal(serviceWorker.headers.get("cache-control"), "no-cache", "service-worker scripts should update promptly");
-  assert.match(await serviceWorker.clone().text(), /const CACHE = "llm-field-notes-v0\.1\.0"/, "Node service workers should retain the checked-in release cache identity without a build revision");
+  assert.match(await serviceWorker.clone().text(), new RegExp(`const CACHE = "llm-field-notes-v0\\.1\\.0${expectedBuildRevision === "unknown" ? "" : `-${expectedBuildRevision}`}"`), "Node service workers should retain the release identity and optional source revision");
   const release = await fetch(`http://127.0.0.1:${port}/version.json`);
   assert.equal(release.headers.get("cache-control"), "no-cache", "release metadata should update promptly");
-  assert.equal((await release.json()).version, "0.1.0");
-  const robots = await fetch(`http://127.0.0.1:${port}/robots.txt`);
-  assert.equal(robots.headers.get("content-type"), "text/plain; charset=utf-8", "robots.txt should use the standard text MIME type");
+  assert.deepEqual((await release.json()), { version: "0.1.0", channel: "unreleased", date: "2026-07-12", revision: expectedBuildRevision });
+    const robots = await fetch(`http://127.0.0.1:${port}/robots.txt`);
+    assert.equal(robots.headers.get("content-type"), "text/plain; charset=utf-8", "robots.txt should use the standard text MIME type");
+    const securityMetadata = await fetch(`http://127.0.0.1:${port}/.well-known/security.txt`);
+    const securityText = await securityMetadata.text();
+    assert.equal(securityMetadata.status, 200);
+    assert(securityText.includes("Contact: https://github.com/humblemat810/llm-wiki/security/advisories/new")
+      && securityText.includes("Policy: https://github.com/humblemat810/llm-wiki/blob/main/SECURITY.md")
+      && securityText.includes("Canonical: https://github.com/humblemat810/llm-wiki/blob/main/.well-known/security.txt"), "runtime security metadata should target the default repository");
   const note = await fetch(`http://127.0.0.1:${port}/notes/tokens.md`);
   assert.equal(note.status, 200);
   assert.equal(note.headers.get("content-type"), "text/markdown; charset=utf-8");
@@ -200,6 +209,12 @@ try {
   const notePageNotModified = await fetch(`http://127.0.0.1:${port}/notes/tokens.html`, { headers: { "if-none-match": notePageEtag } });
   assert.equal(notePageNotModified.status, 304, "note landing pages should support conditional requests");
   assert(notePageNotModified.headers.get("content-security-policy")?.includes("script-src 'none'"), "note landing page 304 responses should preserve the strict CSP");
+  const sampleGraphPage = await fetch(`http://127.0.0.1:${port}/sample-graph.html`);
+  assert.equal(sampleGraphPage.status, 200);
+  assert.equal(sampleGraphPage.headers.get("content-type"), "text/html; charset=utf-8");
+  const sampleGraphPageText = await sampleGraphPage.text();
+  assert(sampleGraphPageText.includes("A document,") && sampleGraphPageText.includes("CONCEPTS WITH EVIDENCE") && sampleGraphPageText.includes("RELATIONS WITH GROUNDS") && sampleGraphPageText.includes("fnv64-") && sampleGraphPageText.includes("script-src 'none'"), "Node hosts should serve the script-free sample graph explainer with evidence, relations, and fingerprint");
+  assert(sampleGraphPage.headers.get("content-security-policy")?.includes("script-src 'none'"), "Node sample graph pages should enforce their strict CSP at the response boundary");
   const oversizedNoteRoot = await mkdtemp(join(tmpdir(), "llm-field-notes-note-page-oversized-"));
   await mkdir(join(oversizedNoteRoot, "notes"), { recursive: true });
   await writeFile(join(oversizedNoteRoot, "notes", "large.md"), `# Large note\n\n${"x".repeat(10 * 1024 * 1024 + 1)}`);
@@ -216,6 +231,23 @@ try {
   assert.equal(shareCard.status, 200);
   assert.equal(shareCard.headers.get("content-type"), "image/svg+xml");
   assert((await shareCard.text()).includes("Turn documents"), "the deployed server should serve the social card referenced by page metadata");
+  const rasterShareCard = await fetch(`http://127.0.0.1:${port}/social-card.png`);
+  assert.equal(rasterShareCard.status, 200);
+  assert.equal(rasterShareCard.headers.get("content-type"), "image/png");
+  const rasterShareCardBytes = new Uint8Array(await rasterShareCard.arrayBuffer());
+  assert.deepEqual([...rasterShareCardBytes.slice(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "the deployed raster share card should be a PNG");
+  assert.equal(new DataView(rasterShareCardBytes.buffer).getUint32(16), 1200, "the raster share card should declare the production width");
+  assert.equal(new DataView(rasterShareCardBytes.buffer).getUint32(20), 630, "the raster share card should declare the production height");
+  for (const [asset, size] of [["icon-192.png", 192], ["icon-512.png", 512]]) {
+    const icon = await fetch(`http://127.0.0.1:${port}/${asset}`);
+    assert.equal(icon.status, 200, `${asset} should be served`);
+    assert.equal(icon.headers.get("content-type"), "image/png", `${asset} should use the PNG MIME type`);
+    const bytes = new Uint8Array(await icon.arrayBuffer());
+    assert.deepEqual([...bytes.slice(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `${asset} should be a PNG`);
+    const view = new DataView(bytes.buffer);
+    assert.equal(view.getUint32(16), size, `${asset} should declare its width`);
+    assert.equal(view.getUint32(20), size, `${asset} should declare its height`);
+  }
   const contributing = await fetch(`http://127.0.0.1:${port}/CONTRIBUTING.md`);
   assert.equal(contributing.status, 200);
   assert((await contributing.text()).includes("# Contributing to LLM Field Notes"), "the contribution CTA target should be served");
@@ -249,7 +281,7 @@ try {
   assert.equal(weakNotModified.status, 304);
   const health = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: "unknown" });
+  assert.deepEqual(await health.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: expectedBuildRevision });
   assert.match(health.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/, "health responses should expose a request ID for operational correlation");
   assert.equal(health.headers.get("cache-control"), "no-store");
   const healthHead = await fetch(`http://127.0.0.1:${port}/healthz`, { method: "HEAD" });
@@ -275,8 +307,8 @@ try {
     && metricsText.includes("llm_field_notes_process_uptime_seconds ")
     && metricsText.includes("llm_field_notes_draining 0")
     && metricsText.includes('llm_field_notes_build_info{version="0.1.0"} 1')
-    && metricsText.includes('llm_field_notes_build_revision_info{revision="unknown"} 1'), "metrics should expose privacy-safe request, latency, version, and source-revision gauges");
-  assert.equal(server.getMetrics().buildRevision, "unknown", "programmatic metrics should expose the sanitized source revision");
+    && metricsText.includes(`llm_field_notes_build_revision_info{revision="${expectedBuildRevision}"} 1`), "metrics should expose privacy-safe request, latency, version, and source-revision gauges");
+  assert.equal(server.getMetrics().buildRevision, expectedBuildRevision, "programmatic metrics should expose the sanitized source revision");
   assert.equal(server.getMetrics().httpRequestsInFlight, 0, "completed HTTP requests should leave no request pressure behind");
   assert(Number.isFinite(server.getMetrics().httpLatencyCount) && server.getMetrics().httpLatencyCount > 0, "programmatic metrics should record completed HTTP latency observations");
   assert(Number(server.getMetrics().responsesByStatus["200"]) > 0, "programmatic metrics should expose successful HTTP response counts");
@@ -287,7 +319,7 @@ try {
   assert.equal(await metricsHead.text(), "", "metrics HEAD responses should not contain a body");
   const ready = await fetch(`http://127.0.0.1:${port}/readyz`);
   assert.equal(ready.status, 200);
-  assert.deepEqual(await ready.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: "unknown", ready: true });
+  assert.deepEqual(await ready.json(), { ok: true, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: expectedBuildRevision, ready: true });
   const readyHead = await fetch(`http://127.0.0.1:${port}/readyz`, { method: "HEAD" });
   assert.equal(readyHead.status, 200, "readiness checks should support HEAD probes");
   assert.equal(await readyHead.text(), "", "readiness HEAD responses should not contain a body");
@@ -298,7 +330,7 @@ try {
   const drainingReady = await fetch(`http://127.0.0.1:${port}/readyz`);
   assert.equal(drainingReady.status, 503);
   assert.equal(drainingReady.headers.get("retry-after"), "5");
-  assert.deepEqual(await drainingReady.json(), { ok: false, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: "unknown", ready: false, error: "Server is draining." });
+  assert.deepEqual(await drainingReady.json(), { ok: false, schema: "llm-field-notes/graph@1", version: "0.1.0", revision: expectedBuildRevision, ready: false, error: "Server is draining." });
   const drainingExtraction = await fetch(`http://127.0.0.1:${port}/api/extract-graph`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -574,6 +606,11 @@ try {
     () => createAppServer({ publicOrigin: "javascript:alert(1)" }),
     /absolute credential-free HTTP\(S\) origin/,
     "invalid public origins should fail closed instead of silently disabling deployment metadata"
+  );
+  assert.throws(
+    () => createAppServer({ publicRepository: "https://github.com/example/forked-wiki?invalid=1" }),
+    /credential-free GitHub HTTPS repository URL/,
+    "invalid public repositories should fail closed instead of publishing broken contribution links"
   );
   const loggerFailureServer = createAppServer({
     logger: () => {
@@ -1699,13 +1736,17 @@ try {
     xmlServer.close();
     await rm(xmlRoot, { recursive: true, force: true });
   }
-  const seoServer = createAppServer({ publicOrigin: "https://notes.example.test" });
+  const seoServer = createAppServer({
+    publicOrigin: "https://notes.example.test",
+    publicRepository: "https://github.com/example/forked-wiki"
+  });
   await new Promise((resolve) => seoServer.listen(0, "127.0.0.1", resolve));
   const seoPort = seoServer.address().port;
   try {
     const seoIndex = await fetch(`http://127.0.0.1:${seoPort}/`);
     const seoIndexText = await seoIndex.text();
-    assert(seoIndexText.includes('href="https://notes.example.test/"') && seoIndexText.includes('href="https://notes.example.test/feed.xml"') && seoIndexText.includes('content="https://notes.example.test/"') && (seoIndexText.match(/content="https:\/\/notes\.example\.test\/social-card\.svg"/g) || []).length === 2, "configured public origins should emit absolute canonical and social metadata");
+    assert(seoIndexText.includes('href="https://notes.example.test/"') && seoIndexText.includes('href="https://notes.example.test/feed.xml"') && seoIndexText.includes('content="https://notes.example.test/"') && seoIndexText.includes('<meta name="repository-url" content="https://github.com/example/forked-wiki"') && (seoIndexText.match(/content="https:\/\/notes\.example\.test\/social-card\.png"/g) || []).length === 2, "configured public origins should emit absolute canonical, raster social, and fork repository metadata");
+    assert(seoIndexText.includes('href="https://github.com/example/forked-wiki/fork"') && seoIndexText.includes('href="https://github.com/example/forked-wiki/issues/new?template=graph_correction.yml"') && seoIndexText.includes('href="https://github.com/example/forked-wiki/issues/new?template=learning_note.yml"') && seoIndexText.includes('href="https://github.com/example/forked-wiki/issues/new?template=artifact.yml"'), "runtime fork and contribution links should point at the configured repository");
     const seoStructuredData = seoIndexText.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)?.[1];
     assert(seoStructuredData, "origin-aware server HTML should retain structured discovery metadata");
     const seoStructuredDataCsp = `'sha256-${createHash("sha256").update(seoStructuredData).digest("base64")}'`;
@@ -1721,13 +1762,14 @@ try {
     const seoArtifactsText = await seoArtifacts.text();
     assert.equal(seoArtifacts.status, 200);
     assert.equal(seoArtifacts.headers.get("cache-control"), "no-cache", "origin-aware artifact pages should revalidate transformed metadata");
-    assert(seoArtifactsText.includes('content="https://notes.example.test/social-card.svg"') && seoArtifactsText.includes('content="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('rel="canonical" href="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('"@type":"ItemList"') && seoArtifactsText.includes('"url":"https://notes.example.test/experiments/tiny-bpe.mjs"'), "configured public origins should emit absolute artifact-gallery social and structured metadata");
+    assert(seoArtifactsText.includes('content="https://notes.example.test/social-card.png"') && seoArtifactsText.includes('content="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('rel="canonical" href="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('"@type":"ItemList"') && seoArtifactsText.includes('"url":"https://notes.example.test/experiments/tiny-bpe.mjs"'), "configured public origins should emit absolute artifact-gallery raster social and structured metadata");
+    assert(seoArtifactsText.includes('href="https://github.com/example/forked-wiki/fork"') && seoArtifactsText.includes('href="https://github.com/example/forked-wiki/issues/new?template=graph_correction.yml"') && seoArtifactsText.includes('href="https://github.com/example/forked-wiki/issues/new?template=artifact.yml"'), "runtime artifact pages should point fork and contribution links at the configured repository");
     const literalOriginServer = createAppServer({ publicOrigin: "https://notes.example.test/$release" });
     await new Promise((resolve) => literalOriginServer.listen(0, "127.0.0.1", resolve));
     try {
       const literalArtifacts = await fetch(`http://127.0.0.1:${literalOriginServer.address().port}/artifacts.html`);
       const literalArtifactsText = await literalArtifacts.text();
-      assert(literalArtifactsText.includes('content="https://notes.example.test/$release/social-card.svg"') && literalArtifactsText.includes('"url":"https://notes.example.test/$release/experiments/tiny-bpe.mjs"'), "origin metadata rewrites should preserve literal dollar signs in valid deployment paths");
+      assert(literalArtifactsText.includes('content="https://notes.example.test/$release/social-card.png"') && literalArtifactsText.includes('"url":"https://notes.example.test/$release/experiments/tiny-bpe.mjs"'), "origin metadata rewrites should preserve literal dollar signs in valid deployment paths");
     } finally {
       literalOriginServer.close();
     }
@@ -1735,12 +1777,18 @@ try {
     assert.equal(sitemap.status, 200, "configured public origins should expose a sitemap");
     assert.equal(sitemap.headers.get("content-type"), "application/xml; charset=utf-8");
     const sitemapText = await sitemap.text();
-    assert(sitemapText.includes("https://notes.example.test/artifacts.html") && sitemapText.includes("https://notes.example.test/experiments/README.md") && sitemapText.includes("https://notes.example.test/notes/tokens.md") && sitemapText.includes("https://notes.example.test/notes/tokens.html"), "sitemap should include public discovery pages, source notes, and canonical learning-note landing pages");
+    assert(sitemapText.includes("https://notes.example.test/artifacts.html") && sitemapText.includes("https://notes.example.test/sample-graph.html") && sitemapText.includes("https://notes.example.test/experiments/README.md") && sitemapText.includes("https://notes.example.test/notes/tokens.md") && sitemapText.includes("https://notes.example.test/notes/tokens.html"), "sitemap should include the sample graph explainer, public discovery pages, source notes, and canonical learning-note landing pages");
     assert(!(await (await fetch(`http://127.0.0.1:${seoPort}/sitemap.xml`)).text()).includes("https://notes.example.test/notes/README.md"), "sitemap should exclude the learning-map index README");
     const seoRobots = await fetch(`http://127.0.0.1:${seoPort}/robots.txt`);
     assert.equal(seoRobots.status, 200);
     assert.equal(seoRobots.headers.get("content-type"), "text/plain; charset=utf-8", "dynamic robots should use the standard text MIME type");
     assert((await seoRobots.text()).includes("Sitemap: https://notes.example.test/sitemap.xml"), "configured robots should point crawlers at the sitemap");
+    const seoSecurity = await fetch(`http://127.0.0.1:${seoPort}/.well-known/security.txt`);
+    const seoSecurityText = await seoSecurity.text();
+    assert.equal(seoSecurity.status, 200);
+    assert(seoSecurityText.includes("Contact: https://github.com/example/forked-wiki/security/advisories/new")
+      && seoSecurityText.includes("Policy: https://github.com/example/forked-wiki/blob/main/SECURITY.md")
+      && seoSecurityText.includes("Canonical: https://github.com/example/forked-wiki/blob/main/.well-known/security.txt"), "runtime security metadata should target the configured fork repository");
     const sitemapEtag = sitemap.headers.get("etag");
     const robotsEtag = seoRobots.headers.get("etag");
     assert.match(sitemapEtag || "", /^"[0-9a-f]{64}"$/);
@@ -1776,7 +1824,7 @@ try {
       const subpathSitemap = await fetch(`http://127.0.0.1:${subpathPort}/sitemap.xml`);
       assert.equal(subpathSitemap.status, 200, "Node deployments should accept project-subpath public origins");
       const subpathSitemapText = await subpathSitemap.text();
-      assert(subpathSitemapText.includes("https://notes.example.test/field-notes/artifacts.html") && subpathSitemapText.includes("https://notes.example.test/field-notes/experiments/README.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.html"), "project-subpath sitemaps should preserve the deployment prefix for public discovery pages and learning notes");
+      assert(subpathSitemapText.includes("https://notes.example.test/field-notes/artifacts.html") && subpathSitemapText.includes("https://notes.example.test/field-notes/sample-graph.html") && subpathSitemapText.includes("https://notes.example.test/field-notes/experiments/README.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.md") && subpathSitemapText.includes("https://notes.example.test/field-notes/notes/tokens.html"), "project-subpath sitemaps should preserve the deployment prefix for the sample graph explainer, public discovery pages, and learning notes");
     } finally {
       subpathServer.close();
     }

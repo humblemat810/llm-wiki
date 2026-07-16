@@ -6,9 +6,9 @@ import { defaultGraph, inspectGraph, mergeExtraction, extractGraph, redactGraph,
 const source = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
 const shareStart = source.indexOf("async function tryShareFile(");
 const shareEnd = source.indexOf("\nconst browserStorage", shareStart);
-const functionStart = source.indexOf("function buildRedactedHtmlProjection()");
+const functionStart = source.indexOf("function buildRedactedGraphVisual(graph");
 const functionEnd = source.indexOf("\nfunction buildFeedbackDataset", functionStart);
-assert(shareStart >= 0 && shareEnd > shareStart && functionStart >= 0 && functionEnd > functionStart, "share and redacted HTML helpers should remain discoverable");
+assert(shareStart >= 0 && shareEnd > shareStart && functionStart >= 0 && functionEnd > functionStart && source.includes("function buildRedactedHtmlProjection()"), "share and redacted HTML helpers should remain discoverable");
 
 class FakeFile {
   constructor(parts, name, options) {
@@ -161,6 +161,8 @@ const html = vm.runInNewContext(`${functionSource}; buildRedactedHtmlProjection(
 
 assert.match(html, /^<!doctype html>/i, "redacted HTML should be a complete document");
 assert(html.includes("Visible concept"), "redacted HTML should retain useful graph labels");
+assert(html.includes("Graph at a glance") && html.includes("role=\"img\"") && html.includes("graph-visual"), "redacted HTML should include an accessible visual graph projection");
+assert(html.includes("Attention") || html.includes("Visible concept"), "redacted HTML visual should retain non-sensitive concept labels");
 assert(html.includes("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"), "redacted HTML should escape hostile concept labels");
 assert(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "redacted HTML should escape hostile relation labels");
 assert(!html.includes('<img src=x onerror="alert(1)">'), "redacted HTML should not emit hostile concept markup");

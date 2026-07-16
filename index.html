@@ -6,6 +6,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'sha256-efybT6wtRaWZshwoqZ3HWV1NybxKXj9GmB5ie+Pw5iM='; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'" />
     <meta name="referrer" content="strict-origin-when-cross-origin" />
     <meta name="robots" content="index,follow" />
+    <meta name="repository-url" content="https://github.com/humblemat810/llm-wiki" />
     <link rel="canonical" href="./" />
     <link rel="alternate" type="application/atom+xml" href="feed.xml" title="LLM Field Notes updates" />
     <link rel="help" type="text/plain" href="llms.txt" title="LLM-readable project map" />
@@ -15,6 +16,10 @@
     />
     <meta name="theme-color" content="#10100f" />
     <meta name="color-scheme" content="light" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" sizes="180x180" href="icon-192.png" />
     <meta property="og:title" content="LLM Field Notes — documents into living knowledge" />
     <meta
       property="og:description"
@@ -23,15 +28,15 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="LLM Field Notes" />
     <meta property="og:url" content="./" />
-    <meta property="og:image" content="social-card.svg" />
-    <meta property="og:image:type" content="image/svg+xml" />
+    <meta property="og:image" content="social-card.png" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="LLM Field Notes: documents into a living map" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="LLM Field Notes — documents into living knowledge" />
     <meta name="twitter:description" content="Turn documents into an inspectable, evolving knowledge graph." />
-    <meta name="twitter:image" content="social-card.svg" />
+    <meta name="twitter:image" content="social-card.png" />
     <meta name="twitter:image:alt" content="LLM Field Notes: documents into a living map" />
     <script type="application/ld+json">
       {
@@ -104,6 +109,7 @@
           <div class="hero-actions">
             <a class="button button-primary" href="#workbench">Open the workbench <span>↓</span></a>
             <button class="button button-quiet" id="try-sample" type="button">Try a sample graph <span>↗</span></button>
+            <a class="button button-quiet" href="sample-graph.html">See a real graph <span>→</span></a>
             <a class="button button-quiet" href="#projection">See the projection <span>→</span></a>
             <button class="button button-quiet" id="share-wiki" type="button">Share the wiki <span>↗</span></button>
           </div>
@@ -238,7 +244,8 @@
                 <p>
                   Export a navigable Markdown projection with YAML frontmatter,
                   backlinks, relation lists, and source evidence. Open it in
-                  Obsidian, edit it, and bring corrections back as feedback.
+                  Obsidian, open the included native <code>Graph.canvas</code>
+                  view, edit the notes, and bring corrections back as feedback.
                 </p>
                 <p class="projection-privacy-note" id="projection-privacy-note">
                   Full exports include source text, evidence quotes, and source
@@ -428,6 +435,10 @@ for step in range(max_steps):
             </p>
             <div class="contribute-actions">
               <a class="button button-primary" href="CONTRIBUTING.md">Open a contribution <span>↗</span></a>
+              <a class="button button-quiet" href="https://github.com/humblemat810/llm-wiki/fork" target="_blank" rel="noopener noreferrer">Fork and improve <span>↗</span></a>
+              <a class="button button-quiet" href="https://github.com/humblemat810/llm-wiki/issues/new?template=graph_correction.yml" target="_blank" rel="noopener noreferrer">Correct the graph <span>↗</span></a>
+              <a class="button button-quiet" href="https://github.com/humblemat810/llm-wiki/issues/new?template=learning_note.yml" target="_blank" rel="noopener noreferrer">Suggest a learning note <span>↗</span></a>
+              <a class="button button-quiet" href="https://github.com/humblemat810/llm-wiki/issues/new?template=artifact.yml" target="_blank" rel="noopener noreferrer">Share an artifact <span>↗</span></a>
               <a class="button button-quiet" href="artifacts.html">Browse artifacts <span>↗</span></a>
               <a class="button button-quiet" href="artifacts.html#learning-loop">See the learning loop <span>↗</span></a>
               <a class="button button-quiet" href="ARCHITECTURE.md">Read the architecture <span>↗</span></a>

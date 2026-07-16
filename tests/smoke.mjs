@@ -2557,6 +2557,21 @@ assert.equal(canvas.edges.length, merged.edges.length, "Obsidian Canvas should c
 assert(canvas.nodes.every((node) => node.type === "file" && typeof node.file === "string" && node.file.startsWith("Concepts/")), "Obsidian Canvas concept cards should target projected concept notes");
 assert(canvas.edges.every((edge) => typeof edge.fromNode === "string" && typeof edge.toNode === "string" && typeof edge.label === "string"), "Obsidian Canvas relations should retain bounded endpoints and labels");
 assert.deepEqual(JSON.parse(buildVaultFiles(merged).find((file) => file.name === "Graph.canvas")?.content || "{}"), canvas, "Obsidian Canvas exports should be deterministic");
+const orphanedProjection = buildVaultFiles({
+  ...merged,
+  edges: [...merged.edges, {
+    ...merged.edges[0],
+    id: "orphaned-relation",
+    source: "missing-concept"
+  }]
+});
+const orphanedCanvas = JSON.parse(orphanedProjection.find((file) => file.name === "Graph.canvas")?.content || "{}");
+assert.equal(orphanedCanvas.edges.length, merged.edges.length + 1, "Obsidian Canvas should preserve relations with unresolved endpoints");
+assert(orphanedCanvas.nodes.some((node) => node.type === "text" && node.text.includes("Unresolved concept endpoint")), "Obsidian Canvas should disclose unresolved relation endpoints instead of dropping edges");
+const orphanedRelationNote = orphanedProjection.find((file) => file.name.includes("orphaned-relation"))?.content || "";
+assert(orphanedRelationNote.includes("Unresolved concept: missing-concept") && !orphanedRelationNote.includes("[[undefined"), "Obsidian relation notes should use explicit unresolved-endpoint text instead of broken links");
+assert.equal(new Set(orphanedCanvas.nodes.map((node) => node.id)).size, orphanedCanvas.nodes.length, "Obsidian Canvas node identities should be unique");
+assert(orphanedCanvas.edges.every((edge) => orphanedCanvas.nodes.some((node) => node.id === edge.fromNode) && orphanedCanvas.nodes.some((node) => node.id === edge.toNode)), "Obsidian Canvas edges should reference existing node identities");
 const vaultGraphJson = JSON.parse(vaultFiles.find((file) => file.name === "graph.json")?.content || "{}");
 assert.equal(vaultGraphJson.graphFingerprint, fingerprintBackup(merged), "vault graph JSON should carry the same integrity fingerprint as its manifest");
 assert.equal(vaultGraphJson.appVersion, "0.1.0", "vault graph JSON should retain bounded producer-version metadata");

@@ -34,6 +34,10 @@ jobs:
         run: npm run runtime:check
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
+      - name: Build Pages artifact for artifact-dependent tests
+        run: npm run build:pages
+      - name: Verify Pages artifact for artifact-dependent tests
+        run: npm run verify:pages
       - name: Run smoke checks
         run: npm test
       - name: Verify encrypted backup round trip
@@ -51,11 +55,13 @@ jobs:
           set -e
           version=$(node -p "require('./package.json').version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          docker build --build-arg APP_VERSION="$version" --build-arg VCS_REF="$GITHUB_SHA" --tag llm-field-notes:ci .
+          repository="https://github.com/${GITHUB_REPOSITORY}"
+          documentation="$repository/blob/main/RUNBOOK.md"
+          docker build --build-arg APP_VERSION="$version" --build-arg VCS_REF="$GITHUB_SHA" --build-arg PUBLIC_REPOSITORY_URL="$repository" --build-arg PUBLIC_DOCUMENTATION_URL="$documentation" --tag llm-field-notes:ci .
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' llm-field-notes:ci)" = "$version"
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' llm-field-notes:ci)" = "$GITHUB_SHA"
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' llm-field-notes:ci)" = "https://github.com/humblemat810/llm-wiki"
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.documentation"}}' llm-field-notes:ci)" = "https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' llm-field-notes:ci)" = "$repository"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.documentation"}}' llm-field-notes:ci)" = "$documentation"
           test "$(docker image inspect --format '{{.Config.User}}' llm-field-notes:ci)" = "node"
           test "$(docker image inspect --format '{{.Config.StopSignal}}' llm-field-notes:ci)" = "SIGTERM"
           docker run --rm --entrypoint sh llm-field-notes:ci -c 'test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/scripts/check-runtime.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/experiments/verify-backup.mjs'
@@ -65,6 +71,8 @@ jobs:
           CONTAINER_SKIP_BUILD: "1"
           CONTAINER_EXPECTED_VERSION: ${{ steps.package.outputs.version }}
           CONTAINER_EXPECTED_REVISION: ${{ github.sha }}
+          CONTAINER_EXPECTED_SOURCE: https://github.com/${{ github.repository }}
+          CONTAINER_EXPECTED_DOCUMENTATION: https://github.com/${{ github.repository }}/blob/main/RUNBOOK.md
           CONTAINER_PORT: "18000"
           CONTAINER_EXTRACTOR_TOKEN: ci-extractor-token
           CONTAINER_METRICS_TOKEN: ci-metrics-token

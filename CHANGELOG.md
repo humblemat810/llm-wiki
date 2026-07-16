@@ -4,6 +4,159 @@ All notable changes to LLM Field Notes are documented here.
 
 ## [Unreleased]
 
+- Add a deterministic, accessible SVG graph projection to the public sample
+  explainer, so visitors can see concepts and evidence-backed relations before
+  opening the interactive workbench; keep the page script-free and CSP-safe.
+- Add the same bounded visual graph projection to privacy-safe HTML exports,
+  retaining the complete concept and relation lists when a large graph exceeds
+  the visual preview budget.
+- Add checked-in `.nvmrc` and `.node-version` runtime hints and verify them
+  against the declared Node engine baseline.
+- Make the projection panel explicitly point to the native `Graph.canvas`
+  viewer included in Obsidian vault exports.
+- Preserve orphaned relation edges in `Graph.canvas` with explicit unresolved
+  endpoint cards, and replace broken `[[undefined|...]]` Markdown links with
+  readable unresolved-endpoint text.
+- Make the public sample graph and artifact index explain the complete
+  document → graph → Obsidian `Graph.canvas` workflow.
+- Make unsupported-runtime failures point directly to the checked-in Node
+  version hints and the recovery command.
+- Make `npm test` enforce the supported runtime before running any checks, so
+  an unsupported local Node version cannot produce a misleading green suite.
+- Add bounded evaluation diagnostics identifying matched and missed reviewed
+  concepts or relations without exporting source text or evidence.
+- Extend browser certification to exercise the public sample graph entry point,
+  including its visual graph, CTA, accessible labeling, and mobile overflow.
+- Make `npm run browser:smoke` enforce the supported runtime before launching
+  Playwright, keeping local browser failures actionable.
+- Make Obsidian vault export fail closed if generated Canvas node identities,
+  concept note paths, or edge endpoints are malformed.
+- Fix single-file imports so the edited title and document body are authoritative
+  when building the graph; only multi-file selections remain in the queued batch
+  path.
+- Make remote extraction failures explicitly preserve and explain the retryable
+  editor draft instead of leaving recovery state implicit.
+- Abort in-flight remote extraction immediately on browser offline transitions
+  instead of waiting for the provider timeout.
+- Distinguish offline-triggered cancellation from manual cancellation across
+  document builds, batch ingestion, saved-source rebuilds, and replacements.
+- Recheck connectivity at every remote extraction boundary in batches and
+  rebuilds, preventing provider calls from starting after disconnects.
+- Make cross-browser offline smoke explicit about the pinned Firefox runner's
+  missing `navigator.onLine` signal while retaining its offline reopening check.
+- Document the expected non-fatal CodeQL workflow-run telemetry warning on fork
+  pull requests, including the safe least-privilege response for contributors.
+- Add a generated 1200×630 PNG social-card fallback for platforms that do not
+  render SVG link-preview images, publish it through the Pages/offline asset
+  contract, and keep standalone readiness binary-safe.
+- Add explicit 192×192 and 512×512 PNG PWA icons so installed launchers do not
+  depend on SVG icon support.
+- Preserve the tagged commit revision when the release workflow runs the
+  canonical production gate, keeping generated release metadata traceable.
+- Extend the cross-browser smoke to validate the served web manifest and
+  installed-app PNG icon bytes, not only the interactive workbench.
+- Add Apple home-screen metadata backed by the verified raster app icon for
+  mobile installation paths that do not fully rely on the web manifest.
+- Add direct learning-note and artifact issue-form links to the landing page,
+  reducing friction in the public contribution loop.
+- Mirror the direct artifact issue-form link in the artifact gallery, where
+  contributors encounter runnable work worth extending.
+- Add `npm run assets:generate` so checked-in PNG app/share assets can be
+  reproduced from their vector sources.
+- Make contribution issue links fork-aware through validated
+  `PUBLIC_REPOSITORY_URL` configuration, with Pages automatically targeting
+  the repository that owns the deployment.
+- Add direct “Fork and improve” calls to action to the landing page and
+  artifact gallery, using the same fork-aware repository configuration.
+- Extend the post-deploy Pages probe to verify that the live landing page and
+  artifact gallery still expose the fork and contribution loop.
+- Add a privacy-aware graph-correction issue form so contributors can report
+  missing concepts, misleading relations, and unsupported evidence in the
+  internal representation.
+- Add a privacy-safe “report correction” action inside concept, relation, and
+  source inspectors, following the deployed fork without serializing local
+  graph content into the issue URL.
+- Bind deployed browser smoke to the expected GitHub repository identity, so a
+  fork cannot silently serve correction links back to the upstream project.
+- Add the graph-correction workflow to `llms.txt` so machine-readable
+  consumers can discover the safe feedback path as well.
+- Make the canonical release check validate the graph-correction issue form's
+  bounded, actionable, privacy-aware contract.
+- Rewrite `.well-known/security.txt` for fork deployments in both Pages and
+  Node serving, so security contacts, policy links, and canonical metadata do
+  not point back to the upstream repository.
+- Make Docker OCI source and documentation labels fork-aware, with CI and
+  release smoke asserting the repository that built the image.
+- Document the fork-specific Docker metadata arguments in the container
+  quickstart so local images do not carry misleading ownership labels.
+- Propagate the fork repository into container runtime configuration and keep
+  the runtime helper in the Docker allowlist; container smoke now verifies the
+  served fork-specific security metadata.
+- Static Pages artifacts now publish and verify the exact bounded source
+  revision that produced them, improving live-deployment incident correlation.
+- The scheduled Pages monitor now detects a structurally healthy but stale
+  publication by comparing the served revision with the current branch commit.
+- Manual Pages monitor runs now compare against the repository default branch,
+  avoiding false drift alerts when dispatched from another branch.
+- Deployed browser smoke now verifies the served source revision, keeping UI
+  certification tied to the artifact commit rather than version text alone.
+- Browser certification now performs a real human concept confirmation and
+  verifies that reusable learning memory appears before projection export.
+- The workbench release footer now exposes a short source revision when the
+  deployment provides one, improving user-visible build traceability.
+- Pages root 404 failures now explain the GitHub Pages activation step instead
+  of producing an ambiguous generic deployment error.
+- Extended the post-deploy Pages probe to recompute the service-worker cache
+  identity from the live manifest-listed bytes, rejecting mixed or stale
+  offline shells even when the individual responses are otherwise valid.
+- Made the canonical production gate build and verify a fresh Pages artifact
+  before accessibility and performance tests, eliminating accidental reliance
+  on a stale or pre-existing `dist/` directory.
+- Made every Node verification lane build and verify that fresh Pages artifact
+  before running the shared artifact-dependent test suite.
+- Made standalone `npm test` prepare and verify its own Pages artifact, so
+  clean checkouts no longer depend on an accidentally pre-existing `dist/`.
+- Extended browser certification to download and validate a real Obsidian ZIP
+  after graph extraction, covering the product's primary external projection
+  path in every supported browser lane.
+- Extended that browser scenario to re-import the downloaded vault and verify
+  the feedback-import result, covering the complete projection round trip.
+- Added failure-only browser screenshots and pinned CI artifact uploads for
+  local, deployed, and scheduled browser smoke lanes to make visual regressions
+  diagnosable without adding successful-run payloads.
+- Added a deployment regression proving that a service worker with a forged
+  cache revision is rejected even when its manifest digest is updated.
+- Added a final Pages verification after the production test suite so
+  test-generated artifact changes cannot bypass the publication contract.
+
+- Tighten local extraction phrase ranking so ordinary inflected verb
+  fragments such as `policy blocks`, `retriever queries`, and `reranker
+  orders` do not become durable graph concepts, while explicit relation
+  edges and reviewed noun phrases remain available.
+- Add regression coverage for operational technical prose to protect
+  extraction precision as the local representation improves.
+- Extend the deterministic learning-loop proof to cover accepted and rejected
+  relations independently from concept guidance, including a separate relation
+  delta in the versioned artifact.
+- Add a required relation-quality extraction benchmark covering accepted edge
+  recall, rejected-edge suppression, and source evidence grounding.
+- Add a scheduled exact-origin browser monitor across Chromium, Firefox, and
+  WebKit to detect post-release publication and service-worker regressions.
+- Document the GitHub Pages Actions-source prerequisite and distinguish a
+  verified local artifact from a reachable public deployment.
+- Extend browser smoke with runtime reduced-motion, narrow-viewport,
+  accessible-name, and keyboard-focus checks across the browser matrix.
+- Assert that functional narrow-workbench content does not overflow
+  horizontally in the runtime browser smoke, while allowing the intentionally
+  clipped decorative ticker track.
+- Contain the decorative ticker track so its animated width cannot leak into
+  narrow-viewport document layout metrics.
+- Allow hero actions to wrap on narrow screens so the share action cannot
+  extend beyond the mobile workbench viewport.
+- Strengthen the post-deploy Pages probe to validate the served asset manifest
+  and release version metadata against the running application version.
+- Verify every live manifest-listed Pages asset's byte count and SHA-256 digest
+  with bounded concurrent requests after publication.
 - Make `npm test` execute the full behavioral test directory instead of only
   checking JavaScript syntax, so CI and the production gate exercise the
   repository's actual regression coverage.
@@ -71,9 +224,42 @@ All notable changes to LLM Field Notes are documented here.
 - Cancel unread response bodies when the Pages deployment smoke rejects status,
   redirects, or content types early, preventing failed CDN probes from retaining
   network streams.
+- Make the Pages deployment probe reject truncated or overlong bodies whose
+  received byte count disagrees with the declared `Content-Length`.
+- Apply the same declared-length integrity check to bounded load-probe
+  responses, so capacity evidence cannot accept truncated health or graph JSON.
+- Stream and bound load-probe error responses too, cancelling oversized or
+  malformed bodies before they can consume operator-probe memory.
+- Run bounded health and authenticated-extraction load probes inside the
+  standalone-process smoke, making live concurrency evidence part of CI and
+  release verification.
+- Allow deployment-specific load probes to enforce bounded failure-count and
+  p95-latency budgets without pretending that one universal capacity target
+  fits every provider or gateway.
+- Add a reproducible Chromium, Firefox, and WebKit workbench smoke matrix that
+  exercises local extraction, graph rendering, reload persistence, and browser
+  error reporting in CI.
+- Run the Chromium workbench smoke against the exact URL returned by the Pages
+  deployment action, catching publication-only browser failures before release
+  promotion completes.
+- Expand the Pages post-deploy browser gate to the full Chromium, Firefox, and
+  WebKit matrix against the configured public origin.
+- Add a bounded duration mode to the load probe so operators can collect
+  time-based sustained-load evidence in addition to fixed request batches.
+- Include failed and timed-out attempts in load latency percentiles so
+  operator SLO evidence cannot hide latency behind request success filtering.
+- Report unique failed requests, throughput, and failure rate separately from
+  diagnostic messages in load evidence.
+- Add a guarded manual capacity workflow so deployment owners can reproduce
+  bounded sustained-load evidence with explicit authorization and SLO budgets.
+- Keep that manual workflow health-only so arbitrary user-entered targets can
+  never receive an extraction credential.
 - Add an explicit real-browser certification matrix to the production runbook,
   covering offline storage, Obsidian round trips, remote-boundary states,
   accessibility, responsive behavior, and release evidence.
+- Extend browser smoke with service-worker activation and offline shell
+  reopening on Chromium and Firefox, while recording the pinned Playwright
+  WebKit offline-emulation limitation instead of treating it as a false pass.
 - Key Obsidian relation projection paths by stable relation IDs so normalized
   edge clones cannot lose their exported note links.
 - Re-check drain state after asynchronous readiness and extraction parsing work,

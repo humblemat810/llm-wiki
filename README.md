@@ -15,13 +15,19 @@ curious person can challenge the representation and improve it over time.
 Browse the [community artifacts](artifacts.html) for runnable starting points,
 or submit a small experiment, graph, benchmark, or failed attempt using the
 [artifact template](ARTIFACT_SUBMISSION.md).
+The landing page also links directly to the repository's graph-correction,
+learning-note, and artifact issue forms, so a useful correction can enter the
+review loop without requiring a contributor to navigate GitHub manually.
 Each public artifact card includes a copy-paste command to try or inspect it
 from the repository root.
 The [sample graph export](examples/sample-graph.json) is a small, deterministic
 internal representation with a whole-graph integrity fingerprint; inspect,
 diff, health-check, or project it into JSON-LD without opening the browser
-first. The release smoke suite verifies its fingerprint, provenance, evidence
-grounding, and no-loss health gate before publication.
+first. The public [sample graph explainer](sample-graph.html) shows the same
+concepts, evidence, relations, and fingerprint in a crawler-readable view
+before a visitor imports anything. The release smoke suite verifies its
+fingerprint, provenance, evidence grounding, and no-loss health gate before
+publication.
 
 The self-improvement walkthrough is also available as `npm run learning:loop`.
 The [knowledge-graph note](notes/knowledge-graphs.md) explains the same loop
@@ -59,6 +65,9 @@ The browser workbench supports:
 - Launching that sample walkthrough directly from an installed app shortcut.
 - Loading and ingesting a batch of local text/Markdown documents in one undoable
   mutation.
+- Treating a loaded single text/Markdown file as an editable editor draft, so
+  changing its title or body before **Build graph** changes the representation
+  that is actually extracted; multi-file selections remain queued batches.
 - Showing a bounded summary of per-file batch failures so partial imports are
   recoverable without overwhelming the workbench.
 - Extracting candidate concepts and evidence-backed co-occurrence relations.
@@ -100,6 +109,16 @@ The browser workbench supports:
 - Failing configured remote extraction fast while offline, so users can
   reconnect or clear the endpoint for the local extractor instead of waiting
   through network retries.
+- Aborting an in-flight remote extraction as soon as the browser goes offline,
+  while leaving local extraction, the saved graph, and the editable draft
+  untouched.
+- Naming that offline cancellation separately for single builds, batch builds,
+  saved-source rebuilds, and source replacement so recovery actions are clear.
+- Rechecking connectivity before every remote request in a batch or rebuild,
+  preventing a later provider call from starting after the browser disconnects.
+- Explicitly telling users when remote extraction fails that their editable
+  document draft was preserved and can be retried or sent through the local
+  extractor.
 - Bounding browser operation diagnostics before they reach batch, vault, or
   rebuild failure summaries.
 - Bounding diagnostics across export, recovery, and global runtime-error
@@ -490,6 +509,8 @@ The browser workbench supports:
   surface when available, with clipboard and download fallbacks.
 - Exporting a redacted graph that preserves structure and review state while
   removing source text, evidence quotes, and source URIs for safer sharing.
+- Exporting a redacted HTML snapshot with an accessible, bounded SVG graph
+  preview while retaining complete concept and relation lists for large graphs.
 - Bounding Obsidian archive file count and validating every generated file
   record before allocating ZIP parts.
 - Preflighting source and evidence bytes before building large Markdown,
@@ -628,10 +649,14 @@ tie-break rather than file or dataset order.
 - Sharing those local item links through the native share sheet when available,
   with a clipboard fallback and generic metadata that does not expose source
   titles or graph content.
-- Publishing a dedicated 1200×630 share card for richer link previews on social
-  platforms and team chat.
+- Publishing the vector share card plus a generated 1200×630 PNG fallback for
+  reliable link previews on social platforms and team chat.
 - Publishing machine-readable JSON-LD metadata so search engines can identify
   the project as a free educational knowledge-workbench.
+- Browser smoke also opens the public sample graph entry point and checks its
+  visual graph, accessible labeling, contribution CTA, and narrow-viewport
+  layout, so the shareable discovery surface is covered alongside the
+  interactive workbench.
 - Keeping that inline metadata covered by a narrowly scoped CSP hash rather
   than weakening the page with `unsafe-inline`.
 - Opening learning notes through shareable `#note=...` deep links that survive
@@ -971,7 +996,12 @@ filename agreement, and file checksums before applying feedback.
 The reference server can also run in a container:
 
 ```bash
-docker build --build-arg VCS_REF="$(git rev-parse HEAD)" -t llm-field-notes .
+repository="https://github.com/$(git remote get-url origin | sed -E 's#git@github.com:(.*)\.git#\1#; s#https://github.com/##; s#\\.git$##')"
+docker build \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  --build-arg PUBLIC_REPOSITORY_URL="$repository" \
+  --build-arg PUBLIC_DOCUMENTATION_URL="$repository/blob/main/RUNBOOK.md" \
+  -t llm-field-notes .
 docker run --rm --read-only --tmpfs /tmp --cap-drop=ALL \
   --security-opt=no-new-privileges -p 8000:8000 \
   --env PUBLIC_ORIGIN=http://127.0.0.1:8000 \
@@ -979,6 +1009,10 @@ docker run --rm --read-only --tmpfs /tmp --cap-drop=ALL \
   --env METRICS_AUTH_TOKEN=replace-with-a-local-secret \
   llm-field-notes
 ```
+
+The Docker metadata arguments default to the upstream repository, but fork
+owners should pass their own repository so OCI source and documentation labels
+remain accurate.
 
 Generic Node hosts can use `npm start`; the server honors `PORT`, `HOST`,
 `EXTRACTOR_RATE_LIMIT`, `EXTRACTOR_CONCURRENCY`, and `EXTRACTOR_TIMEOUT_MS`. The container intentionally
@@ -1020,13 +1054,17 @@ Run the dependency-free test suite with:
 npm test
 ```
 
-This discovers JavaScript source files for syntax checks and executes every
+This first verifies the supported Node runtime, then builds and independently
+verifies a fresh Pages artifact, then discovers JavaScript source files for
+syntax checks and executes every
 `tests/*.mjs` behavioral regression test in a fresh Node process. Generated
-bundles and dependency directories are excluded. New source and test files are
-included automatically, so a green result cannot silently mean “syntax only.”
-It also runs the release contract on every supported Node lane.
+bundles and dependency directories are excluded from discovery. New source and
+test files are included automatically, so a green result cannot silently mean
+“syntax only.” It also runs the release contract on every supported Node lane.
 
-`npm run production:check` additionally runs `npm run release:check` and
+`npm run production:check` additionally runs `npm run release:check`, builds and
+verifies a fresh Pages artifact before the dist-dependent browser checks, and
+re-verifies the final artifact after all tests. It also runs
 `npm run smoke:server`, validating release metadata, the lockfile, workflow
 permissions and pinning, public/offline asset parity, container provenance,
 and the real standalone server lifecycle before Pages or a tagged container
@@ -1043,6 +1081,12 @@ failure. Inspect an existing bundle with `npm run performance:check -- dist`.
 The same checks run in GitHub Actions on every push to `main` and every pull
 request across Node 22 and 24, matching the supported production runtime
 baseline.
+The checked-in `.nvmrc` and `.node-version` files select Node 22 for local
+version managers; `npm run runtime:check` verifies those hints stay aligned
+with `package.json`.
+Browser certification also runs that runtime preflight before launching
+Playwright, so unsupported local Node versions fail with setup guidance rather
+than a misleading browser-library error.
 CI first performs a locked `npm ci` install, then builds the Docker image to
 run the production dependency audit and catch package and deployment drift.
 CI starts that image, probes `/readyz`, and waits for Docker’s health status to
@@ -1096,6 +1140,10 @@ those files as feedback updates rather than new source documents.
 - `server.mjs` — optional same-origin static server and extraction contract example
 - `scripts/note-page.mjs` — shared crawler-readable learning-note page renderer
 - `manifest.webmanifest` / `sw.js` — installable, cacheable static deployment
+  with explicit 192px and 512px raster app icons
+- `npm run assets:generate` — after `npm ci` and
+  `npx playwright install chromium`, regenerate the PNG app/share assets from
+  their checked-in SVG sources after changing the visual identity
 - `version.json` — public release metadata shared by the browser and static
   deployment checks
 - `llms.txt` — bounded machine-readable project map for discovery and
@@ -1180,10 +1228,23 @@ file host can serve it. HTTPS is recommended so the service worker and browser
 file APIs behave consistently. The app is useful without a backend; a backend
 is optional, and the included same-origin server can be replaced with
 a model-backed extraction implementation behind the same graph contract.
-- GitHub Pages deployment is ready through `.github/workflows/pages.yml`. It
-  publishes the generated `dist/` bundle rather than the repository root, so
-  server code, tests, container files, and local project metadata stay out of
-  the public artifact.
+- GitHub Pages deployment is ready through `.github/workflows/pages.yml`. Before
+  the first publication, open repository **Settings → Pages**, choose **GitHub
+  Actions** as the build and deployment source, and run the workflow from the
+  Actions tab. The workflow publishes the generated `dist/` bundle rather than
+  the repository root, so server code, tests, container files, and local project
+  metadata stay out of the public artifact. The repository cannot enable the
+  Pages setting through source files alone.
+- For a custom domain or non-default project path, set the repository
+  `PUBLIC_ORIGIN` variable to the exact externally visible HTTPS origin before
+  running the workflow. The deployment and browser-monitor workflows otherwise
+  use the default repository Pages URL.
+- Contribution links default to this repository and the Pages workflow
+  automatically rewrites them to the current fork via
+  `PUBLIC_REPOSITORY_URL=https://github.com/${{ github.repository }}`. For a
+  local build, set `PUBLIC_REPOSITORY_URL` to an absolute, credential-free
+  GitHub HTTPS repository URL; invalid values fail the build rather than
+  publishing misleading issue links.
 - The published bundle includes a script-free branded `404.html` recovery page
   so stale shared links lead back to the workbench and artifact gallery; when
   `PUBLIC_ORIGIN` is configured, its links are rewritten for nested project
@@ -1195,6 +1256,13 @@ a model-backed extraction implementation behind the same graph contract.
 - Every Pages build includes `asset-manifest.json`, a versioned inventory of
   published files with byte lengths and SHA-256 digests for mirrors and release
   checks.
+- Every Pages build also generates `sample-graph.html`, a script-free public
+  explanation of the checked-in sample graph with an accessible SVG projection
+  of its concepts and relations; it links back to the interactive sample
+  walkthrough and the graph note.
+- Pages `version.json` also carries the bounded source revision that produced
+  the artifact. CI publishes `GITHUB_SHA` and the post-deploy smoke verifies
+  that exact revision, making a live static deployment traceable to a commit.
 - Verify an existing bundle independently with `npm run verify:pages -- dist`;
   for an origin-aware bundle, pass the same origin used during its build, for
   example `PUBLIC_ORIGIN=https://wiki.example.test/field-notes npm run
@@ -1202,15 +1270,21 @@ a model-backed extraction implementation behind the same graph contract.
   cache revision matches the complete published bundle, including generated
   feeds and note pages, and that `robots.txt` points at the matching sitemap.
 - After GitHub Pages publishes, the workflow runs
-  `npm run smoke:pages:deployment` against the deployment action's final URL.
-  The probe retries bounded CDN propagation and checks the served canonical
-  HTML, `robots.txt`, sitemap, service worker, artifact gallery, and a
-  generated note page. Run the same command locally with
+  `npm run smoke:pages:deployment` against `PUBLIC_ORIGIN` when configured,
+  otherwise the deployment action's final URL. The probe retries bounded CDN
+  propagation and checks the served canonical HTML, `robots.txt`, sitemap,
+  service worker, artifact gallery, sample graph explainer, and a generated
+  note page. Run the same
+  command locally with
   `PAGES_DEPLOYMENT_URL=https://example.invalid/wiki/` when validating a
   reachable deployment.
 - A read-only scheduled workflow repeats that deployed-URL probe daily. It
   uses the repository's default Pages URL automatically and honors the
   `PUBLIC_ORIGIN` repository variable for custom domains or paths.
+- A separate scheduled browser monitor repeats the Chromium, Firefox, and
+  WebKit workbench smoke against the same published origin. A local
+  `production:check` proves the artifact; only a successful post-deploy probe
+  proves that the public URL is actually serving it.
 - The Pages artifact also generates `feed.xml` from the published learning
   notes. Set the build environment variable `PUBLIC_ORIGIN` to the final
   HTTPS origin to additionally generate absolute `sitemap.xml` URLs and a

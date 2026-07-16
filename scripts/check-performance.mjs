@@ -11,7 +11,7 @@ export const MAX_CRITICAL_SHELL_BYTES = 1024 * 1024;
 const criticalScripts = CORE_SHELL_ASSETS.filter((asset) => /\.(?:js|mjs)$/.test(asset) && asset !== "sw.js" && asset !== "version.json");
 const criticalStyles = ["styles.css"];
 const criticalMarkup = ["index.html"];
-const criticalOther = ["manifest.webmanifest", "icon.svg", "social-card.svg"];
+const criticalOther = ["manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png", "social-card.svg", "social-card.png"];
 
 async function boundedAssetBytes(root, asset) {
   const path = resolve(root, asset);

@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonWithUniqueKeys } from "../graph-core.js";
-import { FIXED_PUBLIC_ASSETS, PUBLIC_ASSETS } from "./public-assets.mjs";
+import { FIXED_PUBLIC_ASSETS, GENERATED_PUBLIC_ASSETS, PUBLIC_ASSETS } from "./public-assets.mjs";
 
 const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const artifactPage = await readFile(new URL("../artifacts.html", import.meta.url), "utf8");
@@ -36,9 +36,12 @@ for (const [index, card] of cards.entries()) {
   const resolved = resolve(root, card.href);
   const relativePath = relative(root, resolved);
   assert(relativePath && !relativePath.startsWith("..") && !relativePath.includes("/../"), `artifact ${card.href} escapes the repository.`);
-  const metadata = await stat(resolved);
-  assert(metadata.isFile() && metadata.size > 0, `artifact target is missing or empty: ${card.href}`);
-  assert(PUBLIC_ASSETS.includes(relativePath) || FIXED_PUBLIC_ASSETS.includes(relativePath), `artifact target is not in the public asset contract: ${card.href}`);
+  const generated = GENERATED_PUBLIC_ASSETS.includes(relativePath);
+  if (!generated) {
+    const metadata = await stat(resolved);
+    assert(metadata.isFile() && metadata.size > 0, `artifact target is missing or empty: ${card.href}`);
+  }
+  assert(PUBLIC_ASSETS.includes(relativePath) || FIXED_PUBLIC_ASSETS.includes(relativePath) || generated, `artifact target is not in the public asset contract: ${card.href}`);
 
   const structuredItem = itemList.itemListElement[index];
   assert.equal(structuredItem.position, index + 1, `artifact structured position ${index + 1} is out of order.`);

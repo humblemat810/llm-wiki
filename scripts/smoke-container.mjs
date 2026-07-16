@@ -25,6 +25,12 @@ export function parseContainerConfig(environment = process.env) {
   const version = typeof environment.CONTAINER_EXPECTED_VERSION === "string" && environment.CONTAINER_EXPECTED_VERSION.trim()
     ? environment.CONTAINER_EXPECTED_VERSION.trim()
     : packageManifest.version;
+  const source = typeof environment.CONTAINER_EXPECTED_SOURCE === "string" && environment.CONTAINER_EXPECTED_SOURCE.trim()
+    ? environment.CONTAINER_EXPECTED_SOURCE.trim()
+    : EXPECTED_SOURCE;
+  const documentation = typeof environment.CONTAINER_EXPECTED_DOCUMENTATION === "string" && environment.CONTAINER_EXPECTED_DOCUMENTATION.trim()
+    ? environment.CONTAINER_EXPECTED_DOCUMENTATION.trim()
+    : EXPECTED_DOCUMENTATION;
   if (!/^(?:unknown|[0-9a-f]{7,64})$/i.test(revision) || revision === "unknown") {
     throw new Error("CONTAINER_EXPECTED_REVISION must be 7–64 hexadecimal characters.");
   }
@@ -33,6 +39,8 @@ export function parseContainerConfig(environment = process.env) {
     port: Number.isInteger(port) && port >= 0 && port <= 65535 ? port : 0,
     revision,
     version,
+    source,
+    documentation,
     skipBuild: environment.CONTAINER_SKIP_BUILD === "1",
     extractorToken: environment.CONTAINER_EXTRACTOR_TOKEN || DEFAULT_EXTRACTOR_TOKEN,
     metricsToken: environment.CONTAINER_METRICS_TOKEN || DEFAULT_METRICS_TOKEN
@@ -106,6 +114,8 @@ export async function smokeContainer(environment = process.env) {
         "build",
         "--build-arg", `APP_VERSION=${config.version}`,
         "--build-arg", `VCS_REF=${config.revision}`,
+        "--build-arg", `PUBLIC_REPOSITORY_URL=${config.source}`,
+        "--build-arg", `PUBLIC_DOCUMENTATION_URL=${config.documentation}`,
         "--tag", config.image,
         "."
       ]);
@@ -132,12 +142,12 @@ export async function smokeContainer(environment = process.env) {
     );
     assert.equal(
       runDocker(["image", "inspect", "--format", "{{index .Config.Labels \"org.opencontainers.image.source\"}}", config.image], { quiet: true }).trim(),
-      EXPECTED_SOURCE,
+      config.source,
       "container source metadata must identify the repository"
     );
     assert.equal(
       runDocker(["image", "inspect", "--format", "{{index .Config.Labels \"org.opencontainers.image.documentation\"}}", config.image], { quiet: true }).trim(),
-      EXPECTED_DOCUMENTATION,
+      config.documentation,
       "container documentation metadata must identify the runbook"
     );
     runDocker(["run", "--rm", "--entrypoint", "sh", config.image, "-c", "test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/experiments/verify-backup.mjs"]);
@@ -145,6 +155,7 @@ export async function smokeContainer(environment = process.env) {
       "run", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
       "--env", `PUBLIC_ORIGIN=${baseUrl}`,
+      "--env", `PUBLIC_REPOSITORY_URL=${config.source}`,
       "--env", `EXTRACTOR_AUTH_TOKEN=${config.extractorToken}`,
       "--env", `METRICS_AUTH_TOKEN=${config.metricsToken}`,
       "--detach", "--name", containerName, "--publish", `${port}:8000`, config.image
@@ -178,6 +189,12 @@ export async function smokeContainer(environment = process.env) {
     const readinessPayload = await readiness.json();
     assert.equal(readinessPayload.version, config.version);
     assert.equal(readinessPayload.revision, config.revision);
+    const securityMetadata = await fetchWithTimeout(`${baseUrl}/.well-known/security.txt`);
+    const securityText = await securityMetadata.text();
+    assert.equal(securityMetadata.status, 200);
+    assert(securityText.includes(`Contact: ${config.source}/security/advisories/new`)
+      && securityText.includes(`Policy: ${config.source}/blob/main/SECURITY.md`)
+      && securityText.includes(`Canonical: ${config.source}/blob/main/.well-known/security.txt`), "container security metadata must target the configured repository");
     runDocker([
       "exec", containerName, "sh", "-c",
       "test ! -w /app && touch /tmp/container-smoke-write-test && rm -f /tmp/container-smoke-write-test"

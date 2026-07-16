@@ -6,11 +6,12 @@
   "description": "A document-to-knowledge-graph workspace with Obsidian projections.",
   "license": "CC-BY-4.0",
   "scripts": {
-    "test": "node scripts/run-tests.mjs",
+    "test": "npm run runtime:check && node scripts/run-tests.mjs",
     "start": "node server.mjs",
     "serve": "python3 -m http.server 8000",
     "serve:node": "node server.mjs",
     "smoke:server": "node scripts/smoke-server.mjs",
+    "browser:smoke": "npm run runtime:check && node scripts/browser-smoke.mjs",
     "smoke:container": "node scripts/smoke-container.mjs",
     "load:server": "node scripts/load-server.mjs",
     "build:pages": "node scripts/build-pages.mjs",
@@ -38,9 +39,13 @@
     "performance:check": "node scripts/check-performance.mjs",
     "artifacts:check": "node scripts/check-artifacts.mjs",
     "security:check": "node scripts/check-security-txt.mjs",
-    "backup:smoke": "node tests/backup-crypto-smoke.mjs && node tests/backup-verifier-smoke.mjs"
+    "backup:smoke": "node tests/backup-crypto-smoke.mjs && node tests/backup-verifier-smoke.mjs",
+    "assets:generate": "node scripts/generate-raster-assets.mjs"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "playwright": "^1.52.0"
   }
 }

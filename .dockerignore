@@ -13,6 +13,7 @@ scripts/*.mjs
 !scripts/note-page.mjs
 !scripts/public-assets.mjs
 !scripts/public-origin.mjs
+!scripts/public-repository.mjs
 !scripts/service-worker-cache.mjs
 experiments/*.mjs
 !experiments/bounded-file.mjs

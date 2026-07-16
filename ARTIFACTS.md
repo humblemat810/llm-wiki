@@ -28,6 +28,10 @@ sitting and honest enough to show what failed.
   encrypted backups without putting a password in command arguments.
 - [Sample graph export](examples/sample-graph.json) — start with a small,
   evidence-backed graph for health, diff, and projection tooling.
+- [Sample graph viewer](sample-graph.html) — inspect that same representation
+  as a script-free, shareable public page, including its visual graph, before
+  opening the workbench; the workbench can export the same graph as an Obsidian
+  vault with a native `Graph.canvas` view.
 
 Run an experiment from the repository root with Node 22 or newer. The
 experiments are intentionally dependency-free.

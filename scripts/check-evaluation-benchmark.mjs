@@ -74,9 +74,9 @@ assert(localReport.overall.rejected.suppressionRate >= 0.99, "local extraction r
 if (extractionCases.format !== "llm-field-notes/extraction-cases@1"
   || !Array.isArray(extractionCases.cases)
   || extractionCases.cases.length < 4) {
-  throw new Error("Extraction quality cases must contain at least four representative reviewed inputs.");
+  throw new Error("Extraction quality cases must contain at least five representative reviewed inputs.");
 }
-const requiredCaseIds = new Set(["technical-phrases", "sparse-title", "non-latin", "tool-safety"]);
+const requiredCaseIds = new Set(["technical-phrases", "sparse-title", "non-latin", "tool-safety", "relation-quality"]);
 const caseIds = extractionCases.cases.map((testCase) => testCase?.id);
 if (new Set(caseIds).size !== caseIds.length) {
   throw new Error("Extraction quality cases must not contain duplicate IDs.");

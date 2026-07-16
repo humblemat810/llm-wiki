@@ -75,9 +75,26 @@
       "required": ["accepted", "rejected"],
       "properties": {
         "accepted": { "$ref": "#/$defs/acceptedMetric" },
-        "rejected": { "$ref": "#/$defs/rejectedMetric" }
+        "rejected": { "$ref": "#/$defs/rejectedMetric" },
+        "diagnostics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["acceptedMatched", "acceptedMissed", "rejectedPresent", "rejectedSuppressed"],
+          "properties": {
+            "acceptedMatched": { "$ref": "#/$defs/diagnosticIdentities" },
+            "acceptedMissed": { "$ref": "#/$defs/diagnosticIdentities" },
+            "rejectedPresent": { "$ref": "#/$defs/diagnosticIdentities" },
+            "rejectedSuppressed": { "$ref": "#/$defs/diagnosticIdentities" }
+          }
+        }
       },
       "additionalProperties": false
+    },
+    "diagnosticIdentities": {
+      "type": "array",
+      "maxItems": 15000,
+      "uniqueItems": true,
+      "items": { "type": "string", "maxLength": 12288 }
     }
   },
   "additionalProperties": false

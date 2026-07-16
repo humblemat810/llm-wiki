@@ -1,0 +1,75 @@
+name: Correct a graph representation
+description: Report a missing, misleading, or unsupported concept or relation.
+title: "[Graph correction] "
+labels:
+  - graph
+  - correction
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help make the internal representation more trustworthy. Do not paste private source text, confidential evidence, API keys, or personal data. Use a redacted excerpt or a public source link instead.
+  - type: input
+    id: source
+    attributes:
+      label: Source or graph export
+      description: Link the public note, paper, artifact, or redacted graph export being corrected.
+      placeholder: "https://example.org/paper or examples/sample-graph.json"
+    validations:
+      required: true
+  - type: dropdown
+    id: correction_type
+    attributes:
+      label: Correction type
+      description: What should change in the representation?
+      options:
+        - Missing concept
+        - Misnamed concept
+        - Incorrect relation
+        - Missing relation
+        - Unsupported evidence
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: item
+    attributes:
+      label: Concept or relation
+      description: Identify the graph item by label, relation, or stable ID if available.
+      placeholder: "attention — uses → context"
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_change
+    attributes:
+      label: Proposed change
+      description: State the corrected concept, relation, status, or evidence in concrete terms.
+      placeholder: |
+        Replace the relation with ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Public evidence
+      description: Explain the correction using a short redacted quote, source section, or reproducible observation.
+      placeholder: |
+        Section 3 shows ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduce it
+      description: Include a minimal command, graph JSON fragment, or workbench sequence when possible.
+      placeholder: |
+        1. Load ...
+        2. Build the graph ...
+        3. Observe ...
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private source text, confidential evidence, credentials, and personal data.
+          required: true

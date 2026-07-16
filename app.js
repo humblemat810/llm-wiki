@@ -212,6 +212,10 @@ const releaseInfo = await fetch("./version.json", { cache: "no-cache", signal: r
     if (!value || typeof value !== "object" || Array.isArray(value)
       || typeof value.version !== "string" || value.version.length > 64
       || (value.channel !== undefined && (typeof value.channel !== "string" || value.channel.length > 64))
+      || (value.revision !== undefined && (
+        typeof value.revision !== "string"
+        || !/^(?:unknown|[0-9a-f]{7,64})$/i.test(value.revision)
+      ))
       || (value.date !== undefined && (
         typeof value.date !== "string"
         || value.date.length > 64
@@ -223,19 +227,30 @@ const releaseInfo = await fetch("./version.json", { cache: "no-cache", signal: r
     return {
       version: value.version,
       channel: value.channel || "unreleased",
-      date: value.date || ""
+      date: value.date || "",
+      revision: value.revision || "unknown"
     };
   });
-}).catch(() => ({ version: "unknown", channel: "unreleased", date: "" }));
+}).catch(() => ({ version: "unknown", channel: "unreleased", date: "", revision: "unknown" }));
 clearTimeout(releaseTimeout);
 const releaseVersion = document.querySelector("#release-version");
 if (releaseVersion && typeof releaseInfo.version === "string") {
-  releaseVersion.textContent = `v${releaseInfo.version} · ${releaseInfo.channel || "stable"}${releaseInfo.date ? ` · ${releaseInfo.date}` : ""}`;
+  const revisionSuffix = releaseInfo.revision && releaseInfo.revision !== "unknown"
+    ? ` · ${releaseInfo.revision.slice(0, 12)}`
+    : "";
+  releaseVersion.textContent = `v${releaseInfo.version} · ${releaseInfo.channel || "stable"}${releaseInfo.date ? ` · ${releaseInfo.date}` : ""}${revisionSuffix}`;
 }
 const connectionStatus = document.querySelector("#connection-status");
 const retryQueuedFilesButton = document.querySelector("#retry-queued-files");
 let pendingFiles = [];
+let activeExtractionController = null;
+let offlineExtractionCanceled = false;
 const browserIsOffline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+const consumeOfflineExtractionCancellation = () => {
+  const canceled = offlineExtractionCanceled;
+  offlineExtractionCanceled = false;
+  return canceled;
+};
 const readDocumentDraftParts = () => [
   document.querySelector("#document-title")?.value || "",
   document.querySelector("#document-uri")?.value || "",
@@ -336,7 +351,13 @@ document.addEventListener("visibilitychange", () => {
 });
 document.addEventListener("freeze", flushDocumentDraft);
 window.addEventListener("online", updateConnectionStatus);
-window.addEventListener("offline", updateConnectionStatus);
+window.addEventListener("offline", () => {
+  updateConnectionStatus();
+  if (activeExtractionController) {
+    offlineExtractionCanceled = true;
+    activeExtractionController.abort();
+  }
+});
 updateConnectionStatus();
 const { storage: appStorage, persistent: hasPersistentStorage } = browserStorage;
 let hasDurableStorage = browserStorage.durable;
@@ -788,7 +809,6 @@ try {
   }
 }
 if (storedExtractorEndpoint) extractorEndpointInput.value = storedExtractorEndpoint;
-let activeExtractionController = null;
 let activeBuildController = null;
 browserStorage.subscribe((event) => {
   if (event.type === "status") {
@@ -915,7 +935,16 @@ extractorEndpointInput.addEventListener("change", () => {
 updatePrivacyNote();
 async function runRemoteExtraction(extractor, document, feedback) {
   const controller = new AbortController();
+  offlineExtractionCanceled = false;
   activeExtractionController = controller;
+  if (browserIsOffline()) {
+    offlineExtractionCanceled = true;
+    controller.abort();
+    activeExtractionController = null;
+    throw Object.assign(new Error("Remote extraction was canceled because the browser is offline."), {
+      code: "CANCELED"
+    });
+  }
   const buildSignal = activeBuildController?.signal;
   const abortFromBuild = () => controller.abort();
   if (buildSignal) {
@@ -1057,6 +1086,28 @@ const buildGraphItemShareData = (kind, id) => ({
   text: "Inspect this local graph item in LLM Field Notes.",
   url: buildGraphItemUrl(kind, id)
 });
+const DEFAULT_PUBLIC_REPOSITORY_URL = "https://github.com/humblemat810/llm-wiki";
+const readPublicRepositoryUrl = () => {
+  const configured = typeof document !== "undefined"
+    ? document.querySelector('meta[name="repository-url"]')?.getAttribute("content")
+    : "";
+  try {
+    const repository = new URL(configured || DEFAULT_PUBLIC_REPOSITORY_URL);
+    if (repository.protocol !== "https:" || repository.hostname.toLowerCase() !== "github.com"
+      || repository.username || repository.password || repository.search || repository.hash
+      || !/^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.pathname)) {
+      throw new Error("invalid repository");
+    }
+    return repository.toString().replace(/\/+$/, "");
+  } catch {
+    return DEFAULT_PUBLIC_REPOSITORY_URL;
+  }
+};
+const buildGraphCorrectionUrl = () => {
+  const correctionUrl = new URL(`${readPublicRepositoryUrl()}/issues/new`);
+  correctionUrl.searchParams.set("template", "graph_correction.yml");
+  return correctionUrl.toString();
+};
 async function shareGraphItem(kind, id) {
   const shareData = buildGraphItemShareData(kind, id);
   if (typeof navigator.share === "function") {
@@ -1112,7 +1163,7 @@ function renderInspector(graph) {
       ? `<button type="button" data-inspector-feedback="restore" data-node-id="${escapeHtml(node.id)}">↺ restore</button>`
       : `<button type="button" data-inspector-feedback="up" data-node-id="${escapeHtml(node.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-node-id="${escapeHtml(node.id)}">− dismiss</button>`;
     panel.innerHTML = `
-      <div class="inspector-header"><span>CONCEPT / ${escapeHtml(node.status.toUpperCase())}</span><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback${node.feedback === 1 ? "" : "s"}${node.lastReviewedAt ? ` · reviewed ${escapeHtml(node.lastReviewedAt)}` : ""}${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">share item</button></div>
+      <div class="inspector-header"><span>CONCEPT / ${escapeHtml(node.status.toUpperCase())}</span><strong>${escapeHtml(node.label)}</strong><small>${escapeHtml(node.type)} · ${(node.confidence * 100).toFixed(0)}% confidence · ${node.mentions} mention${node.mentions === 1 ? "" : "s"} · ${node.feedback} feedback${node.feedback === 1 ? "" : "s"}${node.lastReviewedAt ? ` · reviewed ${escapeHtml(node.lastReviewedAt)}` : ""}${node.aliases?.length ? ` · aliases: ${node.aliases.map(escapeHtml).join(", ")}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="node" data-graph-item-id="${escapeHtml(node.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
       <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
       <div class="inspector-edit"><label for="inspector-node-label">EDIT LABEL</label><div><input id="inspector-node-label" class="inspector-edit-input" value="${escapeHtml(node.label)}" maxlength="120" /><button type="button" data-edit-node="${escapeHtml(node.id)}">save</button></div></div>
       ${mergeTargets.length ? `<div class="inspector-merge"><label for="inspector-merge-target">MERGE INTO</label><div><select id="inspector-merge-target" class="inspector-edit-input">${mergeTargets.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.label)}</option>`).join("")}</select><button type="button" data-merge-node="${escapeHtml(node.id)}">merge</button></div><small>Keep the selected concept as the stable ID; evidence, aliases, and relations will be combined. This can be undone.</small></div>` : ""}
@@ -1141,7 +1192,7 @@ function renderInspector(graph) {
     const reviewedDate = source.lastReviewedAt ? source.lastReviewedAt.slice(0, 10) : "";
     const maximumReviewDate = new Date().toISOString().slice(0, 10);
     panel.innerHTML = `
-      <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">share item</button></div>
+      <div class="inspector-header"><span>SOURCE DOCUMENT</span><strong>${escapeHtml(source.title)}</strong><small>${source.text.length.toLocaleString()} characters · added ${escapeHtml(source.addedAt)} · ${escapeHtml(source.quality)} quality${source.lastReviewedAt ? ` · reviewed ${escapeHtml(source.lastReviewedAt)}` : ""}${source.uri ? ` · ${/^https?:\/\//i.test(source.uri) ? `<a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.uri)}</a>` : escapeHtml(source.uri)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="source" data-graph-item-id="${escapeHtml(source.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
       <div class="inspector-edit"><label for="inspector-source-title">EDIT SOURCE TITLE</label><div><input id="inspector-source-title" class="inspector-edit-input" value="${escapeHtml(source.title)}" maxlength="${MAX_DOCUMENT_TITLE_CHARS}" /></div><label for="inspector-source-uri">SOURCE URI</label><div><input id="inspector-source-uri" class="inspector-edit-input" value="${escapeHtml(source.uri || "")}" maxlength="${MAX_SOURCE_URI_CHARS}" inputmode="url" /></div><label for="inspector-source-quality">SOURCE QUALITY</label><div><select id="inspector-source-quality" class="inspector-edit-input">${qualityOptions}</select></div><label for="inspector-source-reviewed">LAST REVIEWED</label><div><input id="inspector-source-reviewed" class="inspector-edit-input" type="date" value="${escapeHtml(reviewedDate)}" max="${maximumReviewDate}" /><button type="button" data-edit-source="${escapeHtml(source.id)}">save</button></div></div>
       <button type="button" class="text-button" data-review-source="${escapeHtml(source.id)}">mark reviewed today (UTC)</button>
       <button type="button" class="replace-source" data-replace-source="${escapeHtml(source.id)}">Replace source with a newer file</button>
@@ -1162,7 +1213,7 @@ function renderInspector(graph) {
     ? `<button type="button" data-inspector-feedback="restore" data-edge-id="${escapeHtml(edge.id)}">↺ restore</button>`
     : `<button type="button" data-inspector-feedback="up" data-edge-id="${escapeHtml(edge.id)}">+ confirm</button><button type="button" data-inspector-feedback="down" data-edge-id="${escapeHtml(edge.id)}">− dismiss</button>`;
   panel.innerHTML = `
-  <div class="inspector-header"><span>RELATION / ${escapeHtml(edge.status.toUpperCase())}</span><strong>${escapeHtml(source?.label || edge.source)} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(target?.label || edge.target)}</strong><small>${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback${edge.feedback === 1 ? "" : "s"} · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}${edge.lastReviewedAt ? ` · reviewed ${escapeHtml(edge.lastReviewedAt)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">share item</button></div>
+  <div class="inspector-header"><span>RELATION / ${escapeHtml(edge.status.toUpperCase())}</span><strong>${escapeHtml(source?.label || edge.source)} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(target?.label || edge.target)}</strong><small>${(edge.confidence * 100).toFixed(0)}% confidence · ${edge.feedback} feedback${edge.feedback === 1 ? "" : "s"} · ${edge.evidence.length} evidence item${edge.evidence.length === 1 ? "" : "s"}${edge.lastReviewedAt ? ` · reviewed ${escapeHtml(edge.lastReviewedAt)}` : ""}</small><button type="button" class="text-button" data-copy-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">copy item link</button><button type="button" class="text-button" data-share-graph-item="edge" data-graph-item-id="${escapeHtml(edge.id)}">share item</button><a class="text-button" href="${escapeHtml(buildGraphCorrectionUrl())}" target="_blank" rel="noopener noreferrer">report correction</a></div>
     <div class="inspector-feedback"><span class="inspector-label">REVIEW DECISION</span><div>${feedbackActions}</div></div>
     <div class="inspector-edit"><label for="inspector-edge-label">EDIT RELATION</label><div><input id="inspector-edge-label" class="inspector-edit-input" value="${escapeHtml(edge.label)}" maxlength="80" /><button type="button" data-edit-edge="${escapeHtml(edge.id)}">save</button></div></div>
     <div class="inspector-evidence"><span class="inspector-label">EVIDENCE</span>${edge.evidence.length ? `<ul>${edge.evidence.map(evidenceMarkup).join("")}</ul>` : "<p class=\"inspector-muted\">No evidence captured.</p>"}</div>`;
@@ -1567,6 +1618,69 @@ function buildRedactedMarkdownProjection() {
   return markdown;
 }
 
+function buildRedactedGraphVisual(graph) {
+  const maxVisualNodes = 120;
+  const maxVisualEdges = 240;
+  const activeNodes = graph.nodes.filter((node) => node.status !== "rejected");
+  const visualNodes = activeNodes.slice(0, maxVisualNodes);
+  const visualNodeIds = new Set(visualNodes.map((node) => node.id));
+  const activeEdges = graph.edges.filter((edge) => edge.status !== "rejected"
+    && visualNodeIds.has(edge.source)
+    && visualNodeIds.has(edge.target));
+  const visualEdges = activeEdges.slice(0, maxVisualEdges);
+  const width = 920;
+  const columns = visualNodes.length > 24 ? Math.min(10, Math.ceil(Math.sqrt(visualNodes.length))) : visualNodes.length;
+  const rows = Math.max(1, Math.ceil(visualNodes.length / Math.max(1, columns)));
+  const height = Math.max(360, rows * 96 + 80);
+  const positions = new Map();
+  if (visualNodes.length <= 24) {
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radiusX = Math.min(330, Math.max(150, 105 * Math.max(1, visualNodes.length - 1)));
+    const radiusY = 105;
+    visualNodes.forEach((node, index) => {
+      const angle = visualNodes.length === 1
+        ? -Math.PI / 2
+        : -Math.PI / 2 + (index * Math.PI * 2) / visualNodes.length;
+      positions.set(node.id, {
+        x: Math.round(centerX + Math.cos(angle) * radiusX),
+        y: Math.round(centerY + Math.sin(angle) * radiusY)
+      });
+    });
+  } else {
+    visualNodes.forEach((node, index) => {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      positions.set(node.id, {
+        x: Math.round(60 + (column * (width - 120)) / Math.max(1, columns - 1)),
+        y: 50 + row * 96
+      });
+    });
+  }
+  const truncate = (value, limit) => {
+    const text = String(value || "").trim();
+    return text.length <= limit ? text : `${text.slice(0, limit - 1).trimEnd()}…`;
+  };
+  const edgeMarkup = visualEdges.map((edge) => {
+    const source = positions.get(edge.source);
+    const target = positions.get(edge.target);
+    if (!source || !target) return "";
+    return `<line class="graph-edge" x1="${source.x}" y1="${source.y}" x2="${target.x}" y2="${target.y}" marker-end="url(#graph-arrow)" aria-hidden="true"></line><text class="graph-edge-label" x="${Math.round((source.x + target.x) / 2)}" y="${Math.round((source.y + target.y) / 2 - 9)}" text-anchor="middle">${escapeHtml(truncate(edge.label, 20))}</text>`;
+  }).join("");
+  const nodeMarkup = visualNodes.map((node) => {
+    const position = positions.get(node.id);
+    const confidence = Math.round(Number(node.confidence || 0) * 100);
+    return `<g class="graph-node" transform="translate(${position.x} ${position.y})" aria-label="${escapeHtml(`${node.label} — ${confidence}% confidence`)}"><circle r="38" aria-hidden="true"></circle><text text-anchor="middle" y="-2">${escapeHtml(truncate(node.label, 26))}</text><text class="graph-node-confidence" text-anchor="middle" y="14">${confidence}% confidence</text></g>`;
+  }).join("");
+  const omitted = activeNodes.length - visualNodes.length;
+  const omittedEdges = activeEdges.length - visualEdges.length;
+  const note = omitted > 0 || omittedEdges > 0
+    ? `<p class="visual-limit">Visual preview is bounded to ${visualNodes.length} concepts and ${visualEdges.length} relations; the complete representation remains below.</p>`
+    : "";
+  const summary = `${visualNodes.length} concepts connected by ${visualEdges.length} redacted relations.`;
+  return `<section class="graph-visual"><h2>Graph at a glance</h2><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Redacted knowledge graph visualization" aria-describedby="graph-visual-description"><desc id="graph-visual-description">${escapeHtml(summary)}</desc><defs><marker id="graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>${edgeMarkup}${nodeMarkup}</svg>${note}</section>`;
+}
+
 function buildRedactedHtmlProjection() {
   const graph = redactGraph(graphStore.read());
   assertGraphTextExportBudget([graph]);
@@ -1584,6 +1698,7 @@ function buildRedactedHtmlProjection() {
   const relationItems = graph.edges.length
     ? graph.edges.map((edge) => `<li><strong>${escapeHtml(labelFor(edge.source))} <em>${escapeHtml(edge.label)}</em> ${escapeHtml(labelFor(edge.target))}</strong><span>${escapeHtml(edge.status)} · ${(edge.confidence * 100).toFixed(0)}% confidence</span></li>`).join("")
     : "<li>No relations.</li>";
+  const graphVisual = buildRedactedGraphVisual(graph);
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1609,6 +1724,15 @@ function buildRedactedHtmlProjection() {
     .stat span, li span { color: var(--muted); display: block; font-size: .86rem; }
     .stat strong { display: block; font-size: 1.6rem; }
     section { margin: 18px 0; padding: 24px; }
+    .graph-visual { overflow: hidden; }
+    .graph-visual svg { display: block; width: 100%; height: auto; min-height: 300px; border: 1px solid var(--line); background: #f1ece5; }
+    .graph-visual marker path { fill: #8a8178; }
+    .graph-edge { stroke: #8a8178; stroke-width: 2; opacity: .8; }
+    .graph-edge-label { fill: var(--accent); font: 11px ui-monospace, monospace; }
+    .graph-node circle { fill: var(--accent); stroke: #fffdf9; stroke-width: 2; }
+    .graph-node text { fill: #fffdf9; font: 600 11px ui-monospace, monospace; }
+    .graph-node .graph-node-confidence { fill: #f5d7c9; font-size: 9px; }
+    .visual-limit { color: var(--muted); font-size: .86rem; margin: 12px 0 0; }
     ul { list-style: none; margin: 0; padding: 0; }
     li { border-top: 1px solid var(--line); padding: 12px 0; }
     li:first-child { border-top: 0; padding-top: 0; }
@@ -1633,6 +1757,7 @@ function buildRedactedHtmlProjection() {
       ${card("Provenance", `${health.provenanceCoverage}%`)}
       ${card("Review queue", health.reviewCandidates)}
     </div>
+    ${graphVisual}
     <section><h2>Sources</h2><ul>${sourceItems}</ul></section>
     <section><h2>Concepts</h2><ul>${conceptItems}</ul></section>
     <section><h2>Relations</h2><ul>${relationItems}</ul></section>
@@ -1861,6 +1986,10 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
   const sourceById = new Map(projectedDocuments.map((doc) => [doc.id, doc]));
   const nodeDisplay = (id) => safeMarkdownLabel(nodeById.get(id)?.label || id);
   const sourceDisplay = (id) => safeMarkdownLabel(sourceById.get(id)?.title || id);
+  const conceptLink = (id, label = nodeDisplay(id)) => {
+    const path = paths.nodes.get(id);
+    return path ? `[[${path}|${label}]]` : `Unresolved concept: ${label}`;
+  };
   const canvasNodes = projectedNodes.map((node, index) => ({
     id: `concept-${index}`,
     type: "file",
@@ -1872,16 +2001,51 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
     color: node.status === "accepted" ? "4" : node.status === "rejected" ? "1" : "5"
   }));
   const canvasNodeIds = new Map(projectedNodes.map((node, index) => [node.id, canvasNodes[index].id]));
+  const unresolvedCanvasNodes = [];
+  const ensureCanvasEndpoint = (endpointId) => {
+    if (canvasNodeIds.has(endpointId)) return canvasNodeIds.get(endpointId);
+    const placeholderId = `unresolved-${unresolvedCanvasNodes.length}`;
+    const index = projectedNodes.length + unresolvedCanvasNodes.length;
+    unresolvedCanvasNodes.push({
+      id: placeholderId,
+      type: "text",
+      text: `Unresolved concept endpoint\n${safeMarkdownLabel(endpointId)}`,
+      x: (index % 4) * 360,
+      y: Math.floor(index / 4) * 240,
+      width: 300,
+      height: 120,
+      color: "2"
+    });
+    canvasNodeIds.set(endpointId, placeholderId);
+    return placeholderId;
+  };
+  projectedEdges.forEach((edge) => {
+    ensureCanvasEndpoint(edge.source);
+    ensureCanvasEndpoint(edge.target);
+  });
   const canvasEdges = projectedEdges
-    .filter((edge) => canvasNodeIds.has(edge.source) && canvasNodeIds.has(edge.target))
     .map((edge, index) => ({
       id: `relation-${index}`,
-      fromNode: canvasNodeIds.get(edge.source),
-      toNode: canvasNodeIds.get(edge.target),
+      fromNode: ensureCanvasEndpoint(edge.source),
+      toNode: ensureCanvasEndpoint(edge.target),
       fromSide: "right",
       toSide: "left",
       label: safeMarkdownLabel(edge.label)
     }));
+  canvasNodes.push(...unresolvedCanvasNodes);
+  const canvasNodeIdsSet = new Set();
+  canvasNodes.forEach((node) => {
+    if (!node || typeof node.id !== "string" || !node.id || canvasNodeIdsSet.has(node.id)) {
+      throw new Error("The Obsidian Canvas projection contains duplicate or invalid node identities.");
+    }
+    canvasNodeIdsSet.add(node.id);
+    if (node.type === "file" && (typeof node.file !== "string" || !node.file.startsWith("Concepts/"))) {
+      throw new Error("The Obsidian Canvas projection contains an invalid concept note path.");
+    }
+  });
+  if (canvasEdges.some((edge) => !canvasNodeIdsSet.has(edge.fromNode) || !canvasNodeIdsSet.has(edge.toNode))) {
+    throw new Error("The Obsidian Canvas projection contains an unresolved edge reference.");
+  }
   const relatedByNode = new Map(projectedNodes.map((node) => [node.id, []]));
   projectedEdges.forEach((edge) => {
     relatedByNode.get(edge.source)?.push(edge);
@@ -1994,8 +2158,8 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
       ...projectedEdges.flatMap((edge) => [
         `## ${nodeDisplay(edge.source)} ${safeMarkdownLabel(edge.label)} ${nodeDisplay(edge.target)}`,
         "",
-        `- From: [[${paths.nodes.get(edge.source)}|${nodeDisplay(edge.source)}]]`,
-        `- To: [[${paths.nodes.get(edge.target)}|${nodeDisplay(edge.target)}]]`,
+        `- From: ${conceptLink(edge.source)}`,
+        `- To: ${conceptLink(edge.target)}`,
         `- Status: ${edge.status}`,
         `- Confidence: ${(edge.confidence * 100).toFixed(0)}%`,
         "",
@@ -2037,7 +2201,7 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
         "## Relations",
         ...related.map((edge) => {
           const otherId = edge.source === node.id ? edge.target : edge.source;
-          return `- ${safeMarkdownLabel(edge.label)} → [[${paths.nodes.get(otherId)}|${nodeDisplay(otherId)}]] (${edge.status}, ${(edge.confidence * 100).toFixed(0)}%)`;
+          return `- ${safeMarkdownLabel(edge.label)} → ${conceptLink(otherId)} (${edge.status}, ${(edge.confidence * 100).toFixed(0)}%)`;
         }),
         ""
       ].join("\n")
@@ -2062,8 +2226,8 @@ function buildVaultFiles(graph, { appVersion = "unknown" } = {}) {
         "",
         `# ${nodeDisplay(edge.source)} ${safeMarkdownLabel(edge.label)} ${nodeDisplay(edge.target)}`,
         "",
-        `- From: [[${paths.nodes.get(edge.source)}|${nodeDisplay(edge.source)}]]`,
-        `- To: [[${paths.nodes.get(edge.target)}|${nodeDisplay(edge.target)}]]`,
+        `- From: ${conceptLink(edge.source)}`,
+        `- To: ${conceptLink(edge.target)}`,
         ""
       ].join("\n")
     });
@@ -2934,8 +3098,20 @@ document.querySelector("#document-file").addEventListener("change", async (event
     document.querySelector("#document-title").value = pendingFiles[0].name.replace(/\.[^/.]+$/, "");
     document.querySelector("#document-input").value = firstText;
     saveDocumentDraft();
-    renderFileQueue();
-    status.textContent = pendingFiles.length === 1 ? `${pendingFiles[0].name} loaded. Build the graph when ready.` : `${pendingFiles.length} files loaded. Build the batch when ready.`;
+    // A single text/Markdown file is an editor seed, not a durable queue
+    // entry. Once it has been read successfully, the title and text fields
+    // are the authoritative document the user is about to build. Keeping the
+    // File object here would cause buildGraphFromInput() to read the original
+    // bytes again and silently discard edits made in the editor.
+    if (files.length === 1) {
+      pendingFiles = [];
+      event.target.value = "";
+      renderFileQueue();
+      status.textContent = `${document.querySelector("#document-title").value || "Document"} loaded. Edit it if needed, then build the graph when ready.`;
+    } else {
+      renderFileQueue();
+      status.textContent = `${pendingFiles.length} files loaded. Build the batch when ready.`;
+    }
   } catch (error) {
     pendingFiles = [];
     event.target.value = "";
@@ -3217,7 +3393,8 @@ async function buildGraphFromInput() {
     const retrySummary = retryableBatchFiles.length
       ? ` · ${retryableBatchFiles.length} transient failure${retryableBatchFiles.length === 1 ? "" : "s"} kept for retry`
       : "";
-    status.textContent = graphWriteSuccessMessage(`${canceled ? "Build canceled · " : ""}${addedSummary}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped` : ""}${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 3 ? " · …" : ""}` : ""}` : ""}${retrySummary}${remainingSummary}.`);
+    const offlineCanceled = consumeOfflineExtractionCancellation();
+    status.textContent = graphWriteSuccessMessage(`${offlineCanceled ? "Remote build stopped because the browser went offline · " : canceled ? "Build canceled · " : ""}${addedSummary}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped` : ""}${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 3 ? " · …" : ""}` : ""}` : ""}${retrySummary}${remainingSummary}.`);
     return;
   }
   if (text.length < 40) {
@@ -3238,9 +3415,14 @@ async function buildGraphFromInput() {
       ? await runRemoteExtraction(remoteExtractor, { title, text, uri: sourceUri }, buildExtractorFeedback(currentGraph, { includeStale: false }))
       : extractGraph(title, text, { feedback: buildExtractorFeedback(currentGraph, { includeStale: false }), sourceUri });
   } catch (error) {
+    const offlineCanceled = consumeOfflineExtractionCancellation();
     status.textContent = error?.name === "AbortError" || error?.code === "CANCELED"
-      ? "Build canceled; no graph changes were written."
-      : boundedOperationDiagnostic(error, "The document could not be extracted.");
+      ? offlineCanceled
+        ? "Remote build canceled because the browser went offline; your draft and saved graph were preserved."
+        : "Build canceled; no graph changes were written."
+      : remoteExtractor
+        ? `${boundedOperationDiagnostic(error, "The document could not be extracted.")} Your editor draft was preserved; retry the build or clear the model endpoint to use local extraction.`
+        : boundedOperationDiagnostic(error, "The document could not be extracted.");
     return;
   }
   const result = mergeExtraction(currentGraph, extraction, {
@@ -3386,6 +3568,7 @@ async function rebuildSavedSources() {
       }
     });
     const { graph, rebuilt, rebuildDetails, failures, canceled } = result;
+    const offlineCanceled = consumeOfflineExtractionCancellation();
     if (rebuilt && !graphStore.write(graph, { expectedVersion, expectedFingerprint })) {
       status.textContent = graphStore.getLastWriteMode() === "conflict"
         ? "The graph changed in another tab while rebuilding. No rebuilt sources were written; reload and try again."
@@ -3407,7 +3590,7 @@ async function rebuildSavedSources() {
       ? ` · pruned ${prunedNodes} concept${prunedNodes === 1 ? "" : "s"} and ${prunedEdges} relation${prunedEdges === 1 ? "" : "s"} no longer supported`
       : "";
     status.textContent = graphWriteSuccessMessage(
-      `${canceled ? "Rebuild canceled · " : ""}${rebuilt} source${rebuilt === 1 ? "" : "s"} rebuilt${contributionSummary}${pruningSummary}${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 2 ? " · …" : ""}` : ""}` : ""}.`
+      `${offlineCanceled ? "Rebuild stopped because the browser went offline · " : canceled ? "Rebuild canceled · " : ""}${rebuilt} source${rebuilt === 1 ? "" : "s"} rebuilt${contributionSummary}${pruningSummary}${failures.length ? ` · ${failures.length} failed${failureSummary ? `: ${failureSummary}${failures.length > 2 ? " · …" : ""}` : ""}` : ""}.`
     );
   } catch (error) {
     status.textContent = `Rebuild failed; your saved graph was preserved. ${boundedOperationDiagnostic(error, "The rebuild could not be completed.")}`;
@@ -3877,8 +4060,11 @@ document.querySelector("#inspector-panel").addEventListener("click", (event) => 
         renderWorkbench();
         status.textContent = graphWriteSuccessMessage(`Source replaced · ${result.removedNodes} unsupported concept${result.removedNodes === 1 ? "" : "s"} and ${result.removedEdges} relation${result.removedEdges === 1 ? "" : "s"} pruned. Undo is available.`);
       } catch (error) {
+        const offlineCanceled = consumeOfflineExtractionCancellation();
         status.textContent = error?.name === "AbortError" || error?.code === "CANCELED"
-          ? "Source replacement canceled; the current source was kept."
+          ? offlineCanceled
+            ? "Source replacement stopped because the browser went offline; the current source was kept."
+            : "Source replacement canceled; the current source was kept."
           : boundedOperationDiagnostic(error, "The source could not be replaced.");
       } finally {
         sourceReplacementInFlight = false;

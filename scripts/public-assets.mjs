@@ -18,7 +18,10 @@ export const CORE_SHELL_ASSETS = [
   "evaluation.js",
   "manifest.webmanifest",
   "icon.svg",
+  "icon-192.png",
+  "icon-512.png",
   "social-card.svg",
+  "social-card.png",
   "sw.js",
   "version.json"
 ];
@@ -94,7 +97,12 @@ export const PUBLIC_ASSETS = [...FIXED_PUBLIC_ASSETS, ...LEARNING_NOTE_ASSETS];
 
 export const PUBLIC_SITEMAP_ASSETS = [
   "artifacts.html",
+  "sample-graph.html",
   "experiments/README.md"
+];
+
+export const GENERATED_PUBLIC_ASSETS = [
+  "sample-graph.html"
 ];
 
 export const OFFLINE_SHELL_ASSETS = [

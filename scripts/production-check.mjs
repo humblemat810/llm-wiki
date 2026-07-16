@@ -5,6 +5,8 @@ const checks = [
   ["Verify the supported Node runtime", ["run", "runtime:check"]],
   ["Audit production dependencies", ["audit", "--omit=dev", "--audit-level=high"]],
   ["Validate release metadata and deployment contracts", ["run", "release:check"]],
+  ["Build the static Pages artifact", ["run", "build:pages"]],
+  ["Verify the static Pages artifact", ["run", "verify:pages"]],
   ["Run the complete test and contract suite", ["test"]],
   ["Smoke the standalone server lifecycle", ["run", "smoke:server"]],
   ["Validate security disclosure metadata", ["run", "security:check"]],
@@ -12,8 +14,7 @@ const checks = [
   ["Gate the reviewed extraction quality benchmark", ["run", "evaluation:check"]],
   ["Verify encrypted backup round-trip", ["run", "backup:smoke"]],
   ["Gate the published sample graph", ["run", "health:sample"]],
-  ["Build the static Pages artifact", ["run", "build:pages"]],
-  ["Verify the static Pages artifact", ["run", "verify:pages"]]
+  ["Verify the final Pages artifact", ["run", "verify:pages"]],
 ];
 
 for (const [label, args] of checks) {

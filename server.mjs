@@ -9,7 +9,9 @@ import { FEEDBACK_FORMAT, GRAPH_SCHEMA, MAX_DOCUMENT_CHARS, MAX_DOCUMENT_TITLE_C
 import { MAX_FEEDBACK_CHARS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES } from "./extractor-adapter.js";
 import { FIXED_PUBLIC_ASSETS, MAX_LEARNING_NOTE_ASSETS, MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES, PUBLIC_SITEMAP_ASSETS } from "./scripts/public-assets.mjs";
 import { requirePublicOrigin } from "./scripts/public-origin.mjs";
+import { DEFAULT_PUBLIC_REPOSITORY, requirePublicRepository } from "./scripts/public-repository.mjs";
 import { buildLearningNotePage, MAX_NOTE_SUMMARY_CHARS, sliceTextAtCodePointBoundary } from "./scripts/note-page.mjs";
+import { buildSampleGraphPage } from "./scripts/sample-graph-page.mjs";
 
 const require = createRequire(import.meta.url);
 const APP_VERSION = require("./package.json").version;
@@ -30,6 +32,7 @@ const KEEP_ALIVE_TIMEOUT_MS = 5000;
 const MAX_HEADER_BYTES = 16 * 1024;
 const MAX_CRAWLER_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_RUNTIME_TEXT_CHARS = Math.floor(MAX_STATIC_ASSET_BYTES / 4);
+const TEXT_ASSET_EXTENSIONS = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".svg", ".txt", ".webmanifest", ".xml"]);
 export const MIN_AUTH_TOKEN_CHARS = 16;
 const MAX_AUTH_TOKEN_CHARS = 4096;
 const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
@@ -47,11 +50,13 @@ const types = {
   ".json": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
   ".webmanifest": "application/manifest+json"
 };
 const fixedPublicAssets = FIXED_PUBLIC_ASSETS;
 const decodeUtf8 = (bytes) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 const SERVICE_WORKER_CACHE_MARKER = `const CACHE = "llm-field-notes-v${APP_VERSION}"`;
+const SAMPLE_GRAPH_PAGE = "sample-graph.html";
 
 function validateRuntimeReleaseMetadata(content) {
   let release;
@@ -82,6 +87,11 @@ function renderServiceWorker(content) {
   if (BUILD_REVISION === "unknown" || !source.includes(SERVICE_WORKER_CACHE_MARKER)) return content;
   const cacheKey = `${SERVICE_WORKER_CACHE_MARKER.slice(0, -1)}-${BUILD_REVISION.slice(0, 16)}"`;
   return Buffer.from(source.replace(SERVICE_WORKER_CACHE_MARKER, cacheKey), "utf8");
+}
+
+function renderRuntimeReleaseMetadata(content) {
+  const release = parseJsonWithUniqueKeys(content.toString("utf8"), "Release metadata");
+  return Buffer.from(`${JSON.stringify({ ...release, revision: BUILD_REVISION }, null, 2)}\n`, "utf8");
 }
 
 function discoverLearningNoteAssets(staticRoot) {
@@ -319,31 +329,37 @@ function sendNotModified(response, etag, cacheControl, extraHeaders = {}) {
   return true;
 }
 
-function renderOriginAwareIndex(content, origin) {
-  if (!origin) return content;
+function renderOriginAwareIndex(content, origin, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  const source = content.toString("utf8").replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
+  if (!origin) return Buffer.from(source, "utf8");
   const rootUrl = `${origin}/`;
-  const rendered = content.toString("utf8")
+  const rendered = source
     .replace('href="./" />', () => `href="${rootUrl}" />`)
     .replace('href="feed.xml"', () => `href="${origin}/feed.xml"`)
     .replace('content="./" />', () => `content="${rootUrl}" />`)
     .replace('"url": "./"', () => `"url": "${rootUrl}"`)
-    .replace(/content="social-card\.svg"/g, () => `content="${origin}/social-card.svg"`);
+    .replace(/content="social-card\.png"/g, () => `content="${origin}/social-card.png"`);
   const structuredDataMatch = rendered.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
   if (!structuredDataMatch) return Buffer.from(rendered, "utf8");
   const structuredDataCsp = `'sha256-${createHash("sha256").update(structuredDataMatch[1]).digest("base64")}'`;
   return Buffer.from(rendered.replace(/'sha256-[^']+'/g, structuredDataCsp), "utf8");
 }
 
-function renderOriginAwareArtifactPage(content, origin) {
-  if (!origin) return content;
-  return Buffer.from(content.toString("utf8")
+function renderOriginAwareArtifactPage(content, origin, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  const source = content.toString("utf8").replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
+  if (!origin) return Buffer.from(source, "utf8");
+  return Buffer.from(source
     .replace('href="./"', () => `href="${origin}/"`)
     .replace('content="./artifacts.html"', () => `content="${origin}/artifacts.html"`)
-    .replace('content="social-card.svg"', () => `content="${origin}/social-card.svg"`)
+    .replace('content="social-card.png"', () => `content="${origin}/social-card.png"`)
     .replace('href="./artifacts.html"', () => `href="${origin}/artifacts.html"`)
     .replace('"@id":"./artifacts.html"', () => `"@id":"${origin}/artifacts.html"`)
     .replace('"url":"./artifacts.html"', () => `"url":"${origin}/artifacts.html"`)
     .replace(/"url":"(experiments\/[^"]+)"/g, (_, asset) => `"url":"${origin}/${asset}"`), "utf8");
+}
+
+function renderRepositoryAwareSecurityTxt(content, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  return Buffer.from(content.toString("utf8").replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository), "utf8");
 }
 
 function renderNotFoundPage(content, origin = "") {
@@ -667,6 +683,7 @@ export function createAppServer({
   extractorAuthToken = process.env.EXTRACTOR_AUTH_TOKEN || "",
   metricsAuthToken = process.env.METRICS_AUTH_TOKEN || "",
   publicOrigin = process.env.PUBLIC_ORIGIN || "",
+  publicRepository = process.env.PUBLIC_REPOSITORY_URL || "",
   requireExtractorAuth = false,
   requireMetricsAuth = false,
   requireSecurePublicOrigin = false,
@@ -726,6 +743,7 @@ export function createAppServer({
   const metricsAuthRequired = requireMetricsAuth === true || Boolean(metricsToken);
   const metricsAuthConfigured = isUsableAuthToken(metricsToken);
   const origin = requirePublicOrigin(publicOrigin);
+  const repository = requirePublicRepository(publicRepository);
   const securePublicOriginConfigured = origin.startsWith("https://") || isLoopbackPublicOrigin(origin);
   const transportSecurityHeaders = origin.startsWith("https://")
     ? { "strict-transport-security": "max-age=31536000; includeSubDomains" }
@@ -868,8 +886,10 @@ export function createAppServer({
       for (const asset of readinessAssets) {
         const { resolvedFilePath: shellPath, metadata } = await resolveRuntimeAsset(realRoot, asset, "Static shell asset");
         if (!metadata.isFile() || metadata.size === 0 || metadata.size > MAX_STATIC_ASSET_BYTES) throw new Error("Static shell asset is missing, empty, or oversized.");
-        const shellContent = decodeUtf8(await readBoundedFile(shellPath, MAX_STATIC_ASSET_BYTES));
-        if (asset === "version.json") validateRuntimeReleaseMetadata(shellContent);
+        if (TEXT_ASSET_EXTENSIONS.has(extname(asset).toLowerCase())) {
+          const shellContent = decodeUtf8(await readBoundedFile(shellPath, MAX_STATIC_ASSET_BYTES));
+          if (asset === "version.json") validateRuntimeReleaseMetadata(shellContent);
+        }
         readinessBytes += metadata.size;
         if (readinessBytes > MAX_PUBLIC_ASSET_BYTES) throw new Error("Static public assets exceed the aggregate asset limit.");
       }
@@ -890,6 +910,15 @@ export function createAppServer({
         readinessBytes += pageBytes;
         if (readinessBytes > MAX_PUBLIC_ASSET_BYTES) throw new Error("Generated public assets exceed the aggregate asset limit.");
       }
+      const sampleGraphAsset = await resolveRuntimeAsset(realRoot, "examples/sample-graph.json", "Sample graph");
+      const sampleGraph = parseJsonWithUniqueKeys(
+        decodeUtf8(await readBoundedFile(sampleGraphAsset.resolvedFilePath, MAX_STATIC_ASSET_BYTES)),
+        "Sample graph"
+      );
+      const sampleGraphPage = buildSampleGraphPage(sampleGraph, origin);
+      if (Buffer.byteLength(sampleGraphPage) > MAX_STATIC_ASSET_BYTES) throw new Error("Generated sample graph page is oversized.");
+      readinessBytes += Buffer.byteLength(sampleGraphPage);
+      if (readinessBytes > MAX_PUBLIC_ASSET_BYTES) throw new Error("Generated public assets exceed the aggregate asset limit.");
       return { status: 200, payload: { ok: true, schema: GRAPH_SCHEMA, version: APP_VERSION, revision: BUILD_REVISION, ready: true } };
     } catch {
       return { status: 503, payload: { ok: false, schema: GRAPH_SCHEMA, version: APP_VERSION, revision: BUILD_REVISION, ready: false, error: "Static app shell is unavailable." } };
@@ -1477,7 +1506,8 @@ export function createAppServer({
         return;
       }
       const relative = pathname === "/" ? "index.html" : pathname.slice(1);
-      if (!publicAssets.has(relative)) {
+      const generatedSampleGraphPage = relative === SAMPLE_GRAPH_PAGE;
+      if (!publicAssets.has(relative) && !generatedSampleGraphPage) {
         if (["GET", "HEAD"].includes(request.method) && publicAssets.has("404.html")) {
           try {
             const realRoot = await realpath(safeRoot);
@@ -1498,15 +1528,21 @@ export function createAppServer({
         return;
       }
       const realRoot = await realpath(safeRoot);
-      const filePath = resolve(realRoot, relative);
-      if (filePath !== realRoot && !filePath.startsWith(`${realRoot}/`)) {
-        sendEmpty(response, 404);
-        return;
-      }
-      const { resolvedFilePath, metadata } = await resolveRuntimeAsset(realRoot, relative);
-      if (!metadata.isFile()) {
-        sendEmpty(response, 404);
-        return;
+      let resolvedFilePath;
+      let metadata;
+      if (generatedSampleGraphPage) {
+        ({ resolvedFilePath, metadata } = await resolveRuntimeAsset(realRoot, "examples/sample-graph.json", "Sample graph"));
+      } else {
+        const filePath = resolve(realRoot, relative);
+        if (filePath !== realRoot && !filePath.startsWith(`${realRoot}/`)) {
+          sendEmpty(response, 404);
+          return;
+        }
+        ({ resolvedFilePath, metadata } = await resolveRuntimeAsset(realRoot, relative));
+        if (!metadata.isFile()) {
+          sendEmpty(response, 404);
+          return;
+        }
       }
       if (metadata.size > MAX_STATIC_ASSET_BYTES) {
         sendEmpty(response, 413);
@@ -1522,18 +1558,26 @@ export function createAppServer({
         }
         throw error;
       }
-      const responseContent = relative === "index.html"
-        ? renderOriginAwareIndex(content, origin)
+      const responseContent = generatedSampleGraphPage
+        ? Buffer.from(buildSampleGraphPage(parseJsonWithUniqueKeys(decodeUtf8(content), "Sample graph"), origin), "utf8")
+        : relative === "index.html"
+        ? renderOriginAwareIndex(content, origin, repository)
         : relative === "artifacts.html"
-          ? renderOriginAwareArtifactPage(content, origin)
+          ? renderOriginAwareArtifactPage(content, origin, repository)
           : relative === "sw.js"
             ? renderServiceWorker(content)
+          : relative === "version.json"
+            ? renderRuntimeReleaseMetadata(content)
+          : relative === ".well-known/security.txt"
+            ? renderRepositoryAwareSecurityTxt(content, repository)
           : content;
       const responseSecurityHeaders = {
         ...(relative === "index.html"
           ? securityHeadersForIndex(responseContent)
           : relative === "artifacts.html"
             ? { ...securityHeaders, "content-security-policy": artifactPageCsp }
+            : generatedSampleGraphPage
+              ? { ...securityHeaders, "content-security-policy": learningNotePageCsp }
             : securityHeaders),
         ...transportSecurityHeaders
       };
@@ -1553,6 +1597,8 @@ export function createAppServer({
       const etag = getStaticEtag(relative, etagSignature, responseContent);
       const cacheControl = relative === "index.html" || relative === "artifacts.html" || resolvedFilePath.endsWith("sw.js") || resolvedFilePath.endsWith("version.json")
         ? "no-cache"
+        : generatedSampleGraphPage
+          ? "no-cache"
         : "public, max-age=3600";
       if (matchesEtag(request.headers["if-none-match"], etag)) {
         response.writeHead(304, {
@@ -1564,7 +1610,11 @@ export function createAppServer({
         return;
       }
       response.writeHead(200, {
-        "content-type": relative === "LICENSE" ? "text/plain; charset=utf-8" : types[extname(resolvedFilePath)] || "application/octet-stream",
+        "content-type": generatedSampleGraphPage
+          ? "text/html; charset=utf-8"
+          : relative === "LICENSE"
+            ? "text/plain; charset=utf-8"
+            : types[extname(resolvedFilePath)] || "application/octet-stream",
         "cache-control": cacheControl,
         "content-length": responseContent.byteLength,
         etag,
@@ -1642,6 +1692,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     extractorAuthToken: process.env.EXTRACTOR_AUTH_TOKEN || "",
     metricsAuthToken: process.env.METRICS_AUTH_TOKEN || "",
     publicOrigin: process.env.PUBLIC_ORIGIN || "",
+    publicRepository: process.env.PUBLIC_REPOSITORY_URL || "",
     requireExtractorAuth: !loopbackHost,
     requireMetricsAuth: !loopbackHost,
     requireSecurePublicOrigin: !loopbackHost,
@@ -1656,6 +1707,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     port: actualPort,
     ...entry
   }));
+  process.on("uncaughtExceptionMonitor", (error) => {
+    logLifecycle({ event: "uncaught-exception", error: error?.code || "UNCAUGHT_EXCEPTION" });
+  });
   server.once("error", (error) => {
     console.error(`LLM Field Notes server failed to listen: ${error.message}`);
     logLifecycle({ event: "server-error", error: error.code || "LISTEN_FAILURE" });
@@ -1688,4 +1742,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("unhandledRejection", (reason) => {
+    logLifecycle({ event: "unhandled-rejection", error: reason?.code || "UNHANDLED_REJECTION" });
+    shutdown("unhandled-rejection");
+  });
 }

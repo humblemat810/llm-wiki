@@ -14,10 +14,12 @@
         "initial": { "$ref": "#/$defs/extractionStage" },
         "reviewed": {
           "type": "object",
-          "required": ["accepted", "rejected", "guidanceExamples"],
+          "required": ["accepted", "rejected", "acceptedRelation", "rejectedRelation", "guidanceExamples"],
           "properties": {
             "accepted": { "$ref": "#/$defs/reviewedItem" },
             "rejected": { "$ref": "#/$defs/reviewedItem" },
+            "acceptedRelation": { "$ref": "#/$defs/reviewedItem" },
+            "rejectedRelation": { "$ref": "#/$defs/reviewedItem" },
             "guidanceExamples": { "type": "integer", "minimum": 0, "maximum": 500 }
           },
           "additionalProperties": false
@@ -30,14 +32,24 @@
             "guidedConcepts",
             "conceptsRemovedByGuidance",
             "rejectedConceptPresentWithoutGuidance",
-            "rejectedConceptPresentWithGuidance"
+            "rejectedConceptPresentWithGuidance",
+            "baselineRelations",
+            "guidedRelations",
+            "relationsRemovedByGuidance",
+            "rejectedRelationPresentWithoutGuidance",
+            "rejectedRelationPresentWithGuidance"
           ],
           "properties": {
             "baselineConcepts": { "type": "integer", "minimum": 0, "maximum": 5000 },
             "guidedConcepts": { "type": "integer", "minimum": 0, "maximum": 5000 },
             "conceptsRemovedByGuidance": { "type": "integer", "minimum": 0, "maximum": 5000 },
             "rejectedConceptPresentWithoutGuidance": { "type": "boolean" },
-            "rejectedConceptPresentWithGuidance": { "type": "boolean" }
+            "rejectedConceptPresentWithGuidance": { "type": "boolean" },
+            "baselineRelations": { "type": "integer", "minimum": 0, "maximum": 10000 },
+            "guidedRelations": { "type": "integer", "minimum": 0, "maximum": 10000 },
+            "relationsRemovedByGuidance": { "type": "integer", "minimum": 0, "maximum": 10000 },
+            "rejectedRelationPresentWithoutGuidance": { "type": "boolean" },
+            "rejectedRelationPresentWithGuidance": { "type": "boolean" }
           },
           "additionalProperties": false
         }
@@ -46,10 +58,12 @@
     },
     "proof": {
       "type": "object",
-      "required": ["acceptedConceptRetained", "rejectedConceptSuppressed", "reviewedGuidanceIsPortable"],
+      "required": ["acceptedConceptRetained", "rejectedConceptSuppressed", "acceptedRelationRetained", "rejectedRelationSuppressed", "reviewedGuidanceIsPortable"],
       "properties": {
         "acceptedConceptRetained": { "type": "boolean" },
         "rejectedConceptSuppressed": { "type": "boolean" },
+        "acceptedRelationRetained": { "type": "boolean" },
+        "rejectedRelationSuppressed": { "type": "boolean" },
         "reviewedGuidanceIsPortable": { "type": "boolean" }
       },
       "additionalProperties": false

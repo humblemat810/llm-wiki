@@ -63,6 +63,24 @@
         "evidenceCoverage": 1,
         "rejectedSuppressionRate": 1
       }
+    },
+    {
+      "id": "relation-quality",
+      "title": "Operational graph",
+      "text": "A vector index stores embeddings. The retriever queries the index, then the reranker orders candidates. A policy blocks unsafe actions and preserves audit logs.",
+      "feedback": [
+        { "kind": "concept", "id": "vector-index", "label": "vector index", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "unsafe-actions", "label": "unsafe actions", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "audit-logs", "label": "audit logs", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "unsafe-actions--audit-logs--preserves", "source": "unsafe-actions", "target": "audit-logs", "sourceLabel": "unsafe actions", "targetLabel": "audit logs", "label": "preserves", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "vector-index--index--co-mentioned-with", "source": "vector-index", "target": "index", "sourceLabel": "vector index", "targetLabel": "index", "label": "co-mentioned with", "status": "rejected", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1,
+        "rejectedSuppressionRate": 1
+      }
     }
   ]
 }

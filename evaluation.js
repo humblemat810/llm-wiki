@@ -4,6 +4,7 @@ export const EVALUATION_SCHEMA = "llm-field-notes/evaluation@1";
 export const MAX_EVALUATION_EXAMPLES = 15000;
 export const MAX_EVALUATION_MATCH_COMPARISONS = 2000000;
 export const MAX_EVALUATION_ID_CHARS = 4096;
+export const MAX_EVALUATION_DIAGNOSTIC_CHARS = MAX_EVALUATION_ID_CHARS * 3;
 
 const reviewedStatuses = new Set(["accepted", "rejected"]);
 const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -123,6 +124,10 @@ function feedbackKey(example) {
   return `${feedbackIdentityKey(example)}|${example.status}`;
 }
 
+function feedbackDiagnosticIdentity(example) {
+  return sliceTextAtCodePointBoundary(feedbackIdentityKey(example), MAX_EVALUATION_DIAGNOSTIC_CHARS);
+}
+
 function conceptKeys(concept) {
   const aliases = Array.isArray(concept.aliases) ? concept.aliases.slice(0, MAX_ALIASES) : [];
   return new Set([
@@ -235,9 +240,21 @@ function validateRejectedMetric(value, path) {
 
 function validateCategory(value, path) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path} is missing.`);
-  assertKnownKeys(value, new Set(["accepted", "rejected"]), path);
+  assertKnownKeys(value, new Set(["accepted", "rejected", "diagnostics"]), path);
   validateAcceptedMetric(value.accepted, `${path}.accepted`);
   validateRejectedMetric(value.rejected, `${path}.rejected`);
+  if (value.diagnostics !== undefined) {
+    const diagnostics = value.diagnostics;
+    assertKnownKeys(diagnostics, new Set(["acceptedMatched", "acceptedMissed", "rejectedPresent", "rejectedSuppressed"]), `${path}.diagnostics`);
+    for (const field of ["acceptedMatched", "acceptedMissed", "rejectedPresent", "rejectedSuppressed"]) {
+      const values = diagnostics[field];
+      if (!Array.isArray(values) || values.length > MAX_EVALUATION_EXAMPLES
+        || values.some((item) => typeof item !== "string" || item.length > MAX_EVALUATION_DIAGNOSTIC_CHARS)
+        || new Set(values).size !== values.length) {
+        throw new Error(`${path}.diagnostics.${field} is outside the bounded unique identity contract.`);
+      }
+    }
+  }
 }
 
 function validateCategoryAgainstExtraction(value, path, extractionCount) {
@@ -395,7 +412,10 @@ function matchedOneToOneCandidates(examples, candidates, matcher) {
     exampleIndex,
     candidates[candidateIndex]
   ]));
-  return examples.map((_, exampleIndex) => matches.get(exampleIndex)).filter(Boolean);
+  return {
+    matches: examples.map((_, exampleIndex) => matches.get(exampleIndex)).filter(Boolean),
+    matchedExampleIndexes: new Set(candidateOwners.values())
+  };
 }
 
 function evidenceBacked(candidate, sourceId) {
@@ -406,9 +426,11 @@ function evidenceBacked(candidate, sourceId) {
 function categoryMetric(examples, candidates, matcher, acceptedMatcher = matcher, sourceId = "") {
   const expected = examples.filter((example) => example.status === "accepted");
   const rejected = examples.filter((example) => example.status === "rejected");
-  const acceptedMatches = matchedOneToOneCandidates(expected, candidates, acceptedMatcher);
+  const acceptedMatchResult = matchedOneToOneCandidates(expected, candidates, acceptedMatcher);
+  const acceptedMatches = acceptedMatchResult.matches;
   const foundAccepted = acceptedMatches.length;
-  const rejectedMatches = matchedOneToOneCandidates(rejected, candidates, matcher);
+  const rejectedMatchResult = matchedOneToOneCandidates(rejected, candidates, matcher);
+  const rejectedMatches = rejectedMatchResult.matches;
   const presentRejected = rejectedMatches.length;
   const acceptedMetric = metric(expected.length, foundAccepted);
   const reviewedCandidateMatches = new Set([...acceptedMatches, ...rejectedMatches]).size;
@@ -426,6 +448,24 @@ function categoryMetric(examples, candidates, matcher, acceptedMatcher = matcher
       suppressed: rejected.length - presentRejected,
       present: presentRejected,
       suppressionRate: rejected.length ? Number(((rejected.length - presentRejected) / rejected.length).toFixed(4)) : 1
+    },
+    diagnostics: {
+      acceptedMatched: expected
+        .filter((_, index) => acceptedMatchResult.matchedExampleIndexes.has(index))
+        .map(feedbackDiagnosticIdentity)
+        .sort(lexicalCompare),
+      acceptedMissed: expected
+        .filter((_, index) => !acceptedMatchResult.matchedExampleIndexes.has(index))
+        .map(feedbackDiagnosticIdentity)
+        .sort(lexicalCompare),
+      rejectedPresent: rejected
+        .filter((_, index) => rejectedMatchResult.matchedExampleIndexes.has(index))
+        .map(feedbackDiagnosticIdentity)
+        .sort(lexicalCompare),
+      rejectedSuppressed: rejected
+        .filter((_, index) => !rejectedMatchResult.matchedExampleIndexes.has(index))
+        .map(feedbackDiagnosticIdentity)
+        .sort(lexicalCompare)
     }
   };
 }

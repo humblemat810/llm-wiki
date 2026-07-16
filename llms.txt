@@ -19,6 +19,8 @@
   graph tooling.
 - [Sample graph export](./examples/sample-graph.json): deterministic starter
   graph for health, diff, and JSON-LD projection commands.
+- [Sample graph explainer](./sample-graph.html): crawler-readable concepts,
+  evidence, relations, and fingerprint for the same starter graph.
 - [Learning loop artifact](./experiments/learning-loop.mjs): a deterministic
   extract → review → portable guidance → improved extraction walkthrough.
 - [Diff verifier](./experiments/verify-diff.mjs): independently recompute and
@@ -59,6 +61,9 @@
 
 - [Contributing guide](./CONTRIBUTING.md): improve the curriculum, graph
   behavior, projections, or deployment surface.
+- [Graph correction workflow](./CONTRIBUTING.md#correct-a-graph-representation):
+  report a missing concept, misleading relation, or unsupported evidence
+  without sharing private source text.
 - [Artifact submission template](./ARTIFACT_SUBMISSION.md): share a small,
   reproducible experiment, graph, benchmark, or failed attempt.
 - [Security guide](./SECURITY.md): data boundaries and vulnerability

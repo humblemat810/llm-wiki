@@ -139,7 +139,15 @@ const phraseNoiseWords = new Set([
   "provide",
   "provides",
   "retrieve",
-  "retrieves"
+  "retrieves",
+  "balances",
+  "blocks",
+  "orders",
+  "queries",
+  "reviews",
+  "review",
+  "every",
+  "stores"
 ]);
 
 export const defaultGraph = () => ({

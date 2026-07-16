@@ -11,6 +11,12 @@ const outputRealPath = await realpath(output);
 const publicOrigin = requirePublicOrigin(process.env.PUBLIC_ORIGIN);
 const manifestPath = resolve(outputRealPath, "asset-manifest.json");
 const packageManifest = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json");
+const rawExpectedRevision = typeof process.env.BUILD_REVISION === "string" && process.env.BUILD_REVISION.trim()
+  ? process.env.BUILD_REVISION.trim().toLowerCase()
+  : null;
+if (rawExpectedRevision !== null && !/^(?:unknown|[0-9a-f]{7,64})$/.test(rawExpectedRevision)) {
+  throw new Error("BUILD_REVISION must be unknown or a 7–64 character hexadecimal source revision.");
+}
 const isContained = (candidate) => {
   const relativePath = relative(outputRealPath, candidate);
   return relativePath && !relativePath.startsWith("..") && !relativePath.includes("/../");
@@ -30,6 +36,18 @@ const manifest = parseJsonWithUniqueKeys(await readFile(manifestFile.fileRealPat
 if (manifest.format !== "llm-field-notes/assets@1") throw new Error("Pages asset manifest format is unsupported.");
 if (manifest.version !== packageManifest.version) throw new Error(`Pages asset manifest version does not match package.json: ${manifest.version}`);
 if (!Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Pages asset manifest contains no files.");
+const releasePath = resolve(outputRealPath, "version.json");
+const releaseFile = await resolveContainedFile(releasePath, "Pages release metadata");
+const release = parseJsonWithUniqueKeys(await readFile(releaseFile.fileRealPath, "utf8"), "Pages release metadata");
+if (release.version !== packageManifest.version || !["stable", "unreleased"].includes(release.channel)) {
+  throw new Error("Pages release metadata does not match package.json.");
+}
+if (!/^(?:unknown|[0-9a-f]{7,64})$/.test(String(release.revision || ""))) {
+  throw new Error("Pages release metadata contains an invalid source revision.");
+}
+if (rawExpectedRevision !== null && release.revision !== rawExpectedRevision) {
+  throw new Error(`Pages release metadata revision does not match BUILD_REVISION: ${release.revision} !== ${rawExpectedRevision}`);
+}
 
 async function collectFiles(directory, prefix = "") {
   const entries = await readdir(directory, { withFileTypes: true });

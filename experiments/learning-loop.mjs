@@ -14,6 +14,7 @@ import {
 
 const FIRST_DOCUMENT = "Retrieval loop gives the model relevant context. The retrieval loop uses source citations.";
 const FOLLOW_UP_DOCUMENT = "The retrieval loop improves answer quality. This loop also connects citations to context.";
+const RELATION_FOLLOW_UP_DOCUMENT = "The loop gives model relevant context. The loop uses source citations.";
 
 function requireNode(graph, id) {
   const node = graph.nodes.find((candidate) => candidate.id === id);
@@ -55,39 +56,57 @@ export function validateLearningLoopOutput(value) {
     }
   }
   const reviewed = stages.reviewed;
-  assertOnlyKeys(reviewed, ["accepted", "rejected", "guidanceExamples"], "Learning-loop reviewed stage");
+  assertOnlyKeys(reviewed, ["accepted", "rejected", "acceptedRelation", "rejectedRelation", "guidanceExamples"], "Learning-loop reviewed stage");
   assertOnlyKeys(reviewed?.accepted, ["id", "label", "status"], "Learning-loop accepted item");
   assertOnlyKeys(reviewed?.rejected, ["id", "label", "status"], "Learning-loop rejected item");
+  assertOnlyKeys(reviewed?.acceptedRelation, ["id", "label", "status"], "Learning-loop accepted relation");
+  assertOnlyKeys(reviewed?.rejectedRelation, ["id", "label", "status"], "Learning-loop rejected relation");
   if (!reviewed || typeof reviewed !== "object" || Array.isArray(reviewed)
     || !Number.isSafeInteger(reviewed.guidanceExamples) || reviewed.guidanceExamples < 0 || reviewed.guidanceExamples > MAX_FEEDBACK_EXAMPLES
     || !["accepted", "rejected"].includes(reviewed.accepted?.status)
     || !["accepted", "rejected"].includes(reviewed.rejected?.status)
+    || !["accepted", "rejected"].includes(reviewed.acceptedRelation?.status)
+    || !["accepted", "rejected"].includes(reviewed.rejectedRelation?.status)
     || !validId(reviewed.accepted?.id) || !validConceptLabel(reviewed.accepted?.label)
-    || !validId(reviewed.rejected?.id) || !validConceptLabel(reviewed.rejected?.label)) {
+    || !validId(reviewed.rejected?.id) || !validConceptLabel(reviewed.rejected?.label)
+    || !validId(reviewed.acceptedRelation?.id) || !validConceptLabel(reviewed.acceptedRelation?.label)
+    || !validId(reviewed.rejectedRelation?.id) || !validConceptLabel(reviewed.rejectedRelation?.label)) {
     throw new Error("Learning-loop reviewed stage is invalid.");
   }
   if (!Number.isSafeInteger(stages.improved.relations) || stages.improved.relations < 0 || stages.improved.relations > MAX_GRAPH_EDGES) {
     throw new Error("Learning-loop improved relation count is invalid.");
   }
   const comparison = stages.comparison;
-  assertOnlyKeys(comparison, ["baselineConcepts", "guidedConcepts", "conceptsRemovedByGuidance", "rejectedConceptPresentWithoutGuidance", "rejectedConceptPresentWithGuidance"], "Learning-loop comparison");
+  assertOnlyKeys(comparison, ["baselineConcepts", "guidedConcepts", "conceptsRemovedByGuidance", "rejectedConceptPresentWithoutGuidance", "rejectedConceptPresentWithGuidance", "baselineRelations", "guidedRelations", "relationsRemovedByGuidance", "rejectedRelationPresentWithoutGuidance", "rejectedRelationPresentWithGuidance"], "Learning-loop comparison");
   if (!comparison || !Number.isSafeInteger(comparison.baselineConcepts) || !Number.isSafeInteger(comparison.guidedConcepts)
     || !Number.isSafeInteger(comparison.conceptsRemovedByGuidance)
     || comparison.baselineConcepts < 0 || comparison.baselineConcepts > MAX_GRAPH_NODES
     || comparison.guidedConcepts < 0 || comparison.guidedConcepts > MAX_GRAPH_NODES
     || comparison.conceptsRemovedByGuidance < 0 || comparison.conceptsRemovedByGuidance > MAX_GRAPH_NODES
     || typeof comparison.rejectedConceptPresentWithoutGuidance !== "boolean"
-    || typeof comparison.rejectedConceptPresentWithGuidance !== "boolean") {
+    || typeof comparison.rejectedConceptPresentWithGuidance !== "boolean"
+    || !Number.isSafeInteger(comparison.baselineRelations) || !Number.isSafeInteger(comparison.guidedRelations)
+    || !Number.isSafeInteger(comparison.relationsRemovedByGuidance)
+    || comparison.baselineRelations < 0 || comparison.baselineRelations > MAX_GRAPH_EDGES
+    || comparison.guidedRelations < 0 || comparison.guidedRelations > MAX_GRAPH_EDGES
+    || comparison.relationsRemovedByGuidance < 0 || comparison.relationsRemovedByGuidance > MAX_GRAPH_EDGES
+    || typeof comparison.rejectedRelationPresentWithoutGuidance !== "boolean"
+    || typeof comparison.rejectedRelationPresentWithGuidance !== "boolean") {
     throw new Error("Learning-loop comparison is invalid.");
   }
   if (comparison.conceptsRemovedByGuidance !== Math.max(0, comparison.baselineConcepts - comparison.guidedConcepts)) {
     throw new Error("Learning-loop comparison delta is inconsistent.");
   }
+  if (comparison.relationsRemovedByGuidance !== Math.max(0, comparison.baselineRelations - comparison.guidedRelations)) {
+    throw new Error("Learning-loop relation comparison delta is inconsistent.");
+  }
   const proof = value.proof;
-  assertOnlyKeys(proof, ["acceptedConceptRetained", "rejectedConceptSuppressed", "reviewedGuidanceIsPortable"], "Learning-loop proof");
+  assertOnlyKeys(proof, ["acceptedConceptRetained", "rejectedConceptSuppressed", "acceptedRelationRetained", "rejectedRelationSuppressed", "reviewedGuidanceIsPortable"], "Learning-loop proof");
   if (!proof || typeof proof !== "object"
     || typeof proof.acceptedConceptRetained !== "boolean"
     || typeof proof.rejectedConceptSuppressed !== "boolean"
+    || typeof proof.acceptedRelationRetained !== "boolean"
+    || typeof proof.rejectedRelationSuppressed !== "boolean"
     || typeof proof.reviewedGuidanceIsPortable !== "boolean") {
     throw new Error("Learning-loop proof is invalid.");
   }
@@ -96,6 +115,12 @@ export function validateLearningLoopOutput(value) {
       || comparison.rejectedConceptPresentWithGuidance
       || comparison.conceptsRemovedByGuidance < 1)) {
     throw new Error("Learning-loop suppression proof is not grounded in its baseline comparison.");
+  }
+  if (proof.rejectedRelationSuppressed
+    && (!comparison.rejectedRelationPresentWithoutGuidance
+      || comparison.rejectedRelationPresentWithGuidance
+      || comparison.relationsRemovedByGuidance < 1)) {
+    throw new Error("Learning-loop relation suppression proof is not grounded in its baseline comparison.");
   }
   return true;
 }
@@ -107,14 +132,24 @@ export function runLearningLoop() {
   if (!accepted.changed) throw new Error("The accepted review decision was not applied.");
   const rejected = applyFeedback(accepted.graph, "node", "loop", "down");
   if (!rejected.changed) throw new Error("The rejected review decision was not applied.");
+  const acceptedRelation = applyFeedback(rejected.graph, "edge", "loop--source-citations--uses", "up");
+  if (!acceptedRelation.changed) throw new Error("The accepted relation review decision was not applied.");
+  const rejectedRelation = applyFeedback(acceptedRelation.graph, "edge", "loop--model-relevant--gives", "down");
+  if (!rejectedRelation.changed) throw new Error("The rejected relation review decision was not applied.");
 
-  const guidance = buildExtractorFeedback(rejected.graph, { includeStale: false });
+  const guidance = buildExtractorFeedback(rejectedRelation.graph, { includeStale: false });
   const baselineExtraction = extractGraph("RAG loop follow-up", FOLLOW_UP_DOCUMENT);
   const improvedExtraction = extractGraph("RAG loop follow-up", FOLLOW_UP_DOCUMENT, { feedback: guidance });
-  const acceptedNode = requireNode(rejected.graph, "retrieval-loop");
-  const rejectedNode = requireNode(rejected.graph, "loop");
+  const relationGuidance = guidance.filter((example) => example.kind === "relation");
+  const relationBaseline = extractGraph("RAG relation follow-up", RELATION_FOLLOW_UP_DOCUMENT);
+  const relationImproved = extractGraph("RAG relation follow-up", RELATION_FOLLOW_UP_DOCUMENT, { feedback: relationGuidance });
+  const acceptedNode = requireNode(rejectedRelation.graph, "retrieval-loop");
+  const rejectedNode = requireNode(rejectedRelation.graph, "loop");
   const rejectedBaselinePresent = baselineExtraction.nodes.some((node) => node.id === "loop");
   const rejectedImprovedPresent = improvedExtraction.nodes.some((node) => node.id === "loop");
+  const acceptedRelationPresent = relationImproved.edges.some((edge) => edge.id === "loop--source-citations--uses");
+  const rejectedRelationBaselinePresent = relationBaseline.edges.some((edge) => edge.id === "loop--model-relevant--gives");
+  const rejectedRelationImprovedPresent = relationImproved.edges.some((edge) => edge.id === "loop--model-relevant--gives");
 
   const output = {
     format: "llm-field-notes/learning-loop@1",
@@ -126,6 +161,8 @@ export function runLearningLoop() {
       reviewed: {
         accepted: { id: acceptedNode.id, label: acceptedNode.label, status: acceptedNode.status },
         rejected: { id: rejectedNode.id, label: rejectedNode.label, status: rejectedNode.status },
+        acceptedRelation: { id: "loop--source-citations--uses", label: "uses", status: "accepted" },
+        rejectedRelation: { id: "loop--model-relevant--gives", label: "gives", status: "rejected" },
         guidanceExamples: guidance.length
       },
       improved: {
@@ -138,13 +175,21 @@ export function runLearningLoop() {
         guidedConcepts: improvedExtraction.nodes.length,
         conceptsRemovedByGuidance: Math.max(0, baselineExtraction.nodes.length - improvedExtraction.nodes.length),
         rejectedConceptPresentWithoutGuidance: rejectedBaselinePresent,
-        rejectedConceptPresentWithGuidance: rejectedImprovedPresent
+        rejectedConceptPresentWithGuidance: rejectedImprovedPresent,
+        baselineRelations: relationBaseline.edges.length,
+        guidedRelations: relationImproved.edges.length,
+        relationsRemovedByGuidance: Math.max(0, relationBaseline.edges.length - relationImproved.edges.length),
+        rejectedRelationPresentWithoutGuidance: rejectedRelationBaselinePresent,
+        rejectedRelationPresentWithGuidance: rejectedRelationImprovedPresent
       }
     },
     proof: {
       acceptedConceptRetained: improvedExtraction.nodes.some((node) => node.id === "retrieval-loop" && node.feedback === 0),
       rejectedConceptSuppressed: rejectedBaselinePresent && !rejectedImprovedPresent,
+      acceptedRelationRetained: acceptedRelationPresent,
+      rejectedRelationSuppressed: rejectedRelationBaselinePresent && !rejectedRelationImprovedPresent,
       reviewedGuidanceIsPortable: guidance.some((example) => example.id === "retrieval-loop" && example.status === "accepted")
+        && guidance.some((example) => example.id === "loop--source-citations--uses" && example.status === "accepted")
     }
   };
   validateLearningLoopOutput(output);

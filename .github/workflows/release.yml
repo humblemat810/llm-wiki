@@ -30,20 +30,78 @@ jobs:
       - name: Validate tag and release metadata
         run: npm run release:tag:check
       - name: Run the canonical production gate
+        env:
+          BUILD_REVISION: ${{ github.sha }}
         run: npm run production:check
+      - name: Retain release publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-pages-evidence-${{ github.ref_name }}
+          path: |
+            dist/asset-manifest.json
+            dist/version.json
+            dist/manifest.webmanifest
+            dist/404.html
+            dist/robots.txt
+            dist/sitemap.xml
+            dist/.well-known/security.txt
+          if-no-files-found: error
+          retention-days: 90
       - name: Build versioned production container
         id: package
         run: |
           version="${GITHUB_REF_NAME#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          docker build --build-arg APP_VERSION="$version" --build-arg VCS_REF="$GITHUB_SHA" --tag llm-field-notes:release .
+          repository="https://github.com/${GITHUB_REPOSITORY}"
+          documentation="$repository/blob/main/RUNBOOK.md"
+          docker build --build-arg APP_VERSION="$version" --build-arg VCS_REF="$GITHUB_SHA" --build-arg PUBLIC_REPOSITORY_URL="$repository" --build-arg PUBLIC_DOCUMENTATION_URL="$documentation" --tag llm-field-notes:release .
       - name: Smoke test versioned production container
         env:
           CONTAINER_IMAGE: llm-field-notes:release
           CONTAINER_SKIP_BUILD: "1"
           CONTAINER_EXPECTED_VERSION: ${{ steps.package.outputs.version }}
           CONTAINER_EXPECTED_REVISION: ${{ github.sha }}
+          CONTAINER_EXPECTED_SOURCE: https://github.com/${{ github.repository }}
+          CONTAINER_EXPECTED_DOCUMENTATION: https://github.com/${{ github.repository }}/blob/main/RUNBOOK.md
           CONTAINER_PORT: "18002"
           CONTAINER_EXTRACTOR_TOKEN: ci-extractor-token
           CONTAINER_METRICS_TOKEN: ci-metrics-token
         run: npm run smoke:container
+  browser:
+    name: Certify release workbench (${{ matrix.browser }})
+    needs: validate
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Install locked package metadata
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install browser
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Smoke test the release workbench
+        env:
+          BROWSER_ENGINE: ${{ matrix.browser }}
+          BROWSER_SMOKE_LOCAL_REVISION: ${{ github.sha }}
+          BROWSER_SMOKE_EXPECTED_REVISION: ${{ github.sha }}
+          BROWSER_SMOKE_EXPECTED_REPOSITORY: https://github.com/${{ github.repository }}
+          BROWSER_SMOKE_ARTIFACT_DIR: browser-artifacts
+        run: npm run browser:smoke
+      - name: Upload release-browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-browser-smoke-${{ matrix.browser }}
+          path: browser-artifacts
+          if-no-files-found: ignore
+          retention-days: 7

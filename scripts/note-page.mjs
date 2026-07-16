@@ -159,7 +159,7 @@ export function buildLearningNotePage({
     headline: String(title),
     description: String(description),
     url: pageUrl,
-    image: safeOrigin ? `${safeOrigin}/social-card.svg` : "../social-card.svg",
+    image: safeOrigin ? `${safeOrigin}/social-card.png` : "../social-card.png",
     isPartOf: {
       "@type": "WebSite",
       name: "LLM Field Notes",
@@ -184,8 +184,8 @@ export function buildLearningNotePage({
     <meta property="article:section" content="LLM education" />
     <meta property="og:site_name" content="LLM Field Notes" />
     <meta property="og:url" content="${escapeHtml(pageUrl)}" />
-    <meta property="og:image" content="${escapeHtml(safeOrigin ? `${safeOrigin}/social-card.svg` : "../social-card.svg")}" />
-    <meta property="og:image:type" content="image/svg+xml" />
+    <meta property="og:image" content="${escapeHtml(safeOrigin ? `${safeOrigin}/social-card.png` : "../social-card.png")}" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="LLM Field Notes: documents into a living map" />
@@ -193,7 +193,7 @@ export function buildLearningNotePage({
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="${safeTitle} · LLM Field Notes" />
     <meta name="twitter:description" content="${safeDescription}" />
-    <meta name="twitter:image" content="${escapeHtml(safeOrigin ? `${safeOrigin}/social-card.svg` : "../social-card.svg")}" />
+    <meta name="twitter:image" content="${escapeHtml(safeOrigin ? `${safeOrigin}/social-card.png` : "../social-card.png")}" />
     <link rel="canonical" href="${escapeHtml(pageUrl)}" />
     <link rel="alternate" type="text/markdown" href="${escapeHtml(markdownUrl)}" title="${safeTitle} Markdown" />
     <link rel="alternate" type="application/atom+xml" href="${escapeHtml(feedUrl)}" title="LLM Field Notes feed" />

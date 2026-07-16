@@ -1,10 +1,16 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { parseJsonWithUniqueKeys } from "../graph-core.js";
+import { computeServiceWorkerCacheRevision, readServiceWorkerCacheName, stripDeploymentCacheRevision } from "./service-worker-cache.mjs";
 
-const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_ATTEMPTS = 12;
 const DEFAULT_RETRY_DELAY_MS = 1000;
+const MANIFEST_FETCH_CONCURRENCY = 4;
+const APP_VERSION = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
 
 function normalizeDeploymentOrigin(value) {
   let url;
@@ -28,6 +34,7 @@ async function readBoundedBody(response) {
   if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_RESPONSE_BYTES)) {
     throw new Error(`response is larger than the ${MAX_RESPONSE_BYTES}-byte smoke-test limit`);
   }
+  const expectedLength = declaredLength === null ? null : Number(declaredLength);
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
   const chunks = [];
@@ -55,6 +62,9 @@ async function readBoundedBody(response) {
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  if (expectedLength !== null && total !== expectedLength) {
+    throw new Error(`response body length does not match Content-Length: ${total} !== ${expectedLength}`);
+  }
   return body;
 }
 
@@ -75,18 +85,76 @@ async function cancelResponseBody(response) {
   }
 }
 
+function validManifestPath(path) {
+  return typeof path === "string"
+    && path.length > 0
+    && path.length <= 512
+    && !path.startsWith("/")
+    && !path.includes("\\")
+    && !path.split("/").some((part) => !part || part === "." || part === "..");
+}
+
+function parseDeployedManifest(body) {
+  const manifest = parseJsonWithUniqueKeys(body, "deployed Pages asset manifest");
+  if (manifest.format !== "llm-field-notes/assets@1"
+    || manifest.version !== APP_VERSION
+    || !Array.isArray(manifest.files)
+    || !manifest.files.length) {
+    throw new Error("deployed Pages asset manifest has the wrong release identity or file collection");
+  }
+  const paths = manifest.files.map((entry) => entry?.path);
+  if (new Set(paths).size !== paths.length
+    || paths.some((path) => !validManifestPath(path))
+    || JSON.stringify([...paths].sort()) !== JSON.stringify(paths)) {
+    throw new Error("deployed Pages asset manifest contains unsafe, duplicate, or unsorted paths");
+  }
+  if (manifest.files.some((entry) => !Number.isSafeInteger(entry?.bytes)
+    || entry.bytes < 0
+    || entry.bytes > MAX_RESPONSE_BYTES
+    || !/^[0-9a-f]{64}$/.test(entry.sha256))) {
+    throw new Error("deployed Pages asset manifest contains invalid byte or SHA-256 metadata");
+  }
+  if (!manifest.files.some((entry) => entry.path === "index.html")
+    || !manifest.files.some((entry) => entry.path === "sw.js")) {
+    throw new Error("deployed Pages asset manifest is missing critical shell assets");
+  }
+  return manifest;
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const run = async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
+  return results;
+}
+
 export async function smokePagesDeployment(deploymentUrl, {
   attempts = DEFAULT_ATTEMPTS,
   retryDelayMs = DEFAULT_RETRY_DELAY_MS,
+  expectedRevision = null,
   fetchImpl = globalThis.fetch
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("This smoke test requires fetch.");
+  if (expectedRevision !== null && !/^(?:unknown|[0-9a-f]{7,64})$/i.test(String(expectedRevision))) {
+    throw new Error("expectedRevision must be unknown or a 7–64 character hexadecimal source revision.");
+  }
   const base = normalizeDeploymentOrigin(deploymentUrl);
   const checks = [
     {
       path: "",
       contentType: "text/html",
-      validate: (body) => body.includes("LLM Field Notes") && body.includes('http-equiv="Content-Security-Policy"') && body.includes(`href="${base.href}"`)
+      validate: (body) => body.includes("LLM Field Notes")
+        && body.includes('http-equiv="Content-Security-Policy"')
+        && body.includes(`href="${base.href}"`)
+        && /href="https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/fork"/.test(body)
+        && /href="https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/new\?template=(?:graph_correction|learning_note|artifact)\.yml"/.test(body)
     },
     {
       path: "robots.txt",
@@ -94,9 +162,32 @@ export async function smokePagesDeployment(deploymentUrl, {
       validate: (body) => body === `User-agent: *\nAllow: /\nSitemap: ${base.href}sitemap.xml\n`
     },
     {
+      path: ".well-known/security.txt",
+      contentType: "text/plain",
+      validate: (body) => /Contact: https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/security\/advisories\/new/.test(body)
+        && /Policy: https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/blob\/main\/SECURITY\.md/.test(body)
+        && /Canonical: https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/blob\/main\/\.well-known\/security\.txt/.test(body)
+    },
+    {
       path: "sitemap.xml",
       contentType: "application/xml",
       validate: (body) => body.includes(`${base.href}artifacts.html`) && body.includes(`${base.href}notes/tokens.html`)
+    },
+    {
+      path: "asset-manifest.json",
+      contentType: "application/json",
+      validate: (body) => Boolean(parseDeployedManifest(body))
+    },
+    {
+      path: "version.json",
+      contentType: "application/json",
+      validate: (body) => {
+        const release = parseJsonWithUniqueKeys(body, "deployed Pages release metadata");
+        return release.version === APP_VERSION
+          && ["stable", "unreleased"].includes(release.channel)
+          && /^(?:unknown|[0-9a-f]{7,64})$/i.test(String(release.revision || ""))
+          && (expectedRevision === null || release.revision === String(expectedRevision).toLowerCase());
+      }
     },
     {
       path: "sw.js",
@@ -104,9 +195,39 @@ export async function smokePagesDeployment(deploymentUrl, {
       validate: (body) => body.includes("./asset-manifest.json") && body.includes('const CACHE = "llm-field-notes-v')
     },
     {
+      path: "404.html",
+      contentType: "text/html",
+      validate: (body) => body.includes("Page not found")
+        && body.includes("Browse artifacts")
+        && body.includes("script-src 'none'")
+    },
+    {
+      path: "manifest.webmanifest",
+      contentType: "application/manifest+json",
+      validate: (body) => {
+        const manifest = parseJsonWithUniqueKeys(body, "deployed Pages web manifest");
+        return manifest.name === "LLM Field Notes"
+          && manifest.start_url === "./#workbench"
+          && manifest.display === "standalone"
+          && manifest.icons?.some((icon) => icon?.src === "icon-192.png")
+          && manifest.icons?.some((icon) => icon?.src === "icon-512.png");
+      }
+    },
+    {
+      path: "sample-graph.html",
+      contentType: "text/html",
+      validate: (body) => body.includes("A document,")
+        && body.includes("CONCEPTS WITH EVIDENCE")
+        && body.includes("RELATIONS WITH GROUNDS")
+        && body.includes("fnv64-")
+        && body.includes("script-src 'none'")
+    },
+    {
       path: "artifacts.html",
       contentType: "text/html",
       validate: (body) => body.includes("Community artifacts")
+        && /href="https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/fork"/.test(body)
+        && /href="https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/new\?template=(?:graph_correction|artifact)\.yml"/.test(body)
     },
     {
       path: "notes/tokens.html",
@@ -117,6 +238,8 @@ export async function smokePagesDeployment(deploymentUrl, {
   let lastError = null;
   for (let attempt = 1; attempt <= Math.max(1, Math.floor(attempts)); attempt += 1) {
     try {
+      let deployedManifest = null;
+      let deployedServiceWorker = null;
       for (const check of checks) {
         const expectedUrl = new URL(check.path, base);
         const controller = new AbortController();
@@ -125,20 +248,56 @@ export async function smokePagesDeployment(deploymentUrl, {
         let bodyConsumed = false;
         try {
           response = await fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal });
-          if (!response.ok) throw new Error(`${check.path || "/"} returned HTTP ${response.status}`);
+          if (!response.ok) {
+            if (!check.path && response.status === 404) {
+              throw new Error("deployed Pages root returned HTTP 404; enable GitHub Pages with the Actions source and run the publication workflow");
+            }
+            throw new Error(`${check.path || "/"} returned HTTP ${response.status}`);
+          }
           if (!isWithinDeployment(response.url, base)) throw new Error(`${check.path || "/"} redirected outside the deployment origin`);
           if (!contentTypeMatches(response, check.contentType)) {
             throw new Error(`${check.path || "/"} returned ${response.headers.get("content-type") || "no content type"} instead of ${check.contentType}`);
           }
           const body = new TextDecoder("utf-8", { fatal: true }).decode(await readBoundedBody(response));
           bodyConsumed = true;
+          if (check.path === "asset-manifest.json") deployedManifest = parseDeployedManifest(body);
+          if (check.path === "sw.js") deployedServiceWorker = body;
           if (!check.validate(body)) throw new Error(`${check.path || "/"} failed its deployed-content assertion`);
         } finally {
           clearTimeout(timeout);
           if (!bodyConsumed) await cancelResponseBody(response);
         }
       }
-      return { ok: true, checked: checks.length, origin: base.href };
+      const verifiedAssets = await mapWithConcurrency(deployedManifest.files, MANIFEST_FETCH_CONCURRENCY, async (entry) => {
+        const expectedUrl = new URL(entry.path, base);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        let response;
+        let bodyConsumed = false;
+        try {
+          response = await fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal });
+          if (!response.ok) throw new Error(`${entry.path} returned HTTP ${response.status}`);
+          if (!isWithinDeployment(response.url, base)) throw new Error(`${entry.path} redirected outside the deployment origin`);
+          const body = await readBoundedBody(response);
+          bodyConsumed = true;
+          const digest = createHash("sha256").update(body).digest("hex");
+          if (body.byteLength !== entry.bytes || digest !== entry.sha256) {
+            throw new Error(`${entry.path} did not match its deployed manifest digest`);
+          }
+          return { entry, content: body };
+        } finally {
+          clearTimeout(timeout);
+          if (!bodyConsumed) await cancelResponseBody(response);
+        }
+      });
+      const expectedCacheRevision = computeServiceWorkerCacheRevision(
+        stripDeploymentCacheRevision(deployedServiceWorker),
+        verifiedAssets.map(({ entry, content }) => ({ path: entry.path, content }))
+      );
+      if (!readServiceWorkerCacheName(deployedServiceWorker).endsWith(`-${expectedCacheRevision}`)) {
+        throw new Error(`deployed service-worker cache revision does not match the live asset manifest: expected ${expectedCacheRevision}`);
+      }
+      return { ok: true, checked: checks.length + verifiedAssets.length, manifestFiles: verifiedAssets.length, origin: base.href };
     } catch (error) {
       lastError = error;
       if (attempt < attempts) {
@@ -151,6 +310,8 @@ export async function smokePagesDeployment(deploymentUrl, {
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const result = await smokePagesDeployment(process.argv[2] || process.env.PAGES_DEPLOYMENT_URL);
+  const result = await smokePagesDeployment(process.argv[2] || process.env.PAGES_DEPLOYMENT_URL, {
+    expectedRevision: process.env.PAGES_EXPECTED_REVISION || null
+  });
   console.log(`Pages deployment smoke ok: ${result.checked} checks (${result.origin})`);
 }

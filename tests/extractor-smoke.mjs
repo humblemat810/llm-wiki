@@ -16,6 +16,15 @@ assert(!localQualityLabels.has("encoding gives"), "local extraction should rejec
 assert(!localQualityLabels.has("gives sequence"), "local extraction should reject relation-verb phrase fragments");
 assert(localQualityGraph.edges.length < localQualityGraph.nodes.length, "local extraction should avoid quadratic co-mention edge noise");
 
+const operationalQualityGraph = extractGraph(
+  "Operational notes",
+  "A vector index stores embeddings. The retriever queries the index, then the reranker orders candidates. A policy blocks unsafe actions and preserves audit logs."
+);
+const operationalLabels = new Set(operationalQualityGraph.nodes.map((node) => node.label.toLowerCase()));
+assert(operationalLabels.has("vector index") && operationalLabels.has("audit logs"), "extraction should retain durable technical noun phrases");
+assert(!["index stores", "retriever queries", "reranker orders", "policy blocks", "blocks unsafe"].some((label) => operationalLabels.has(label)), "extraction should reject ordinary verb-fragment phrases");
+assert(operationalQualityGraph.edges.some((edge) => edge.label === "preserves"), "verb-fragment filtering should not remove explicit relations");
+
 const boundedJsonHeaders = { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "64" : null };
 const jsonResponse = (payload, headers = null) => {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));

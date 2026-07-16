@@ -18,9 +18,14 @@ tenant isolation, cloud graph storage, billing, or hosted backup retention.
 | Optional extraction gateway | Ready for a protected single instance | authenticated readiness, bounded requests, rate/concurrency limits, provider HTTP smoke |
 | Standalone server lifecycle | Ready for the reference process contract | `npm run smoke:server` covers build identity, auth success/rejection, bounded concurrency, readiness, and graceful drain |
 | Static public wiki | Ready for publication | shared Node/Pages asset contract, exact manifest/digest verification, accessibility/performance gates, and deployment probe |
+| Live default Pages deployment | Not currently verified | The repository contains the publication workflow, but the default `https://humblemat810.github.io/llm-wiki/` returned HTTP 404 on July 16, 2026; enable GitHub Pages with the Actions source and run the workflow before calling the public URL production |
 | Container runtime | Ready for a hardened single instance | `npm run smoke:container` proves non-root, read-only filesystem, capability drop, readiness, health, auth, and drain behavior |
-| Automated release checks | Ready | locked install, dependency audit, full suite, CodeQL, Scorecard, tag and container gates |
-| Sustained-load and real-browser certification | Deployment-specific follow-up | `npm run load:server` provides a bounded operator probe; [RUNBOOK.md](RUNBOOK.md#real-browser-certification) defines the browser evidence still required |
+| Automated release checks | Ready | locked install, dependency audit, full suite, CodeQL, Scorecard, tag/container gates, Chromium/Firefox/WebKit release-workbench matrix, and retained Pages evidence |
+| Automated browser smoke | Repository gate | `.github/workflows/browser.yml` runs the local workbench smoke across Chromium, Firefox, and WebKit, including manifest, raster-icon, and installed-app metadata delivery, human review→reusable learning, Obsidian ZIP export/import, source-revision identity, and failure screenshots |
+| Exact-deployment browser smoke | Pages release gate | The Pages workflow runs the browser smoke across Chromium, Firefox, and WebKit against the deployed URL after publication and verifies the deployed source revision |
+| Scheduled browser experience monitor | Daily operator gate | `.github/workflows/browser-monitor.yml` repeats the exact-origin browser smoke across Chromium, Firefox, and WebKit after publication against the default-branch revision |
+| Repeatable deployment capacity probe | Operator gate | `.github/workflows/capacity.yml` runs a health-only bounded duration probe only after explicit target authorization and SLO inputs |
+| Sustained-load and extended browser certification | Deployment-specific follow-up | `npm run load:server` provides bounded operator budgets; [RUNBOOK.md](RUNBOOK.md#real-browser-certification) still covers long-duration, offline, accessibility, and provider-boundary evidence; WebKit offline emulation is documented as a runner limitation |
 | Hosted multi-user workspace | Not implemented | requires identity, authorization, durable server storage, tenancy, and retention policy |
 
 ## What “production-ready” means here

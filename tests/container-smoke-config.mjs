@@ -22,6 +22,8 @@ assert.deepEqual(configured, {
   port: 18002,
   revision: "abcdef1234567890",
   version: "1.2.3",
+  source: "https://github.com/humblemat810/llm-wiki",
+  documentation: "https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md",
   skipBuild: true,
   extractorToken: "extractor-secret",
   metricsToken: "metrics-secret"

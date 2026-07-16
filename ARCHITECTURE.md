@@ -47,7 +47,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   extractors must keep Markdown structure separate from prose units, filter
   common verb/preposition fragments from adjacent phrases, preserve explicit
   relation verbs and shared-subject clauses, keep sparse documents on the
-  noise-filtered ranking path while retaining accepted feedback endpoints,
+  noise-filtered ranking path, reject ordinary inflected verb fragments such
+  as `policy blocks` or `retriever queries` without suppressing explicit
+  graph relations, while retaining accepted feedback endpoints,
   attach source-line evidence to heading and quoted-term candidates, and
   removing only evidence-subsumed one-word duplicates, and passing through
   bounded candidate and evidence collection with reserved phrase capacity
@@ -70,6 +72,14 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   fires, and their non-streaming `arrayBuffer()` fallback races the same
   signal. Stream reads race the signal too, so a stalled body cannot outlive
   its request even when cancellation is ignored.
+- The Playwright browser smoke runs the workbench in a reduced-motion,
+  narrow-viewport context, verifies visible controls have accessible names,
+  confirms keyboard focus reaches the primary sample action, and still checks
+  service-worker activation, persistence, Obsidian vault ZIP export/import
+  round trips, and offline reopening where the runner supports offline
+  service-worker emulation. Failure-only screenshots are written to an
+  operator-supplied artifact directory so CI can retain visual triage evidence
+  without adding successful-run payloads.
 - `graph-store.js` owns graph persistence semantics: optimistic version and
   content-fingerprint checks, bounded undo history, graph and history recovery
   snapshots—including raw over-capacity history before trimming—and
@@ -242,10 +252,13 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   projection; JSON-LD consumers must treat the normalized graph and its
   fingerprint as the source of truth.
   Obsidian vault exports also include a deterministic `Graph.canvas` file with
-  one file-backed card per concept and one labeled edge per relation. It is a
-  native visual browsing projection, not an additional graph store: linked
-  Markdown notes and authoritative `graph.json` remain the recovery and
-  round-trip sources of truth.
+  one file-backed card per concept and one labeled edge per relation. Orphaned
+  endpoints become explicit text cards instead of silently dropping an edge or
+  creating a broken note link. It is a native visual browsing projection, not
+  an additional graph store: linked Markdown notes and authoritative
+  `graph.json` remain the recovery and round-trip sources of truth. The export
+  validates Canvas identities, endpoint references, and concept-note paths
+  before packaging the archive.
 - `jsonld-projection.js` is the pure JSON-LD projection boundary. It has no DOM
   dependency and normalizes its input, so browser exports and automation can
   share one bounded representation. Entity IDs use a reserved unambiguous
@@ -259,9 +272,12 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   human sharing. It contains only bounded graph labels, statuses, counts,
   health, and the graph fingerprint; source text, evidence quotes, source
   URIs, and source document titles are removed before rendering. The generated
-  file has no scripts,
+  file includes an accessible bounded SVG graph preview plus complete
+  list-based collections, has no scripts,
   uses a restrictive document CSP, escapes every graph-derived value, and
-  remains behind the shared export byte limit.
+  remains behind the shared export byte limit. Large graphs disclose when the
+  visual preview is capped; no concepts or relations are removed from the
+  complete lists.
   The same projection can use the shared browser file-share boundary when
   available and falls back to downloading the exact same bounded bytes; a
   canceled share does not create a second artifact. Markdown sharing uses that
@@ -277,12 +293,20 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   URL returned by the deployment action. It retries propagation with bounded
   timeouts, checks that redirects remain inside the deployed origin, and probes
   the served HTML, crawler files, artifact gallery, service worker, and a
-  generated learning-note page. This verifies the live artifact rather than
-  treating a successful upload as proof of a healthy publication.
+  generated learning-note page, plus the served asset manifest and release
+  metadata. It verifies the live artifact's version identity and every
+  manifest-listed byte count and SHA-256 digest, then recomputes the deployed
+  service-worker cache revision from those served bytes rather than treating a
+  successful upload as proof of a healthy publication. A mixed CDN response
+  cannot therefore pass as a coherent offline release.
 - `.github/workflows/pages-monitor.yml` repeats that same bounded probe daily
   using the configured public origin or the repository's default Pages URL.
   Its read-only permissions and immutable action references make ongoing
   publication monitoring safe to run on forks and manual dispatches.
+- `.github/workflows/browser-monitor.yml` repeats the exact-origin browser
+  smoke daily across Chromium, Firefox, and WebKit, so a release that was
+  healthy at publication cannot silently regress later through CDN,
+  service-worker, or browser-facing drift.
 - `.github/workflows/release.yml` is the versioned-release boundary. It accepts
   only a tag matching the stable package version, reruns the full suite,
   verifies a fresh Pages bundle, builds the container with the same semantic
@@ -408,7 +432,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   Candidate concept and relation collections also fail before normalization
   when they exceed graph limits.
   Every benchmark example must be a reviewed concept or relation, preventing
-  malformed feedback from disappearing during scoring.
+  malformed feedback from disappearing during scoring. The required
+  representative set includes a relation-quality case with accepted and
+  rejected edges, so edge precision and suppression remain promotion gates.
 - `server.mjs` is a dependency-free reference host and extraction endpoint. It
   provides static allowlisting, request limits, rate limiting, security
   headers, optional bearer-token authentication, readiness, privacy-safe
@@ -546,6 +572,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   complete final bundle, and `verify-pages.mjs` recomputes that revision before
   publication so generated assets cannot be deployed under a stale shell-cache
   identity.
+- The install manifest publishes explicit 192×192 and 512×512 PNG icons in
+  addition to the vector fallback. Release checks validate their PNG signatures
+  and dimensions, and the same files are served and precached as shell assets.
 - The branded `404.html` is rewritten with the configured public origin during
   Pages builds and at the Node response boundary, so nested missing URLs do not
   resolve its recovery links beneath the missing path.
@@ -554,6 +583,8 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   note-specific metadata, Article JSON-LD, feed discovery, the interactive
   workbench link, and the no-script content-security policy consistent. Feed
   entries use the same note-derived summaries in Node and Pages deployments.
+  Social metadata points to the generated 1200×630 PNG card for broad crawler
+  compatibility; the original SVG remains available as a crisp local asset.
 - `app.js` is orchestration and presentation. It should call domain functions
   rather than reimplementing graph mutations in event handlers. Review controls
   share one conflict-safe persistence path across list and inspector surfaces.
@@ -683,7 +714,10 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
    remote errors in the visible queue for an explicit retry, while
    deterministic validation failures do not create an endless retry loop.
    The deterministic learning-loop artifact uses this same fresh-only guidance
-   boundary, so its runnable proof matches production behavior.
+   boundary, so its runnable proof matches production behavior for both
+   accepted/rejected concepts and accepted/rejected relations. Its comparison
+   reports the relation delta separately, preventing a concept-only learning
+   proof from being mistaken for complete graph improvement.
 6. `evaluate-feedback.mjs` compares a new extractor or graph against exported
    reviewed examples before a change is trusted; `compare-evaluations.mjs`
    refuses promotion when the baseline and candidate use different reviewed
@@ -942,11 +976,12 @@ The test contract is intentionally dependency-free:
 npm test
 ```
 
-`scripts/run-tests.mjs` discovers JavaScript source files for syntax checks and
-executes every `tests/*.mjs` regression test in an isolated child process.
-Generated bundles and dependency directories are excluded; new source and
-test files are included automatically, so this command is a behavioral gate
-rather than a syntax-only check.
+`scripts/run-tests.mjs` first builds and independently verifies a fresh Pages
+artifact, then discovers JavaScript source files for syntax checks and executes
+every `tests/*.mjs` regression test in an isolated child process. Generated
+bundles and dependency directories are excluded from discovery; new source and
+test files are included automatically, so this command is a clean-checkout
+behavioral gate rather than a syntax-only check.
 
 The same test command runs `scripts/check-release.mjs` on each supported
 runtime, so Node-version differences cannot bypass deployment-contract checks.
@@ -954,7 +989,9 @@ runtime, so Node-version differences cannot bypass deployment-contract checks.
 The canonical `production:check` also runs `release:check` and
 `smoke:server`, coupling the behavioral suite to package-lock, release
 metadata, workflow permissions and pinning, public/offline asset parity, OCI
-provenance, and the real standalone server lifecycle.
+provenance, and the real standalone server lifecycle. It verifies the Pages
+artifact before artifact-dependent tests and again after all checks, so a test
+that rebuilds or mutates `dist/` cannot leave an unverified final publication.
 
 The same checks run across Node 22 and 24, build the container, verify
 readiness, and exercise static delivery and offline service-worker behavior.
@@ -962,3 +999,9 @@ readiness, and exercise static delivery and offline service-worker behavior.
 including its authenticated readiness boundary and SIGTERM lifecycle; the
 verification workflow calls this same command rather than maintaining a
 second shell-only implementation.
+
+Pages builds add a bounded source revision to the generated `version.json`.
+The publication workflow supplies `GITHUB_SHA`, and its post-deploy probe
+requires the served revision to match that commit. Local builds use `unknown`
+unless `BUILD_REVISION` is supplied, so development artifacts remain usable
+without pretending to have release provenance.

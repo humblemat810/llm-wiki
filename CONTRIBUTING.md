@@ -93,9 +93,29 @@ OpenSSF Scorecard run as separate repository-security workflows, so review
 their findings before merging changes that affect runtime or deployment
 boundaries.
 
+On pull requests opened from a public fork, CodeQL may report a non-fatal
+`Resource not accessible by integration` message while collecting optional
+workflow-run telemetry. That does not replace the scan result: confirm that
+JavaScript analysis completed and distinguish a telemetry warning from a
+failed scan or SARIF upload. Do not “fix” this by granting `write-all`
+permissions or changing the workflow to `pull_request_target`.
+
 For a new learning page, use the Learning note issue template first. It keeps
 the question, build, failure modes, sources, and reproducible exercise visible
 before prose or code is added.
+
+## Correct a graph representation
+
+If the workbench produces a missing concept, misleading relation, or
+unsupported evidence, use the **Correct a graph representation** issue form.
+The inspector's **report correction** link opens the same form without
+serializing source text, evidence, URIs, or local graph state. Include the
+smallest public source or redacted graph fragment that lets someone reproduce
+the problem, then describe the proposed change and why it is better.
+
+Do not post private documents, confidential evidence, credentials, or personal
+data. A correction is most useful when it names the item, cites public
+evidence, and distinguishes an observed fact from an interpretation.
 
 ## Share a reusable artifact
 

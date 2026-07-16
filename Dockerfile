@@ -2,12 +2,14 @@ FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb
 
 ARG APP_VERSION=0.1.0
 ARG VCS_REF=unknown
+ARG PUBLIC_REPOSITORY_URL=https://github.com/humblemat810/llm-wiki
+ARG PUBLIC_DOCUMENTATION_URL=https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md
 LABEL org.opencontainers.image.title="LLM Field Notes" \
       org.opencontainers.image.description="A document-to-knowledge-graph workspace with inspectable evidence and Obsidian projections." \
       org.opencontainers.image.version="$APP_VERSION" \
       org.opencontainers.image.revision="$VCS_REF" \
-      org.opencontainers.image.source="https://github.com/humblemat810/llm-wiki" \
-      org.opencontainers.image.documentation="https://github.com/humblemat810/llm-wiki/blob/main/RUNBOOK.md" \
+      org.opencontainers.image.source="$PUBLIC_REPOSITORY_URL" \
+      org.opencontainers.image.documentation="$PUBLIC_DOCUMENTATION_URL" \
       org.opencontainers.image.licenses="CC-BY-4.0"
 
 WORKDIR /app
@@ -15,6 +17,7 @@ ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8000
 ENV BUILD_REVISION=$VCS_REF
+ENV PUBLIC_REPOSITORY_URL=$PUBLIC_REPOSITORY_URL
 STOPSIGNAL SIGTERM
 
 COPY --chown=node:node . .
