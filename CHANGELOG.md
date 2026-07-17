@@ -13,6 +13,9 @@ All notable changes to LLM Field Notes are documented here.
 - Make the deployed Pages probe account for transparent gzip decoding and
   accept the platform's `application/javascript` service-worker response type,
   so the live public origin can pass its own integrity checks.
+- Apply the same transparent-gzip handling to service-worker precache
+  validation, preventing GitHub Pages’ compressed response metadata from
+  aborting first-install activation in deployed browsers.
 - Add a source-free “copy correction context” handoff to recipient share
   pages, including the sanitized share link, privacy reminder, and structured
   public-evidence prompts.

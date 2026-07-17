@@ -19,7 +19,7 @@ tenant isolation, cloud graph storage, billing, or hosted backup retention.
 | Model-provider privacy boundary | Ready for protected single-instance use | provider credentials remain server-side; source URIs are opt-in; requests disable automatic redirects and intermediary caching; bounded response decoding and structured-output normalization are covered by provider smoke tests |
 | Standalone server lifecycle | Ready for the reference process contract | `npm run smoke:server` covers build identity, liveness/readiness, auth success/rejection, bounded concurrent and one-second duration extraction load, and graceful drain |
 | Static public wiki | Ready for publication | dedicated static-pages preflight, shared Node/Pages asset contract, required deployed asset manifest, exact manifest/digest verification, published-asset-aware HTML link and symlink checks, accessibility/performance gates, and deployment probe |
-| Live default Pages deployment | Deployed; workflow verifier fix pending rerun | On July 17, 2026, the public origin served revision `8e6852e6bc4b9b6b2605980bbc67eba28c90c1b9`; the corrected local `npm run smoke:pages:deployment` passed 123 checks against it. The publication workflow for that revision failed before this verifier fix because GitHub Pages transparently gzip-decodes responses and serves `sw.js` as `application/javascript`; push the verifier fix and rerun publication before calling the workflow green |
+| Live default Pages deployment | Deployed; browser compatibility fix pending rerun | On July 17, 2026, the public origin served revision `2220648f744c58f17f4f5023383aeb886f6f1c41`; `npm run smoke:pages:deployment` passed 123 checks against it. The publication job deployed successfully, but the post-deploy browser matrix found that service-worker precache compared GitHub Pages’ compressed `Content-Length` to transparently decoded bytes; push the service-worker compatibility fix and rerun publication before calling the workflow green |
 | Container runtime | Ready for a hardened single instance | `npm run smoke:container` proves non-root, read-only filesystem, capability drop, readiness, health, auth, and drain behavior |
 | Supply-chain evidence | Ready | deterministic SPDX SBOM, parsed workflow/permission checks, immutable action pins, and GitHub artifact attestations for Pages/release manifests |
 | Supported Node compatibility | Verified for current worktree | On July 17, 2026, the full `npm test` suite passed on Node 24; the canonical Node 22 production gate also passes, matching the CI runtime matrix |
@@ -50,8 +50,8 @@ and monitor `/livez`, `/readyz`, and authenticated `/metrics`.
 
 GitHub Pages is now configured with the Actions source and the default origin
 is serving the expected revision. The repository still requires one clean
-publication workflow after the verifier compatibility fix before the public
-launch can be considered fully certified. Verify the exact origin and
+publication workflow after the service-worker compatibility fix before the
+public launch can be considered fully certified. Verify the exact origin and
 revision with:
 
 ```bash

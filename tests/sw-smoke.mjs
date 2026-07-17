@@ -73,6 +73,7 @@ let nonHtmlForHtmlShellResponse = false;
 let discardableErrorResponse = false;
 let discardableErrorBodyCancelCalls = 0;
 let declaredResponseLength = null;
+let responseContentEncoding = null;
 let bodyUnavailable = false;
 let earlyResponseCancelCalls = 0;
 let networkCalls = 0;
@@ -190,6 +191,7 @@ const context = {
       ? { "content-type": "text/html; charset=utf-8" }
       : {};
     if (declaredResponseLength !== null) headers["content-length"] = String(declaredResponseLength);
+    if (responseContentEncoding !== null) headers["content-encoding"] = responseContentEncoding;
     return new Response(`fresh:${request.url}`, { status: networkStatus, headers });
   },
   self: {
@@ -293,6 +295,13 @@ declaredResponseLength = 1;
 const truncatedShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
 assert.equal(await truncatedShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "shell responses with mismatched Content-Length should fall back to the last complete cache entry");
 declaredResponseLength = null;
+
+declaredResponseLength = 1;
+responseContentEncoding = "gzip";
+const encodedShell = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });
+assert.equal(await encodedShell.text(), `fresh:${new URL("./app.js", location).toString()}`, "transparently decoded shell responses should not compare compressed Content-Length to decoded bytes");
+declaredResponseLength = null;
+responseContentEncoding = null;
 
 networkStatus = 503;
 const transientHttpFailure = await dispatchFetch({ method: "GET", mode: "cors", url: new URL("./app.js", location).toString() });

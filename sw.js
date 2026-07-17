@@ -129,6 +129,8 @@ async function fetchFresh(request) {
     const declaredHeader = response.headers?.get?.("content-length");
     const normalizedDeclaredHeader = typeof declaredHeader === "string" ? declaredHeader.trim() : "";
     const declaredLength = /^\d+$/.test(normalizedDeclaredHeader) ? Number(normalizedDeclaredHeader) : Number.NaN;
+    const contentEncoding = String(response.headers?.get?.("content-encoding") || "").trim().toLowerCase();
+    const mustMatchDeclaredLength = !contentEncoding || contentEncoding === "identity";
     if (normalizedDeclaredHeader && !Number.isSafeInteger(declaredLength)) {
       return rejectResponse(new Error("Network response Content-Length is invalid."));
     }
@@ -165,7 +167,7 @@ async function fetchFresh(request) {
           }
           if (result.done) {
             bodyReadComplete = true;
-            if (Number.isFinite(declaredLength) && totalBytes !== declaredLength) {
+            if (mustMatchDeclaredLength && Number.isFinite(declaredLength) && totalBytes !== declaredLength) {
               throw new Error("Network response body length does not match Content-Length.");
             }
             break;
