@@ -25,6 +25,101 @@ assert(operationalLabels.has("vector index") && operationalLabels.has("audit log
 assert(!["index stores", "retriever queries", "reranker orders", "policy blocks", "blocks unsafe"].some((label) => operationalLabels.has(label)), "extraction should reject ordinary verb-fragment phrases");
 assert(operationalQualityGraph.edges.some((edge) => edge.label === "preserves"), "verb-fragment filtering should not remove explicit relations");
 
+const pipelineQualityGraph = extractGraph(
+  "Retrieval pipeline",
+  "# Retrieval pipeline\nRetrieval augments generation. The retriever retrieves documents, and the reranker ranks candidates. Retrieval augments generation for grounded answers.",
+  {
+    feedback: [
+      ...["retrieval", "generation", "retriever", "documents", "reranker", "candidates"].map((label) => ({
+        kind: "concept",
+        id: label,
+        label,
+        status: "accepted"
+      })),
+      { kind: "relation", id: "retrieval--generation--augments", source: "retrieval", target: "generation", sourceLabel: "retrieval", targetLabel: "generation", label: "augments", status: "accepted" },
+      { kind: "relation", id: "retriever--documents--retrieves", source: "retriever", target: "documents", sourceLabel: "retriever", targetLabel: "documents", label: "retrieves", status: "accepted" },
+      { kind: "relation", id: "reranker--candidates--ranks", source: "reranker", target: "candidates", sourceLabel: "reranker", targetLabel: "candidates", label: "ranks", status: "accepted" }
+    ]
+  }
+);
+assert(pipelineQualityGraph.edges.some((edge) => edge.label === "augments"), "local extraction should recognize common retrieval-to-generation relations");
+assert(pipelineQualityGraph.edges.some((edge) => edge.label === "retrieves"), "local extraction should recognize retrieval relations");
+assert(pipelineQualityGraph.edges.some((edge) => edge.label === "ranks"), "local extraction should recognize ranking relations");
+assert(!pipelineQualityGraph.nodes.some((node) => ["retrieval augments", "augments generation", "reranker ranks", "ranks candidates"].includes(node.label.toLowerCase())), "relation verbs should not become noun-fragment concepts");
+
+const definitionQualityGraph = extractGraph(
+  "Definitions",
+  "A tokenizer is a boundary between text and integers. Attention means each token can use context for representation.",
+  {
+    feedback: [
+      ...["tokenizer", "boundary", "attention", "token"].map((label) => ({
+        kind: "concept",
+        id: label,
+        label,
+        status: "accepted"
+      })),
+      { kind: "relation", id: "tokenizer--boundary--is", source: "tokenizer", target: "boundary", sourceLabel: "tokenizer", targetLabel: "boundary", label: "is", status: "accepted" },
+      { kind: "relation", id: "attention--token--means", source: "attention", target: "token", sourceLabel: "attention", targetLabel: "token", label: "means", status: "accepted" }
+    ]
+  }
+);
+assert(definitionQualityGraph.nodes.some((node) => node.label.toLowerCase() === "tokenizer"), "definition prose should retain the defined concept");
+assert(definitionQualityGraph.edges.some((edge) => edge.label === "is" && edge.source === "tokenizer" && edge.target === "boundary"), "definition prose should retain explicit is relations");
+assert(definitionQualityGraph.edges.some((edge) => edge.label === "means" && edge.source === "attention" && edge.target === "token"), "meaning statements should retain explicit means relations");
+
+const passiveQualityGraph = extractGraph(
+  "Indexed retrieval",
+  "Embeddings are stored in a vector index. Retrieved passages are ranked by the reranker.",
+  {
+    feedback: [
+      ...[
+        ["embeddings", "embeddings"],
+        ["vector-index", "vector index"],
+        ["retrieved-passages", "retrieved passages"],
+        ["reranker", "reranker"]
+      ].map(([id, label]) => ({ kind: "concept", id, label, status: "accepted" })),
+      { kind: "relation", id: "embeddings--vector-index--stored-in", source: "embeddings", target: "vector-index", sourceLabel: "embeddings", targetLabel: "vector index", label: "stored in", status: "accepted" },
+      { kind: "relation", id: "retrieved-passages--reranker--ranked-by", source: "retrieved-passages", target: "reranker", sourceLabel: "retrieved passages", targetLabel: "reranker", label: "ranked by", status: "accepted" }
+    ]
+  }
+);
+assert(passiveQualityGraph.edges.some((edge) => edge.label === "stored in" && edge.source === "embeddings" && edge.target === "vector-index"), "passive storage statements should retain their prepositional relation label");
+assert(passiveQualityGraph.edges.some((edge) => edge.label === "ranked by" && edge.source === "retrieved-passages" && edge.target === "reranker"), "passive ranking statements should retain their prepositional relation label");
+assert(!passiveQualityGraph.nodes.some((node) => ["stored", "ranked"].includes(node.label.toLowerCase())), "passive participles should not become standalone concepts");
+
+const causalQualityGraph = extractGraph(
+  "Causal retrieval",
+  "Caching prevents repeated computation. Retrieval leads to grounded answers.",
+  {
+    feedback: [
+      ...[
+        ["caching", "caching"],
+        ["repeated-computation", "repeated computation"],
+        ["retrieval", "retrieval"],
+        ["grounded-answers", "grounded answers"]
+      ].map(([id, label]) => ({ kind: "concept", id, label, status: "accepted" })),
+      { kind: "relation", id: "caching--repeated-computation--prevents", source: "caching", target: "repeated-computation", sourceLabel: "caching", targetLabel: "repeated computation", label: "prevents", status: "accepted" },
+      { kind: "relation", id: "retrieval--grounded-answers--leads-to", source: "retrieval", target: "grounded-answers", sourceLabel: "retrieval", targetLabel: "grounded answers", label: "leads to", status: "accepted" }
+    ]
+  }
+);
+assert(causalQualityGraph.edges.some((edge) => edge.label === "prevents"), "causal prose should retain prevention relations");
+assert(causalQualityGraph.edges.some((edge) => edge.label === "leads to"), "causal prose should retain multi-word causal labels");
+
+const phraseBoundaryRelationGraph = extractGraph(
+  "Phrase boundaries",
+  "Attention mechanism uses context. Attention also appears in the title.",
+  {
+    feedback: [
+      { kind: "concept", id: "attention", label: "Attention", status: "accepted" },
+      { kind: "concept", id: "attention-mechanism", label: "Attention mechanism", status: "accepted" },
+      { kind: "concept", id: "context", label: "Context", status: "accepted" },
+      { kind: "relation", id: "attention-mechanism--context--uses", source: "attention-mechanism", target: "context", sourceLabel: "Attention mechanism", targetLabel: "Context", label: "uses", status: "accepted" }
+    ]
+  }
+);
+assert(phraseBoundaryRelationGraph.edges.some((edge) => edge.source === "attention-mechanism" && edge.target === "context" && edge.label === "uses"), "relation endpoint matching should prefer the longest concept at a shared phrase boundary");
+
 const boundedJsonHeaders = { get: (name) => name === "content-type" ? "application/json" : name === "content-length" ? "64" : null };
 const jsonResponse = (payload, headers = null) => {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));

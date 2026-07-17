@@ -109,7 +109,7 @@ The architecture removes recurrence and convolution, which makes training more p
 The model learns through gradient descent on a prediction loss.`
 };
 
-const stopWords = new Set("a an and are as at be because been being based before between by can could catch catches caught create creates depends different during entirely each for from gather gathers gives has have here how if improve improves improved increases in into is it its itself learn learns lets make makes may means measures more need needs needed of on or other our over preserve preserves preserved reduces removes report reports reported represent represents represented requires same show shows showing supports than that the their them these this then there through to use uses using until was what when which while with without within you your allow allows after become becomes became control controls controlled guide guides guided map maps mapped reveal reveals revealed remain remains".split(" "));
+const stopWords = new Set("a an and are as at be because been being based before between by can could catch catches caught cause causes caused create creates depends different during entirely each for from gather gathers gives has have here how if improve improves improved increases in into is it its itself lead leads learn learns lets make makes may means measure measures more need needs needed of on or other our over prevent prevents preserve preserves preserved reduce reduces report reports reported represent represents represented require requires result results same show shows showing support supports than that the their them these this then there through to trigger triggers use uses using until was what when which while with without within you your allow allows after become becomes became control controls controlled guide guides guided map maps mapped reveal reveals revealed remain remains augments combines converts decodes enriches encodes feeds filters generates limits maps mapped mitigate mitigates implies orders predicts produces ranks represents retrieves selects stores transforms augmented combined converted decoded enriched encoded fed filtered generated limited mitigated implied ordered prevented produced ranked represented resulted retrieved selected stored transformed triggered".split(" "));
 const phraseBoundaryWords = new Set(["also", "connects"]);
 const phraseNoiseWords = new Set([
   ...stopWords,
@@ -1983,10 +1983,65 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
         if (hints.ambiguousConceptKeys.has(slugify(term))) continue;
         const normalizedTerm = ` ${term.toLowerCase().normalize("NFKC").replace(/[^\p{Letter}\p{Number}]+/gu, " ").replace(/\s+/g, " ")} `;
         if (searchableText.includes(normalizedTerm)) {
-          addCandidate(term, "feedback");
+          const evidenceSentence = sentences.find((sentence) => (
+            ` ${sentence.toLowerCase().normalize("NFKC").replace(/[^\p{Letter}\p{Number}]+/gu, " ").replace(/\s+/g, " ")} `
+          ).includes(normalizedTerm)) || "";
+          addCandidate(term, "feedback", evidenceSentence);
           break;
         }
       }
+  });
+  const structuralPhrase = (value, fromEnd = false) => {
+    const words = String(value).normalize("NFKC").match(/\p{Letter}[\p{Letter}\p{Number}_-]*/gu) || [];
+    const selected = [];
+    const ordered = fromEnd ? [...words].reverse() : words;
+    for (const word of ordered) {
+      const normalizedWord = word.toLowerCase();
+      if (stopWords.has(normalizedWord)) {
+        if (selected.length) break;
+        continue;
+      }
+      selected.push(word);
+      if (selected.length >= 4) break;
+    }
+    return (fromEnd ? selected.reverse() : selected).join(" ");
+  };
+  const structuralRelations = [];
+  const passiveRelations = [];
+  sentences.forEach((sentence) => {
+    const match = sentence.match(/^(.*?)\s+\b(consists of|refers to|means|is|are)\b\s+(.*)$/i);
+    const passiveMatch = sentence.match(
+      /^(.*?)\s+\b(is|are|was|were)\b\s+(stored|ranked|used|encoded|decoded|represented|defined|organized|retrieved|selected|filtered|generated|produced|transformed|combined|limited|based)\s+\b(in|by|as|from|on|into|to)\b\s+(.*)$/i
+    );
+    if (passiveMatch) {
+      const sourceLabel = cleanPhrase(passiveMatch[1]).replace(/^(the|a|an)\s+/i, "").trim();
+      const targetLabel = structuralPhrase(passiveMatch[5]);
+      if (sourceLabel && targetLabel && slugify(sourceLabel) !== slugify(targetLabel)) {
+        addCandidate(sourceLabel, "structural", sentence);
+        addCandidate(targetLabel, "structural", sentence);
+        passiveRelations.push({
+          sourceLabel,
+          targetLabel,
+          label: `${passiveMatch[3].toLowerCase()} ${passiveMatch[4].toLowerCase()}`,
+          sentence,
+          copula: passiveMatch[2].toLowerCase()
+        });
+      }
+      return;
+    }
+    if (!match) return;
+    if (["is", "are"].includes(match[2].toLowerCase()) && !/^\s+(?:an?|the)\b/i.test(match[3])) return;
+    const sourceLabel = structuralPhrase(match[1], true);
+    const targetLabel = structuralPhrase(match[3]);
+    if (!sourceLabel || !targetLabel || slugify(sourceLabel) === slugify(targetLabel)) return;
+    addCandidate(sourceLabel, "structural", sentence);
+    addCandidate(targetLabel, "structural", sentence);
+    structuralRelations.push({
+      sourceLabel,
+      targetLabel,
+      label: match[2].toLowerCase(),
+      sentence
+    });
   });
   boundedText.split("\n").map((line) => line.trim()).filter(Boolean).forEach((line) => {
     if (/^#{1,3}\s+/.test(line)) addCandidate(line, "heading", line);
@@ -2087,7 +2142,12 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
     updatedAt: new Date().toISOString()
   }));
   const edges = [];
-  const relationVerbPattern = "is|are|uses|enables|requires|contains|depends on|allows|supports|creates|gives|removes|means|improves|preserves|reduces|increases|measures|catches|guides|models|mixes|connects|organizes|remains";
+  const relationVerbPattern = "consists of|refers to|depends on|leads to|results in|is|are|uses|enables|requires|contains|allows|supports|creates|causes|prevents|triggers|mitigates|implies|gives|removes|means|improves|preserves|reduces|increases|measures|catches|guides|models|mixes|connects|organizes|remains|augments|combines|converts|decodes|enriches|encodes|feeds|filters|generates|limits|orders|predicts|produces|ranks|retrieves|selects|stores|transforms";
+  const labelStart = (value, label) => {
+    const escaped = String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = String(value).match(new RegExp(`(?:^|[^\\p{Letter}\\p{Number}_-])(${escaped})(?=$|[^\\p{Letter}\\p{Number}_-])`, "iu"));
+    return match ? (match.index + match[0].length - match[1].length) : -1;
+  };
   const matchesHintEndpoint = (hint, item, endpoint) => {
     const labelKey = endpoint === "source" ? "sourceLabel" : "targetLabel";
     return hint[endpoint] === item.id
@@ -2097,15 +2157,15 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
     const lowerSentence = sentence.toLowerCase();
     const present = ranked
       .filter((item) => nodeIds.has(item.id))
-      .map((item) => ({ item, start: lowerSentence.indexOf(item.label.toLowerCase()) }))
+      .map((item) => ({ item, start: labelStart(lowerSentence, item.label.toLowerCase()) }))
       .filter((entry) => entry.start >= 0)
-      .sort((a, b) => a.start - b.start)
+      .sort((a, b) => a.start - b.start || b.item.label.length - a.item.label.length)
       .filter((entry, index, entries) => index === entries.findIndex((candidate) => candidate.start === entry.start))
       .slice(0, 5)
       .map((entry) => entry.item);
     const presentPositions = present.map((item) => ({
       item,
-      start: lowerSentence.indexOf(item.label.toLowerCase())
+      start: labelStart(lowerSentence, item.label.toLowerCase())
     }));
     const addExplicitRelation = (source, target, label) => {
       if (!source || !target || source.id === target.id) return;
@@ -2132,6 +2192,19 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
     for (const match of lowerSentence.matchAll(new RegExp(`\\b(${relationVerbPattern})\\b`, "gi"))) {
       const verbStart = match.index ?? -1;
       const verbEnd = verbStart + match[0].length;
+      const passive = passiveRelations.find((relation) => (
+        relation.sentence === sentence
+        && relation.copula === match[1].toLowerCase()
+        && labelStart(lowerSentence, relation.sourceLabel) >= 0
+        && labelStart(lowerSentence, relation.targetLabel) >= 0
+      ));
+      if (passive && ["is", "are", "was", "were"].includes(match[1].toLowerCase())) {
+        const source = present.find((item) => slugify(item.label) === slugify(passive.sourceLabel));
+        const target = present.find((item) => slugify(item.label) === slugify(passive.targetLabel));
+        addExplicitRelation(source, target, passive.label);
+        previousExplicitRelation = { source, verbEnd };
+        continue;
+      }
       const textSincePreviousVerb = previousExplicitRelation
         ? lowerSentence.slice(previousExplicitRelation.verbEnd, verbStart)
         : "";
@@ -2144,12 +2217,28 @@ export function extractGraph(title, text, { feedback = [], sourceUri } = {}) {
       addExplicitRelation(source, target, match[1].toLowerCase());
       previousExplicitRelation = { source, verbEnd };
     }
+    structuralRelations
+      .filter((relation) => relation.sentence === sentence)
+      .forEach((relation) => {
+        const source = present.find((item) => slugify(item.label) === slugify(relation.sourceLabel));
+        const target = present.find((item) => slugify(item.label) === slugify(relation.targetLabel));
+        addExplicitRelation(source, target, relation.label);
+      });
     for (let index = 0; index < present.length - 1; index += 1) {
       const left = present[index];
       const right = present[index + 1];
-      const leftEnd = lowerSentence.indexOf(left.label.toLowerCase()) + left.label.length;
-      const rightStart = lowerSentence.indexOf(right.label.toLowerCase(), leftEnd);
+      const leftEnd = labelStart(lowerSentence, left.label.toLowerCase()) + left.label.length;
+      const rightStart = labelStart(lowerSentence.slice(leftEnd), right.label.toLowerCase()) + leftEnd;
       const between = rightStart >= leftEnd ? sentence.slice(leftEnd, rightStart) : "";
+      const passive = passiveRelations.find((relation) => (
+        relation.sentence === sentence
+        && slugify(relation.sourceLabel) === slugify(left.label)
+        && slugify(relation.targetLabel) === slugify(right.label)
+      ));
+      if (passive) {
+        addExplicitRelation(left, right, passive.label);
+        continue;
+      }
       const relationMatch = between.match(new RegExp(`\\b(${relationVerbPattern})\\b`, "i"));
       if (relationMatch && /\b(and|while|but)\b/i.test(between)) continue;
       const relationHints = hints.relations.filter((hint) => (

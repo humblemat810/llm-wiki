@@ -58,17 +58,17 @@ export function parseLoadConfig(environment = process.env) {
     try {
       parsedAllowedOrigin = new URL(allowedOrigin);
     } catch {
-      throw new Error("LOAD_TEST_ALLOWED_ORIGIN must be a valid HTTP(S) origin.");
+      throw new Error("LOAD_TEST_ALLOWED_ORIGIN must be a valid HTTP(S) deployment base URL.");
     }
     if (!["http:", "https:"].includes(parsedAllowedOrigin.protocol)
       || parsedAllowedOrigin.username
       || parsedAllowedOrigin.password
       || parsedAllowedOrigin.search
       || parsedAllowedOrigin.hash) {
-      throw new Error("LOAD_TEST_ALLOWED_ORIGIN must be an HTTP(S) origin or deployment URL without credentials, query, or fragment.");
+      throw new Error("LOAD_TEST_ALLOWED_ORIGIN must be an HTTP(S) deployment base URL without credentials, query, or fragment.");
     }
-    if (url.origin !== parsedAllowedOrigin.origin) {
-      throw new Error("LOAD_TEST_URL does not match LOAD_TEST_ALLOWED_ORIGIN.");
+    if (normalizeLoadBaseUrl(url) !== normalizeLoadBaseUrl(parsedAllowedOrigin)) {
+      throw new Error("LOAD_TEST_URL does not match LOAD_TEST_ALLOWED_ORIGIN deployment base.");
     }
   }
   const isLoopback = ["127.0.0.1", "::1", "localhost"].includes(url.hostname.toLowerCase());
@@ -93,7 +93,7 @@ export function parseLoadConfig(environment = process.env) {
     maxFailures: optionalBoundedInteger("LOAD_TEST_MAX_FAILURES", environment.LOAD_TEST_MAX_FAILURES, MAX_REQUESTS),
     maxP95Ms: optionalBoundedInteger("LOAD_TEST_MAX_P95_MS", environment.LOAD_TEST_MAX_P95_MS, MAX_DURATION_MS),
     allowedOrigin: allowedOrigin
-      ? new URL(allowedOrigin).origin
+      ? normalizeLoadBaseUrl(new URL(allowedOrigin))
       : null,
     deadlineMs: MAX_DURATION_MS
   };
@@ -106,6 +106,23 @@ export function buildLoadProbeUrl(baseUrl, route) {
   base.search = "";
   base.hash = "";
   return new URL(String(route).replace(/^\/+/, ""), base);
+}
+
+function normalizeLoadBaseUrl(value) {
+  const url = new URL(value);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function sanitizeLoadIdentity(value) {
+  const url = new URL(value);
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 const percentile = (values, fraction) => {
@@ -305,6 +322,8 @@ export async function runLoadProbe({
   await Promise.all(workers);
   return {
     mode: config.mode,
+    target: sanitizeLoadIdentity(config.url),
+    deploymentBase: config.allowedOrigin ? sanitizeLoadIdentity(config.allowedOrigin) : null,
     requests: cursor,
     concurrency: workerCount,
     peakInFlight,

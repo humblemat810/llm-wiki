@@ -49,7 +49,16 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   relation verbs and shared-subject clauses, keep sparse documents on the
   noise-filtered ranking path, reject ordinary inflected verb fragments such
   as `policy blocks` or `retriever queries` without suppressing explicit
-  graph relations, while retaining accepted feedback endpoints,
+  graph relations, including common retrieval-pipeline verbs such as
+  `augments`, `retrieves`, and `ranks`, while retaining accepted feedback endpoints,
+  and recognize only article-led definition statements for copular relations,
+  so passive phrases such as `embeddings are stored` do not become fabricated
+  definition concepts. Sentence-to-node matching also requires Unicode-aware
+  token boundaries, preventing a short concept label from binding inside a
+  longer concept label. A bounded passive-pattern pass preserves labels such
+  as `stored in` and `ranked by` while excluding their participles from the
+  candidate vocabulary. The same bounded relation vocabulary preserves causal
+  labels such as `prevents` and `leads to`.
   attach source-line evidence to heading and quoted-term candidates, and
   removing only evidence-subsumed one-word duplicates, and passing through
   bounded candidate and evidence collection with reserved phrase capacity
@@ -76,7 +85,8 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   narrow-viewport context, verifies visible controls have accessible names,
   confirms keyboard focus reaches the primary sample action, and still checks
   the local same-origin model-mode extraction switch, draft-preserving provider
-  failure where request interception is supported, service-worker activation,
+  failure with an explicit single-document retry action where request
+  interception is supported, service-worker activation,
   persistence, Obsidian vault ZIP export/import round trips, and offline
   reopening where the runner supports offline service-worker emulation.
   The pinned WebKit runner bypasses interception for service-worker-controlled
@@ -136,7 +146,8 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   restore authorization.
 - `backup-crypto.js` optionally wraps a complete backup in an authenticated
   AES-GCM envelope using a PBKDF2-SHA-256 password-derived key. Encryption is
-  browser-local, bounded, and never persists or transmits the password;
+  browser-local, bounded, validates the canonical backup envelope before
+  encryption, and never persists or transmits the password;
   plaintext backups remain a deliberate interoperability option. The browser
   download path applies the larger bounded envelope ceiling to encrypted
   backups, while ordinary text and binary projections retain the 50 MB export
@@ -204,7 +215,10 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   for durable repair before the workspace becomes ready. IndexedDB write and
   delete transactions have their own bounded timeout; stalled operations abort when
   possible, demote the adapter to its synchronous fallback, and emit the
-  existing durability warning. An explicit cross-tab graph removal event is
+  existing durability warning. Successful hydration emits a status event after
+  durable state is adopted, so the workbench rerenders recovered graph state
+  and updates its durability disclosure even when the synchronous mirror was
+  empty or stale. An explicit cross-tab graph removal event is
   treated as an intentional clear rather than stale state, so the newer tab
   cannot silently resurrect the cleared graph; the storage adapter exposes that
   event classification as a tested boundary. Its pending-write marker uses the
@@ -232,7 +246,10 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   never serialize source text, evidence, URIs, or local graph state.
   Inspector share actions use the same URL contract, native sharing when
   available, and generic share metadata so source titles and graph content
-  cannot escape through the share sheet.
+  cannot escape through the share sheet; denied native sharing falls back to
+  copying the safe link while explicit cancellation remains a no-op.
+  Note, local-item, and redacted-graph links all use the same
+  `shareLinkWithFallback()` contract.
 - `projection-adapter.js` owns the editable Obsidian contract. Markdown notes
   are feedback inputs, not a second source of truth. ZIP imports validate paths,
   filenames, bounds, and checksums before applying updates; the browser requires
@@ -302,10 +319,25 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   remains behind the shared export byte limit. Large graphs disclose when the
   visual preview is capped; no concepts or relations are removed from the
   complete lists.
+- A bounded `share.html#graph=...` projection provides a recipient-openable
+  link for smaller graphs. It carries only graph labels, statuses, confidence,
+  and remapped structure in the URL fragment; source text, evidence, URIs, and
+  local IDs are omitted. The static renderer uses text nodes rather than
+  injecting payload HTML, and oversized payloads fail closed to the HTML
+  export. Its explicit fork link reconstructs a redacted graph with fresh
+  share-scoped IDs in the workbench, confirms replacement of non-empty state,
+  preserves the previous graph through Undo, and clears the fragment after
+  handling. The decoder is a closed-field boundary with bounded strings,
+  finite confidence values, unique node identities, and endpoint validation;
+  malformed payloads never reach the renderer or JSON handoff. The same
+  versioned payload is accepted by the browser JSON importer, which reconstructs
+  only a redacted graph under the normal optimistic write and Undo contract.
   The same projection can use the shared browser file-share boundary when
   available and falls back to downloading the exact same bounded bytes; a
   canceled share does not create a second artifact. Markdown sharing uses that
-  boundary too, then adds its clipboard fallback.
+  boundary too, then adds its clipboard fallback. Recipient correction context
+  is copied through the same bounded clipboard helper and contains only the
+  sanitized share URL, privacy reminder, and public-evidence prompts.
 - `buildGraphExport()` is the shared raw graph JSON projection boundary. It
   canonicalizes collection ordering, adds the normalized graph fingerprint,
   and records bounded producer-version metadata without making that metadata
@@ -315,7 +347,8 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   discovery is enabled and rejecting origin-aware sitemap output otherwise.
 - The Pages workflow also runs `scripts/smoke-pages-deployment.mjs` against the
   URL returned by the deployment action. It retries propagation with bounded
-  timeouts, checks that redirects remain inside the deployed origin, and probes
+  timeouts, follows only a bounded number of manually validated, credential-free
+  same-origin redirects, and probes
   the served HTML, crawler files, artifact gallery, service worker, and a
   generated learning-note page, plus the served asset manifest and release
   metadata. It verifies the live artifact's version identity and every
@@ -363,7 +396,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   cannot continue consuming model output after the UI has stopped waiting.
   Browser and provider response readers also compare received bytes with a
   finite declared `Content-Length` before decoding, rejecting truncated
-  release metadata, learning notes, or extractor JSON.
+  release metadata, learning notes, or extractor JSON. Provider streams
+  enforce the response ceiling incrementally even when `Content-Length` is
+  absent, so an oversized model body cannot accumulate before rejection.
   Stream `read()` calls themselves race the signal, covering adapters that
   ignore `reader.cancel()`.
   The fetch attempt itself races an explicit caller-abort promise as well as
@@ -402,7 +437,14 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   guidance, labels the document as untrusted source material, requests
   deterministic temperature-zero structured JSON by default, and rejects malformed,
   oversized, non-JSON, timed-out, or cross-boundary responses before they
-  reach graph normalization. It is optional: an unset provider URL selects the
+  reach graph normalization. When called by the reference server it forwards
+  the bounded request ID as an `x-request-id` header for provider-side
+  incident correlation. It independently compacts and validates reviewed
+  feedback before serialization, so custom callers cannot smuggle arbitrary
+  graph or private fields into the provider prompt; the system prompt also
+  treats feedback labels as data rather than executable instructions. It is
+  optional: an unset
+  provider URL selects the
   deterministic local extractor, while a configured provider is selected by
   the standalone server without changing the browser or graph contract.
 - `tests/provider-http-smoke.mjs` exercises the gateway and adapter against a
@@ -475,7 +517,9 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   Every benchmark example must be a reviewed concept or relation, preventing
   malformed feedback from disappearing during scoring. The required
   representative set includes a relation-quality case with accepted and
-  rejected edges, so edge precision and suppression remain promotion gates.
+  rejected edges plus a retrieval-pipeline verb-coverage case, so edge
+  precision, suppression, and useful explicit relation vocabulary remain
+  promotion gates.
 - `server.mjs` is a dependency-free reference host and extraction endpoint. It
   provides static allowlisting, request limits, rate limiting, security
   headers, optional bearer-token authentication, readiness, privacy-safe
@@ -488,6 +532,13 @@ mergeExtraction() ──► graph-core.js ──► normalized graph
   returns a retryable `503` with bounded `Retry-After` guidance rather than
   silently changing the process contract. Explicitly configured numeric startup
   settings are parsed against bounded ranges and fail closed on typos.
+  Programmatic metrics and Prometheus also expose a fixed-cardinality
+  extraction-lane gauge (`local-heuristic`, `model-provider`, or `custom`) so
+  operators can verify which implementation is active without document data.
+  Extraction failures also use a fixed-cardinality diagnostic counter, allowing
+  provider timeouts, authentication failures, rate limiting, and malformed
+  requests to be alerted independently without turning request details into
+  metric labels.
   The container healthcheck imports that same parser before probing `/readyz`,
   preventing a runtime port override from making health report on a different
   endpoint than the server configuration.

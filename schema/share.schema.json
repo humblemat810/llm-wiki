@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-field-notes.local/schema/share@1",
+  "title": "LLM Field Notes redacted share projection",
+  "description": "Bounded, source-free graph structure intended for recipient viewing and reversible workbench forking.",
+  "type": "object",
+  "required": ["format", "title", "nodes", "edges", "documents", "reviewed"],
+  "properties": {
+    "format": { "const": "llm-field-notes/share@1" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "nodes": {
+      "type": "array",
+      "maxItems": 1200,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 2400,
+      "items": { "$ref": "#/$defs/edge" }
+    },
+    "documents": { "type": "integer", "minimum": 0, "maximum": 1000 },
+    "reviewed": { "type": "integer", "minimum": 0, "maximum": 3600 }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["id", "label", "type", "status", "confidence"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "status": { "enum": ["inferred", "accepted", "rejected"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "edge": {
+      "type": "object",
+      "required": ["source", "target", "label", "status", "confidence"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "status": { "enum": ["inferred", "accepted", "rejected"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

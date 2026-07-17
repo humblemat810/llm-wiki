@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { chromium, firefox, webkit } from "playwright";
 import { prepareDiagnosticScreenshotPath } from "./browser-diagnostics.mjs";
+import { encodeSharePayload, SHARE_FORMAT } from "../share-projection.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const APP_VERSION = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")).version;
@@ -166,8 +167,12 @@ let browser;
 let context;
 let page;
 let samplePage;
+let sharePage;
+let forkContext;
+let forkPage;
 let checkpointPage;
-let expectedRemoteFailure = false;
+let failurePage;
+let failureContext;
 try {
   debug(`target ${baseUrl.href}`);
   debug("waiting for server readiness");
@@ -178,13 +183,28 @@ try {
     reducedMotion: "reduce",
     viewport: { width: 390, height: 844 }
   });
+  await context.addInitScript(() => {
+    window.__llmFieldNotesClipboard = "";
+    try {
+      Object.defineProperty(navigator, "share", { configurable: true, value: undefined });
+    } catch {
+      // Some engines expose navigator.share as a non-configurable property.
+    }
+    try {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: async (value) => { window.__llmFieldNotesClipboard = String(value); } }
+      });
+    } catch {
+      // The static recipient-view test still covers link rendering.
+    }
+  });
   page = await context.newPage();
   page.setDefaultTimeout(10000);
   const pageErrors = [];
   const consoleErrors = [];
   page.on("pageerror", (error) => appendBoundedDiagnostic(pageErrors, error?.message || error));
   page.on("console", (message) => {
-    if (expectedRemoteFailure && message.type() === "error" && /503|Service Unavailable/i.test(message.text())) return;
     if (message.type() === "error" && !message.text().includes("frame-ancestors")) {
       appendBoundedDiagnostic(consoleErrors, message.text());
     }
@@ -379,6 +399,130 @@ try {
   await samplePage.close();
   samplePage = null;
 
+  debug("loading recipient-openable share projection");
+  const sharePayload = {
+    format: SHARE_FORMAT,
+    title: "Browser share fixture",
+    nodes: [
+      { id: "n0", label: "Retrieval <b>unsafe</b>", type: "concept", status: "accepted", confidence: 0.9 },
+      { id: "n1", label: "Grounded answer", type: "concept", status: "accepted", confidence: 0.8 }
+    ],
+    edges: [{ source: "n0", target: "n1", label: "supports", status: "accepted", confidence: 0.85 }],
+    documents: 1,
+    reviewed: 2
+  };
+  sharePage = await context.newPage();
+  sharePage.setDefaultTimeout(10000);
+  const shareRequests = [];
+  sharePage.on("request", (request) => shareRequests.push(request.url()));
+  const shareUrlObject = new URL(`share.html#graph=${encodeSharePayload(sharePayload)}`, baseUrl);
+  shareUrlObject.searchParams.set("utm_source", "browser-smoke");
+  const shareUrl = shareUrlObject.toString();
+  await sharePage.goto(
+    shareUrl,
+    { waitUntil: "networkidle", timeout: 10000 }
+  );
+  assert.equal(await sharePage.title(), "Shared knowledge graph · LLM Field Notes", "the recipient share page should expose its page title");
+  assert.equal(await sharePage.locator("#error").isHidden(), true, "a valid share payload should not render the error state");
+  assert.equal(await sharePage.locator("#title").textContent(), "Browser share fixture", "the share page should render the payload title");
+  assert.equal(await sharePage.locator("#graph-map").getAttribute("role"), "img", "the share page should expose an accessible visual graph");
+  assert(await sharePage.locator("#graph-map circle").count() >= 2, "the share page should render visual concept nodes");
+  assert.equal(await sharePage.locator("#nodes li").count(), 2, "the share page should render every bounded concept");
+  assert((await sharePage.locator("#nodes").textContent() || "").includes("Retrieval <b>unsafe</b>"), "shared labels should remain literal text");
+  assert.equal(await sharePage.locator("#nodes b").count(), 0, "shared labels must not inject markup into the recipient page");
+  assert.equal(await sharePage.locator("#edges li").count(), 1, "the share page should render every bounded relation");
+  assert.match(await sharePage.locator("#edges").textContent() || "", /Retrieval.*supports.*Grounded answer/);
+  const forkHref = await sharePage.locator("#fork-share").getAttribute("href");
+  assert.match(forkHref || "", /#shared=[A-Za-z0-9_-]+$/, "the share page should expose a bounded workbench fork link");
+  const correctionHref = await sharePage.locator('a[href*="template=graph_correction.yml"]').getAttribute("href");
+  assert(correctionHref, "the recipient share page should expose a correction path");
+  const correctionUrl = new URL(correctionHref);
+  assert.equal(correctionUrl.hostname, "github.com", "the recipient correction path should target GitHub");
+  assert.equal(correctionUrl.searchParams.get("template"), "graph_correction.yml", "the recipient correction path should use the graph-correction template");
+  if (expectedRepository) {
+    assert.equal(
+      `${correctionUrl.origin}${correctionUrl.pathname}`,
+      `${new URL(expectedRepository).origin}${new URL(expectedRepository).pathname}/issues/new`,
+      "the recipient correction path should target the configured repository"
+    );
+  }
+  await sharePage.locator("#copy-correction-context").click();
+  const correctionContext = await sharePage.evaluate(() => window.__llmFieldNotesClipboard);
+  assert.match(correctionContext || "", /^LLM Field Notes graph correction\n\nShare link: /, "the recipient should offer a structured correction handoff");
+  assert(correctionContext?.includes(sharePage.url().replace("?utm_source=browser-smoke", "")), "correction context should include the query-free share link");
+  assert(!correctionContext?.includes("Attention uses context"), "correction context must remain source-free");
+  await sharePage.locator("#copy-share-link").click();
+  assert.equal(
+    await sharePage.evaluate(() => window.__llmFieldNotesClipboard),
+    sharePage.url().replace("?utm_source=browser-smoke", ""),
+    "the recipient share page should copy the safe fragment link without query parameters"
+  );
+  forkContext = await browser.newContext({ reducedMotion: "reduce", serviceWorkers: "block" });
+  forkPage = await forkContext.newPage();
+  forkPage.setDefaultTimeout(10000);
+  await forkPage.goto(forkHref, { waitUntil: "networkidle", timeout: 10000 });
+  assert.equal(new URL(forkPage.url()).hash, "", "the workbench should remove the shared payload from the address bar after import");
+  assert.match(await forkPage.locator("#ingest-status").textContent() || "", /Shared graph forked/, "the workbench should report a successful shared graph fork");
+  assert.equal(await forkPage.locator("#hero-node-count").textContent(), "2", "the workbench should render all forked concepts");
+  await forkPage.close();
+  forkPage = null;
+  await forkContext.close();
+  forkContext = null;
+  const shareDownloadPromise = sharePage.waitForEvent("download");
+  await sharePage.locator("#download-share").click();
+  const shareDownload = await shareDownloadPromise;
+  assert.equal(shareDownload.suggestedFilename(), "shared-knowledge-graph-redacted.json", "the shared graph download should use a stable redacted filename");
+  const shareDownloadPath = await shareDownload.path();
+  assert(shareDownloadPath, "the browser should expose the shared graph download bytes");
+  const shareDownloadBytes = await readFile(shareDownloadPath);
+  const shareDownloadPayload = JSON.parse(shareDownloadBytes.toString("utf8"));
+  assert.equal(shareDownloadPayload.format, SHARE_FORMAT, "the shared graph download should preserve its versioned format");
+  assert(!JSON.stringify(shareDownloadPayload).includes("source text"), "the shared graph download must remain source-free");
+  const malformedSharePage = await context.newPage();
+  malformedSharePage.setDefaultTimeout(10000);
+  const duplicateSharePayload = Buffer.from('{"format":"llm-field-notes/share@1","format":"llm-field-notes/share@1"}').toString("base64url");
+  await malformedSharePage.goto(new URL(`share.html#graph=${duplicateSharePayload}`, baseUrl).toString(), { waitUntil: "networkidle", timeout: 10000 });
+  assert.equal(await malformedSharePage.locator("#error").isHidden(), false, "duplicate-key share payloads should render the safe error state");
+  assert.equal(await malformedSharePage.locator("#download-share").isDisabled(), true, "malformed share payloads should disable downloads");
+  assert.equal(await malformedSharePage.locator("#copy-share-link").isDisabled(), true, "malformed share payloads should disable link copying");
+  assert.equal(await malformedSharePage.locator("#copy-correction-context").isDisabled(), true, "malformed share payloads should disable correction-context copying");
+  await malformedSharePage.close();
+  forkContext = await browser.newContext({ reducedMotion: "reduce", serviceWorkers: "block" });
+  forkPage = await forkContext.newPage();
+  forkPage.setDefaultTimeout(10000);
+  await forkPage.goto(new URL("#workbench", baseUrl).toString(), { waitUntil: "networkidle", timeout: 10000 });
+  await forkPage.locator("#document-file").setInputFiles({
+    name: "shared-knowledge-graph-redacted.json",
+    mimeType: "application/json",
+    buffer: shareDownloadBytes
+  });
+  await waitForText(forkPage.locator("#ingest-status"), /Redacted shared graph imported/);
+  assert.equal(await forkPage.locator("#hero-node-count").textContent(), "2", "the downloaded redacted JSON should round-trip into the workbench");
+  await forkPage.close();
+  forkPage = null;
+  await forkContext.close();
+  forkContext = null;
+  const workbenchHref = await sharePage.locator('a').filter({ hasText: "Open the workbench" }).getAttribute("href");
+  assert.equal(
+    new URL(workbenchHref || "", sharePage.url()).toString(),
+    new URL("./", baseUrl).toString(),
+    "the recipient share page should offer a path back to the workbench"
+  );
+  assert(shareRequests.every((url) => !url.includes("#graph=")), "the graph fragment must not be sent in an HTTP request");
+  if (engineName !== "webkit") {
+    await waitForServiceWorker(page);
+    await context.setOffline(true);
+    try {
+      await sharePage.goto(shareUrl, { waitUntil: "domcontentloaded", timeout: 10000 });
+      assert.equal(await sharePage.locator("#error").isHidden(), true, "the cached recipient share page should reopen offline");
+      assert.equal(await sharePage.locator("#nodes li").count(), 2, "the cached recipient share page should preserve its concepts offline");
+    } finally {
+      await context.setOffline(false);
+    }
+  }
+  await sharePage.close();
+  sharePage = null;
+
   debug("running sample walkthrough");
   await page.locator("#try-sample").click();
   await waitForText(page.locator("#ingest-status"), /Revision/);
@@ -386,6 +530,15 @@ try {
   assert.notEqual(await page.locator("#hero-node-count").textContent(), "0", "the sample walkthrough should render concepts");
   assert.match(await page.locator("#graph-health").textContent() || "", /backup checkpoint is missing or out of date/i, "a populated graph without a current full backup should disclose the backup reminder");
   assert.equal(await page.locator("#graph-health [data-storage-action='backup']").count(), 1, "the backup reminder should provide one actionable download control");
+  debug("copying an app-generated recipient share link");
+  await page.locator("#share-redacted-link").scrollIntoViewIfNeeded();
+  await page.locator("#share-redacted-link").click();
+  await waitForText(page.locator("#projection-status"), /Share link copied/);
+  const copiedShareUrl = await page.evaluate(() => window.__llmFieldNotesClipboard);
+  const copiedShare = new URL(copiedShareUrl);
+  assert.equal(copiedShare.pathname, new URL("share.html", baseUrl).pathname, "the workbench share action should target the static recipient viewer");
+  assert.match(copiedShare.hash, /^#graph=[A-Za-z0-9_-]+$/, "the workbench share action should produce a bounded fragment payload");
+  assert(!copiedShareUrl.includes("Attention uses context"), "the workbench share URL must not contain source-bearing evidence");
   if (!configuredTarget) {
     debug("exercising same-origin model extraction");
     await page.locator("details.extractor-settings").evaluate((element) => {
@@ -407,28 +560,49 @@ try {
       debug("WebKit service-worker fetches bypass the pinned runner's request interception; skipping the synthetic provider-failure drill");
     } else {
       debug("exercising model extraction failure recovery");
-    const remoteEndpointPattern = /\/api\/extract-graph(?:\?.*)?$/;
-    let remoteFailureIntercepted = false;
-    await page.route(remoteEndpointPattern, async (route) => {
-      remoteFailureIntercepted = true;
-      await route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "simulated provider outage" })
+      failureContext = await browser.newContext({
+        reducedMotion: "reduce",
+        serviceWorkers: "block",
+        viewport: { width: 390, height: 844 }
       });
-    });
-    const failedRemoteTitle = "Remote outage draft";
-    const failedRemoteText = "This draft must remain available when the configured model endpoint is temporarily unavailable.";
-    await page.locator("#document-title").fill(failedRemoteTitle);
-    await page.locator("#document-input").fill(failedRemoteText);
-    expectedRemoteFailure = true;
-    await page.locator("#ingest-document").click();
-    await waitForText(page.locator("#ingest-status"), /could not be extracted|provider|503/i);
-    expectedRemoteFailure = false;
-    assert.equal(remoteFailureIntercepted, true, "the browser failure drill should intercept the model endpoint request");
-    assert.equal(await page.locator("#document-title").inputValue(), failedRemoteTitle, "remote extraction failures should preserve the document title draft");
-    assert.equal(await page.locator("#document-input").inputValue(), failedRemoteText, "remote extraction failures should preserve the document text draft");
-    await page.unroute(remoteEndpointPattern);
+      failurePage = await failureContext.newPage();
+      failurePage.setDefaultTimeout(10000);
+      const remoteEndpointPattern = /\/api\/extract-graph(?:\?.*)?$/;
+      let remoteFailureIntercepted = false;
+      await failurePage.route(remoteEndpointPattern, async (route) => {
+        remoteFailureIntercepted = true;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "simulated provider outage" })
+        });
+      });
+      const failedRemoteTitle = "Remote outage draft";
+      const failedRemoteText = "This draft must remain available when the configured model endpoint is temporarily unavailable.";
+      await failurePage.goto(new URL("#workbench", baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 10000 });
+      await failurePage.locator("#workbench").waitFor({ state: "attached" });
+      await failurePage.locator("details.extractor-settings").evaluate((element) => {
+        element.open = true;
+      });
+      await failurePage.locator("#extractor-endpoint").fill("/api/extract-graph");
+      await failurePage.locator("#extractor-endpoint").press("Tab");
+      await waitForText(failurePage.locator("#extractor-mode"), /^MODEL$/);
+      await failurePage.locator("#document-title").fill(failedRemoteTitle);
+      await failurePage.locator("#document-input").fill(failedRemoteText);
+      await failurePage.locator("#ingest-document").click();
+      await waitForText(failurePage.locator("#ingest-status"), /could not be extracted|provider|503/i);
+      assert.equal(remoteFailureIntercepted, true, "the browser failure drill should intercept the model endpoint request");
+      assert.equal(await failurePage.locator("#document-title").inputValue(), failedRemoteTitle, "remote extraction failures should preserve the document title draft");
+      assert.equal(await failurePage.locator("#document-input").inputValue(), failedRemoteText, "remote extraction failures should preserve the document text draft");
+      await failurePage.locator("#retry-build").waitFor({ state: "visible" });
+      await failurePage.unroute(remoteEndpointPattern);
+      await failurePage.locator("#retry-build").click();
+      await waitForText(failurePage.locator("#ingest-status"), /Revision/);
+      assert.equal(await failurePage.locator("#retry-build").isHidden(), true, "a successful single-document retry should hide the retry action");
+      await failurePage.close();
+      await failureContext.close();
+      failurePage = null;
+      failureContext = null;
     }
     await page.locator("#extractor-endpoint").fill("");
     await page.locator("#extractor-endpoint").press("Tab");
@@ -708,7 +882,12 @@ try {
   throw error;
 } finally {
   await samplePage?.close().catch(() => {});
+  await sharePage?.close().catch(() => {});
+  await forkPage?.close().catch(() => {});
+  await forkContext?.close().catch(() => {});
   await checkpointPage?.close().catch(() => {});
+  await failurePage?.close().catch(() => {});
+  await failureContext?.close().catch(() => {});
   await context?.close().catch(() => {});
   await browser?.close().catch(() => {});
   if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");

@@ -36,4 +36,14 @@ jobs:
           PAGES_EXPECTED_REVISION: ${{ steps.revision.outputs.value }}
           PAGES_SMOKE_ATTEMPTS: "30"
           PAGES_SMOKE_RETRY_DELAY_MS: "2000"
-        run: npm run smoke:pages:deployment
+        run: |
+          set -o pipefail
+          npm run smoke:pages:deployment 2>&1 | tee pages-monitor.log
+      - name: Retain Pages monitor failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pages-monitor-${{ github.run_id }}
+          path: pages-monitor.log
+          if-no-files-found: ignore
+          retention-days: 14

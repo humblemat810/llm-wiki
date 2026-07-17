@@ -4,6 +4,9 @@ These pages are the durable, forkable version of the learning map. Each note
 answers one question, proposes a small build, and names a failure mode worth
 observing.
 
+Start interactively with the [sample workbench](../#sample), or browse the
+[runnable community artifacts](../artifacts.html) before choosing a note.
+
 | Note | Question |
 | --- | --- |
 | [Tokens are the interface](tokens.md) | Why can't the model see words? |

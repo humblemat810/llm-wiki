@@ -48,11 +48,20 @@ assert.throws(
 assert.equal(
   parseLoadConfig({
     LOAD_TEST_URL: "https://wiki.example.test/field-notes",
-    LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test",
+    LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test/field-notes",
     LOAD_TEST_CONFIRM: "I_UNDERSTAND"
   }).allowedOrigin,
-  "https://wiki.example.test",
-  "load probes should accept a target under the explicitly allowed deployment origin"
+  "https://wiki.example.test/field-notes/",
+  "load probes should bind to the explicitly allowed deployment base path"
+);
+assert.throws(
+  () => parseLoadConfig({
+    LOAD_TEST_URL: "https://wiki.example.test/other-project",
+    LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test/field-notes",
+    LOAD_TEST_CONFIRM: "I_UNDERSTAND"
+  }),
+  /does not match LOAD_TEST_ALLOWED_ORIGIN deployment base/,
+  "load probes should reject a same-host but wrong deployment path"
 );
 assert.throws(
   () => parseLoadConfig({
@@ -60,8 +69,8 @@ assert.throws(
     LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test",
     LOAD_TEST_CONFIRM: "I_UNDERSTAND"
   }),
-  /does not match LOAD_TEST_ALLOWED_ORIGIN/,
-  "load probes should reject targets outside the declared deployment origin"
+  /does not match LOAD_TEST_ALLOWED_ORIGIN deployment base/,
+  "load probes should reject targets outside the declared deployment base"
 );
 assert.throws(
   () => parseLoadConfig({
@@ -70,7 +79,7 @@ assert.throws(
     LOAD_TEST_CONFIRM: "I_UNDERSTAND"
   }),
   /without credentials, query, or fragment/,
-  "load probe allowlists should reject query strings that could carry secrets"
+  "load probe deployment bases should reject query strings that could carry secrets"
 );
 assert.equal(
   parseLoadConfig({
@@ -78,8 +87,8 @@ assert.equal(
     LOAD_TEST_ALLOWED_ORIGIN: "https://wiki.example.test/field-notes",
     LOAD_TEST_CONFIRM: "I_UNDERSTAND"
   }).allowedOrigin,
-  "https://wiki.example.test",
-  "load probe allowlists should normalize Pages subpaths to their origin"
+  "https://wiki.example.test/field-notes/",
+  "load probe allowlists should normalize Pages deployment base paths"
 );
 assert.equal(
   buildLoadProbeUrl(new URL("https://wiki.example.test/field-notes"), "healthz").toString(),
@@ -124,12 +133,36 @@ assert.equal(result.concurrency, 3);
 assert.equal(result.peakInFlight, 3);
 assert.equal(peak, 3);
 assert.equal(result.statuses["200"], 7);
+assert.equal(result.target, "http://127.0.0.1:8000/", "load results should identify the sanitized target URL");
+assert.equal(result.deploymentBase, null, "unrestricted local probes should disclose that no deployment base allowlist was configured");
 assert.equal(result.failedRequests, 0, "successful load probes should report zero failed requests");
 assert.equal(result.failureRate, 0, "successful load probes should report zero failure rate");
 assert(result.throughputRps > 0, "load probes should report positive throughput");
 assert.equal(result.maxFailures, 0, "load probes should default to zero tolerated failures");
 assert.equal(result.maxP95Ms, null, "load probes should leave latency thresholds unset unless operators provide one");
 assert.equal(result.targetDurationMs, null, "fixed-count load probes should not report a duration target");
+
+const sensitiveIdentityResult = await runLoadProbe({
+  config: {
+    url: new URL("https://user:secret@wiki.example.test/field-notes?token=private"),
+    allowedOrigin: "https://user:secret@wiki.example.test/field-notes?token=private",
+    requests: 1,
+    concurrency: 1,
+    mode: "healthz",
+    token: "",
+    deadlineMs: 5000
+  },
+  fetchImpl: async () => ({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => new TextEncoder().encode(JSON.stringify({
+      ok: true,
+      schema: "llm-field-notes/graph@1"
+    })).buffer
+  })
+});
+assert.equal(sensitiveIdentityResult.target, "https://wiki.example.test/field-notes", "direct probe results should strip target credentials, query, and fragment");
+assert.equal(sensitiveIdentityResult.deploymentBase, "https://wiki.example.test/field-notes", "direct probe results should strip deployment-base credentials and query");
 const withinBudget = { ...result, failures: [], maxFailures: 0, maxP95Ms: 1000 };
 assert.equal(enforceLoadBudget(withinBudget), withinBudget, "load budgets should accept results within configured limits");
 assert.throws(

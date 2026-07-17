@@ -8,7 +8,7 @@ assert(checker.includes("parseJsonWithUniqueKeys"), "artifact verification must 
 const commands = [...html.matchAll(/<a class="artifact-card"[\s\S]*?<code>([\s\S]*?)<\/code><\/a>/g)]
   .map(([, command]) => command.replace(/<[^>]+>/g, "").trim());
 
-assert.equal(commands.length, 20, "the artifact smoke should cover every public card");
+assert.equal(commands.length, 21, "the artifact smoke should cover every public card");
 for (const command of commands) {
   const tokens = command.split(/\s+/);
   const executable = tokens.shift();

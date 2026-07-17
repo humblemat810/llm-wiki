@@ -39,6 +39,7 @@ import {
   REVISION_EXTRACTORS,
   parseJsonWithUniqueKeys
 } from "../graph-core.js";
+import { MAX_SHARE_DOCUMENTS, MAX_SHARE_EDGES, MAX_SHARE_NODES } from "../share-projection.js";
 
 if (MAX_BROADCAST_VALUE_BYTES !== MAX_PERSISTED_JSON_BYTES) {
   throw new Error("Browser storage byte ceiling must match the graph-store persisted byte ceiling.");
@@ -59,6 +60,7 @@ const vaultManifest = readSchema("vault-manifest.schema.json");
 const learningLoop = readSchema("learning-loop.schema.json");
 const canvas = readSchema("canvas.schema.json");
 const serviceHealth = readSchema("service-health.schema.json");
+const share = readSchema("share.schema.json");
 const graphDefs = graph.$defs;
 const feedbackExample = feedback.properties.examples.items;
 const extractorDocument = extractorRequest.properties.document;
@@ -155,6 +157,10 @@ const checks = [
   [maximum(learningLoop, ["properties", "stages", "properties", "comparison", "properties", "conceptsRemovedByGuidance"]), MAX_GRAPH_NODES, "learning-loop guidance delta"],
   [maxItems(canvas, ["properties", "nodes"]), MAX_GRAPH_NODES + 1, "Canvas nodes"],
   [maxItems(canvas, ["properties", "edges"]), MAX_GRAPH_EDGES, "Canvas edges"],
+  [maxItems(share, ["properties", "nodes"]), MAX_SHARE_NODES, "share nodes"],
+  [maxItems(share, ["properties", "edges"]), MAX_SHARE_EDGES, "share edges"],
+  [maximum(share, ["properties", "documents"]), MAX_SHARE_DOCUMENTS, "share source count"],
+  [maximum(share, ["properties", "reviewed"]), MAX_SHARE_NODES + MAX_SHARE_EDGES, "share reviewed count"],
   [maxLength(canvas, ["$defs", "textNode", "allOf", 1, "properties", "text"]), 20000, "Canvas text"],
   [maxLength(canvas, ["$defs", "fileNode", "allOf", 1, "properties", "file"]), 512, "Canvas file paths"],
   [maxLength(serviceHealth, ["$defs", "liveness", "properties", "version"]), 64, "liveness versions"],

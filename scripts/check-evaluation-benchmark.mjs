@@ -76,7 +76,7 @@ if (extractionCases.format !== "llm-field-notes/extraction-cases@1"
   || extractionCases.cases.length < 5) {
   throw new Error("Extraction quality cases must contain at least five representative reviewed inputs.");
 }
-const requiredCaseIds = new Set(["technical-phrases", "sparse-title", "non-latin", "tool-safety", "relation-quality"]);
+const requiredCaseIds = new Set(["technical-phrases", "sparse-title", "ungrounded-feedback", "non-latin", "tool-safety", "relation-quality"]);
 const caseIds = extractionCases.cases.map((testCase) => testCase?.id);
 if (new Set(caseIds).size !== caseIds.length) {
   throw new Error("Extraction quality cases must not contain duplicate IDs.");

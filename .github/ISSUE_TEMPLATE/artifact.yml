@@ -56,3 +56,10 @@ body:
       description: Link the note, graph export, pull request, paper, or code.
     validations:
       required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private source text, confidential evidence, credentials, and personal data.
+          required: true

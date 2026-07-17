@@ -119,7 +119,10 @@ the problem, then describe the proposed change and why it is better.
 
 Do not post private documents, confidential evidence, credentials, or personal
 data. A correction is most useful when it names the item, cites public
-evidence, and distinguishes an observed fact from an interpretation.
+evidence, and distinguishes an observed fact from an interpretation. Recipient
+share pages provide a **copy correction context** action that supplies the
+sanitized share link and privacy-safe prompts; add public evidence manually
+before submitting the issue.
 
 ## Share a reusable artifact
 

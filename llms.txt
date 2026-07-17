@@ -46,6 +46,12 @@
   representation.
 - [Feedback schema](./schema/feedback.schema.json): reviewed decisions used as
   bounded extractor guidance.
+- [Share schema](./schema/share.schema.json): closed redacted recipient-share
+  projection accepted by the viewer and workbench importer.
+- [Share verifier](./scripts/verify-share.mjs): offline validation for a
+  downloaded redacted share JSON handoff.
+- [Sample share fixture](./examples/sample-share.json): safe public input for
+  trying the share verifier.
 - [Vault manifest schema](./schema/vault-manifest.schema.json): Obsidian
   projection identity and round-trip metadata.
 - [Health schema](./schema/health.schema.json): privacy-safe graph quality

@@ -47,8 +47,9 @@ jobs:
           BROWSER_SMOKE_EXPECTED_REPOSITORY: https://github.com/${{ github.repository }}
           BROWSER_SMOKE_ARTIFACT_DIR: browser-artifacts
         run: |
+          set -o pipefail
           for attempt in 1 2 3; do
-            if npm run browser:smoke; then
+            if npm run browser:smoke 2>&1 | tee -a browser-monitor.log; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
@@ -61,6 +62,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: browser-monitor-${{ matrix.browser }}
-          path: browser-artifacts
+          path: |
+            browser-artifacts
+            browser-monitor.log
           if-no-files-found: ignore
           retention-days: 7

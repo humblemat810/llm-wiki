@@ -31,6 +31,10 @@ sitting and honest enough to show what failed.
 - [Service health verifier](scripts/verify-service-health.mjs) — validate
   captured liveness and readiness responses offline, from a file or bounded
   stdin.
+- [Share JSON verifier](scripts/verify-share.mjs) — validate a downloaded
+  redacted share handoff before importing or forwarding it.
+- [Sample share fixture](examples/sample-share.json) — safe public input for
+  trying the share verifier.
 - [Sample graph export](examples/sample-graph.json) — start with a small,
   evidence-backed graph for health, diff, and projection tooling.
 - [Sample graph viewer](sample-graph.html) — inspect that same representation

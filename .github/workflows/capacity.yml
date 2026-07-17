@@ -64,4 +64,14 @@ jobs:
           LOAD_TEST_CONCURRENCY: ${{ inputs.concurrency }}
           LOAD_TEST_MAX_P95_MS: ${{ inputs.max_p95_ms }}
           LOAD_TEST_MAX_FAILURES: ${{ inputs.max_failures }}
-        run: npm run load:server
+        run: |
+          set -o pipefail
+          npm run load:server 2>&1 | tee capacity-probe.log
+      - name: Retain capacity probe evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: capacity-probe-${{ github.run_id }}
+          path: capacity-probe.log
+          if-no-files-found: error
+          retention-days: 14

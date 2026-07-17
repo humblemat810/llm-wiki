@@ -4,6 +4,98 @@ All notable changes to LLM Field Notes are documented here.
 
 ## [Unreleased]
 
+- Add a source-free “copy correction context” handoff to recipient share
+  pages, including the sanitized share link, privacy reminder, and structured
+  public-evidence prompts.
+- Retry recipient copy actions through the bounded textarea fallback when a
+  browser exposes Clipboard APIs but denies the write permission.
+- Fall back to copying safe note and graph-item links when a native share sheet
+  is present but rejects the request, while preserving explicit cancellation.
+- Consolidate note, graph-item, and redacted-graph link sharing behind one
+  native-share/clipboard-fallback contract to prevent surface drift.
+- Make the Pages deployment probe, preview smoke, and runtime origin smoke
+  require the recipient correction handoff so a stale share shell cannot pass
+  publication verification.
+- Retain bounded capacity-probe logs for 14 days, including failed-run
+  diagnostics, so deployment-specific SLO decisions have auditable evidence.
+- Retain bounded Pages monitor logs for 14 days on failure, so publication,
+  CDN propagation, activation, and source-revision incidents remain
+  diagnosable after scheduled checks finish.
+- Retain per-browser monitor command logs with failure screenshots for seven
+  days, preserving retry history and exact-origin diagnostics for published
+  workbench incidents.
+- Fail closed on model-provider HTTP redirects, preventing document content or
+  provider credentials from being forwarded to an unexpected endpoint.
+- Mark model-provider requests `Cache-Control: no-store`, reducing retention of
+  document-bearing traffic by intermediary caches.
+- Bind deployment capacity probes to the exact normalized deployment base path,
+  preventing a same-host but wrong-project URL from producing misleading SLO
+  evidence.
+- Clarify capacity-probe deployment-base diagnostics so operators do not
+  mistake the exact path binding for a host-only origin check.
+- Include sanitized target and deployment-base identity in capacity results, so
+  retained SLO evidence remains attributable without carrying credentials or
+  query data.
+- Apply capacity-result URL sanitization even for direct programmatic callers,
+  preventing credentials or query data from entering retained probe evidence.
+- Add a direct “Try the workbench” path from the public artifact gallery to the
+  one-click sample walkthrough, shortening the discovery-to-useful-result loop.
+- Add the same interactive workbench and runnable-artifact entry points to the
+  durable notes index, preserving discovery paths for readers arriving through
+  the learning map.
+- Make the Pages deployment verifier follow only bounded, manually validated
+  same-origin redirects, preventing a misconfigured target from sending CI
+  probes to an unrelated host.
+- Reject credential-bearing same-origin deployment redirects before probing
+  them, keeping the publication verifier's target URL credential-free.
+- Make direct provider-adapter construction secure by default, while preserving
+  loopback HTTP for local development, so custom integrations cannot
+  accidentally send model extraction requests to a remote plaintext endpoint.
+- Make local relation extraction prefer the longest concept at a shared
+  phrase boundary and use the same Unicode-safe endpoint matcher for every
+  relation path, preventing substring collisions from redirecting evidence.
+- Add a generated-bundle HTML link-integrity gate that checks every published
+  page before release, including generated learning-note and sample pages.
+- Make the standalone Pages verifier enforce the same generated HTML link
+  contract, so direct artifact verification cannot bypass publication checks.
+- Add a repository-aware correction CTA to recipient share pages so viewers
+  can report a graph issue without first exposing or re-entering private source
+  material.
+- Make browser share decoding reject duplicate JSON keys and excessive nesting
+  through the same bounded parser used by offline verification.
+- Add an explicit ungrounded-feedback extraction case so accepted review labels
+  without source evidence remain withheld instead of becoming fabricated nodes.
+- Fix local-development learning-note canonical URLs so note pages resolve to
+  `notes/<id>.html` instead of the incorrect nested `notes/notes/<id>.html`.
+- Add a bounded recipient-openable redacted graph projection with privacy-safe
+  URL fragments, anonymized local IDs, offline service-worker caching, a
+  workbench return path, a bounded visual map, a redacted JSON handoff, and
+  generic social preview metadata that never embeds source text, evidence, or
+  URIs.
+- Add an explicit recipient-to-workbench fork path for shared graphs; it
+  confirms replacement, preserves the previous workspace through Undo, imports
+  only redacted structure, and removes the one-time payload from the address
+  bar after handling.
+- Harden the versioned share decoder against hidden fields, duplicate
+  identities, malformed values, and dangling relation endpoints before
+  rendering, download, or workbench import.
+- Add one-click re-sharing from the recipient viewer while stripping query
+  parameters and retaining only the safe origin-plus-fragment link.
+- Strip URL credentials consistently from graph-share, recipient re-share, and
+  workbench-fork links.
+- Make the downloaded redacted share JSON a first-class workbench import,
+  preserving the same size, privacy, confirmation, and Undo guarantees as URL
+  forking.
+- Surface the share JSON verifier in the public artifact gallery and structured
+  discovery metadata so the safe handoff is easy to inspect and reuse.
+- Make share verification incrementally byte-bounded for files and stdin,
+  preventing oversized handoffs from being fully allocated before rejection.
+- Rewrite shared-viewer canonical, social-image, and workbench return URLs for
+  configured deployment origins, including repository Pages subpaths, so link
+  previews remain valid outside local development.
+- Make the shared viewer a release-sensitive server asset with `no-cache`
+  headers, and make Pages verification require its dedicated offline shell so
+  deployments cannot publish a stale or incomplete share surface.
 - Add a built-in server-side OpenAI-compatible model-provider adapter with
   bounded JSON decoding, credential isolation, structured-output prompting, and
   fail-closed deployment configuration validation; leave the deterministic
@@ -11,6 +103,60 @@ All notable changes to LLM Field Notes are documented here.
 - Mark ingested documents as untrusted model input and request deterministic
   temperature-zero provider extraction, reducing prompt-injection influence and
   representation drift while retaining mandatory human review.
+- Expose the bounded active extraction lane through programmatic metrics and
+  Prometheus, so operators can distinguish local, model-provider, and custom
+  implementations without inspecting document data.
+- Add an explicit privacy checklist to artifact submissions and the portable
+  contribution template, reducing accidental publication of source text,
+  credentials, or personal data through the community sharing loop.
+- Keep source URIs out of server-side model-provider requests by default, with
+  an explicit deployment opt-in when provenance URLs are genuinely required.
+- Fail closed on partial model-provider environment configuration so a
+  deployment cannot silently fall back to local extraction while appearing
+  model-enabled.
+- Add fixed-cardinality Prometheus extraction-failure counters so operators can
+  distinguish authentication, rate-limit, request-contract, timeout, and
+  provider failures without exposing document content or unbounded labels.
+- Forward validated server request IDs to configured providers through
+  `x-request-id`, making gateway and provider incident correlation possible
+  without exposing source metadata.
+- Independently validate and compact provider feedback context, preventing
+  custom integrations from forwarding arbitrary or unbounded review fields.
+- Explicitly treat reviewed feedback labels as structured data rather than
+  model instructions, strengthening the prompt-injection boundary.
+- Enforce the provider response ceiling while streaming responses that omit
+  `Content-Length`, preventing oversized model output from being buffered
+  before rejection.
+- Expand the deterministic local extractor's reviewed relation vocabulary for
+  common retrieval and model-pipeline verbs, while filtering those verbs from
+  noun-phrase candidates so graphs retain useful edges instead of verb-fragment
+  concepts; accepted feedback fallback candidates now retain matching source
+  evidence when the generic phrase pass is filtered.
+- Recognize conservative definition statements such as “A tokenizer is a
+  boundary” and “Attention means each token,” retaining their source evidence
+  and explicit relation labels without treating passive verb fragments as
+  concepts.
+- Require token boundaries when locating graph labels in source sentences, so
+  concepts such as `token` cannot accidentally bind to the larger label
+  `tokenizer`.
+- Preserve bounded passive technical relations such as `stored in` and
+  `ranked by`, while suppressing their participles as standalone concepts.
+- Preserve bounded causal relation labels such as `prevents` and `leads to`,
+  improving explanatory graphs without reintroducing generic phrase noise.
+- Notify the workbench after successful IndexedDB hydration, so durable-only
+  graph recovery rerenders the recovered state and updates storage durability
+  disclosure instead of leaving the initial mirror view stale.
+- Require encrypted-backup export inputs to pass canonical full-backup
+  validation before password-based encryption, preventing authenticated files
+  that cannot be restored by the normal backup contract.
+- Extend standalone server smoke with a bounded one-second authenticated
+  extraction-duration probe, adding sustained local pressure evidence to the
+  canonical production gate.
+- Record the July 17, 2026 live Pages 404 probe and separate verified local
+  duration evidence from deployment-specific capacity claims.
+- Record July 17, 2026 clean Node 22 Chromium, Firefox, and WebKit workbench
+  smoke evidence, including the transient-provider failure/retry drill,
+  separately from the still-unverified public Pages origin.
 - Align hardened container smoke with the TLS-at-the-gateway contract by using
   an HTTPS logical public origin while the direct probe exercises the bounded
   HTTP listener.
@@ -81,6 +227,9 @@ All notable changes to LLM Field Notes are documented here.
   privacy-safe local mode.
 - Verify the browser preserves an in-progress title and document draft when a
   configured model endpoint returns a bounded provider failure.
+- Add an explicit single-document retry action after transient model-provider
+  failures, reusing the preserved editor draft without retrying automatically
+  or risking duplicate graph writes.
 - Record the pinned WebKit service-worker interception limitation explicitly
   instead of treating its successful provider response as a failure-drill pass.
 - Require the Pages-injected asset manifest during service-worker installation

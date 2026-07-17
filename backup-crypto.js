@@ -1,3 +1,5 @@
+import { validateBackupEnvelope } from "./graph-core.js";
+
 export const ENCRYPTED_BACKUP_FORMAT = "llm-field-notes/encrypted-backup@1";
 export const MIN_BACKUP_PASSWORD_CHARS = 12;
 export const MAX_BACKUP_PASSWORD_CHARS = 256;
@@ -105,6 +107,7 @@ export async function encryptBackup(backup, password) {
   if (!backup || typeof backup !== "object" || Array.isArray(backup)) {
     throw new TypeError("A backup object is required.");
   }
+  validateBackupEnvelope(backup, { label: "Backup" });
   const cryptoObject = getCrypto();
   const salt = cryptoObject.getRandomValues(new Uint8Array(SALT_BYTES));
   const iv = cryptoObject.getRandomValues(new Uint8Array(IV_BYTES));

@@ -4,7 +4,8 @@ import { relative, resolve } from "node:path";
 import { parseJsonWithUniqueKeys } from "../graph-core.js";
 import { MAX_PUBLIC_ASSET_BYTES, MAX_STATIC_ASSET_BYTES } from "./public-assets.mjs";
 import { requirePublicOrigin } from "./public-origin.mjs";
-import { computeServiceWorkerCacheRevision, readServiceWorkerCacheName, readServiceWorkerShellAssets, stripDeploymentCacheRevision } from "./service-worker-cache.mjs";
+import { computeServiceWorkerCacheRevision, readServiceWorkerCacheName, readServiceWorkerShareShellAssets, readServiceWorkerShellAssets, stripDeploymentCacheRevision } from "./service-worker-cache.mjs";
+import { checkPublicLinks } from "./check-public-links.mjs";
 
 const output = resolve(process.argv[2] || "dist");
 const outputMetadata = await lstat(output);
@@ -100,6 +101,10 @@ if (JSON.stringify(outputFiles) !== JSON.stringify(sortedManifestPaths)) {
 if (JSON.stringify(manifestPaths) !== JSON.stringify(sortedManifestPaths)) {
   throw new Error("Pages asset manifest file entries must be lexically sorted.");
 }
+await checkPublicLinks({
+  root: outputRealPath,
+  sources: outputFiles.filter((asset) => asset.endsWith(".html"))
+});
 const robotsFile = await resolveContainedFile(resolve(outputRealPath, "robots.txt"), "Pages robots policy");
 const robotsText = await readFile(robotsFile.fileRealPath, "utf8");
 const expectedRobots = publicOrigin
@@ -117,7 +122,9 @@ if (!publicOrigin && manifestPaths.includes("sitemap.xml")) {
 const serviceWorkerPath = resolve(outputRealPath, "sw.js");
 const serviceWorker = await readFile(serviceWorkerPath, "utf8");
 const shellAssets = readServiceWorkerShellAssets(serviceWorker);
+const shareShellAssets = readServiceWorkerShareShellAssets(serviceWorker);
 if (!shellAssets.length) throw new Error("Pages service worker APP_SHELL must not be empty.");
+if (!shareShellAssets.length) throw new Error("Pages service worker SHARE_SHELL must not be empty.");
 const shellPaths = shellAssets.map((asset) => {
   if (!asset.startsWith("./") || asset.includes("?") || asset.includes("#")) {
     throw new Error(`Pages service worker APP_SHELL asset is unsafe: ${asset}`);
@@ -135,6 +142,18 @@ for (const shellPath of shellPaths) {
   }
   if (shellPath !== "asset-manifest.json" && !outputFiles.includes(shellPath)) {
     throw new Error(`Pages service worker APP_SHELL asset is missing from the published output: ${shellPath}`);
+  }
+}
+for (const asset of shareShellAssets) {
+  if (!asset.startsWith("./") || asset.includes("?") || asset.includes("#")) {
+    throw new Error(`Pages service worker SHARE_SHELL asset is unsafe: ${asset}`);
+  }
+  const relativePath = asset.slice(2);
+  if (!relativePath || relativePath.startsWith("/") || relativePath.split("/").includes("..")) {
+    throw new Error(`Pages service worker SHARE_SHELL asset is unsafe: ${asset}`);
+  }
+  if (!manifestPathSet.has(relativePath) || !outputFiles.includes(relativePath)) {
+    throw new Error(`Pages service worker SHARE_SHELL asset is missing from the published output: ${relativePath}`);
   }
 }
 for (const generatedNote of manifestPaths.filter((asset) => /^notes\/.+\.html$/.test(asset))) {

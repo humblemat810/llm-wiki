@@ -5,6 +5,7 @@ import { buildLearningNotePage } from "../scripts/note-page.mjs";
 
 const notesDirectory = new URL("../notes/", import.meta.url);
 const index = readFileSync(new URL("README.md", notesDirectory), "utf8");
+assert(index.includes("../#sample") && index.includes("../artifacts.html"), "notes index should provide direct workbench and artifact discovery links");
 const noteFiles = readdirSync(notesDirectory)
   .filter((file) => file.endsWith(".md") && file !== "README.md")
   .sort();

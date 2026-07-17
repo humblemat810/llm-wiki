@@ -45,6 +45,11 @@ await assert.rejects(
   "weak backup passwords should be rejected before encryption"
 );
 await assert.rejects(
+  () => encryptBackup({ format: "not-a-backup" }, password),
+  /format is unsupported/i,
+  "encrypted backup export should reject objects that are not valid full-backup envelopes"
+);
+await assert.rejects(
   () => decryptBackup({ ...encrypted, unexpected: true }, password),
   /supported/i,
   "encrypted backup envelopes should reject unknown fields"

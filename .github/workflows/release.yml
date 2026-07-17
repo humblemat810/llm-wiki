@@ -47,6 +47,10 @@ jobs:
             dist/version.json
             dist/manifest.webmanifest
             dist/404.html
+            dist/share.html
+            dist/share.js
+            dist/share-projection.js
+            dist/sw.js
             dist/robots.txt
             dist/feed.xml
             dist/sitemap.xml

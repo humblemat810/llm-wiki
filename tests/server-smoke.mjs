@@ -297,6 +297,7 @@ try {
   }
   assert(Number.isFinite(server.getMetrics().uptimeSeconds) && server.getMetrics().uptimeSeconds >= 0, "programmatic metrics should expose process uptime");
   assert.equal(server.getMetrics().draining, false, "programmatic metrics should expose the initial non-draining state");
+  assert.equal(server.getMetrics().extractorMode, "custom", "programmatic servers should expose the custom extractor lane");
   const index = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(index.status, 200);
   assert((await index.text()).includes("LLM Field Notes"));
@@ -325,6 +326,8 @@ try {
   assert.equal(webManifest.headers.get("cache-control"), "no-cache", "installable-app metadata should update promptly");
   const notFoundPage = await fetch(`http://127.0.0.1:${port}/404.html`);
   assert.equal(notFoundPage.headers.get("cache-control"), "no-cache", "the branded recovery page should update promptly");
+  const sharePage = await fetch(`http://127.0.0.1:${port}/share.html`);
+  assert.equal(sharePage.headers.get("cache-control"), "no-cache", "the recipient share page should revalidate after publication changes");
     const robots = await fetch(`http://127.0.0.1:${port}/robots.txt`);
     assert.equal(robots.headers.get("content-type"), "text/plain; charset=utf-8", "robots.txt should use the standard text MIME type");
     const securityMetadata = await fetch(`http://127.0.0.1:${port}/.well-known/security.txt`);
@@ -452,10 +455,14 @@ try {
   const metricsText = await metrics.text();
   assert(metricsText.includes("llm_field_notes_http_requests_total")
     && metricsText.includes("llm_field_notes_http_requests_in_flight")
+    && metricsText.includes('llm_field_notes_extractor_mode{mode="custom"} 1')
     && metricsText.includes("llm_field_notes_http_duration_ms_bucket{le=\"+Inf\"}")
     && metricsText.includes("llm_field_notes_http_duration_ms_count")
     && metricsText.includes("llm_field_notes_extraction_duration_ms_bucket{le=\"+Inf\"}")
     && metricsText.includes("llm_field_notes_extraction_duration_ms_count")
+    && metricsText.includes('llm_field_notes_extraction_failures_by_code_total{code="EXTRACTOR_TIMEOUT"} 0')
+    && metricsText.includes('llm_field_notes_extraction_failures_by_code_total{code="AUTH_REQUIRED"} 0')
+    && metricsText.includes('llm_field_notes_extraction_failures_by_code_total{code="OTHER"} 0')
     && metricsText.includes('llm_field_notes_http_responses_total{status="200"}')
     && metricsText.includes("llm_field_notes_rate_limit_keys ")
     && metricsText.includes("llm_field_notes_rate_limit_key_capacity 10000")
@@ -473,6 +480,8 @@ try {
   assert(Number.isSafeInteger(server.getMetrics().rateLimitKeys) && server.getMetrics().rateLimitKeys >= 0, "programmatic metrics should expose bounded rate-limit client-window occupancy");
   assert.equal(server.getMetrics().rateLimitKeyCapacity, 10000, "programmatic metrics should expose the rate-limit client-window ceiling");
   assert.equal(server.getMetrics().trustedProxyHops, 0, "programmatic metrics should expose the default direct-socket proxy trust mode");
+  assert.equal(server.getMetrics().extractionFailuresByCode.AUTH_REQUIRED, 0, "programmatic metrics should expose fixed extraction failure buckets");
+  assert.equal(server.getMetrics().extractionFailuresByCode.OTHER, 0, "programmatic metrics should retain an explicit bounded fallback bucket");
   assert(Number.isFinite(server.getMetrics().httpLatencyCount) && server.getMetrics().httpLatencyCount > 0, "programmatic metrics should record completed HTTP latency observations");
   assert(Number(server.getMetrics().responsesByStatus["200"]) > 0, "programmatic metrics should expose successful HTTP response counts");
   const metricsHead = await fetch(`http://127.0.0.1:${port}/metrics`, { method: "HEAD" });
@@ -512,6 +521,8 @@ try {
     assert.equal(firstForwardedClient.status, 400, "the first forwarded client should reach request validation");
     assert.equal(secondForwardedClient.status, 400, "different forwarded clients should receive independent process-local budgets");
     assert.equal(repeatedForwardedClient.status, 429, "repeated requests from one forwarded client should be rate limited");
+    assert.equal(trustedProxyRateServer.getMetrics().extractionFailuresByCode.INVALID_REQUEST, 2, "invalid extraction requests should be classified in fixed failure metrics");
+    assert.equal(trustedProxyRateServer.getMetrics().extractionFailuresByCode.RATE_LIMITED, 1, "rate-limited extraction requests should be classified separately");
   } finally {
     trustedProxyRateServer.close();
   }
@@ -1537,6 +1548,7 @@ try {
     assert.equal(timeoutResponse.headers.get("retry-after"), "5", "extractor timeouts should advertise a longer bounded retry delay");
     assert.match(await timeoutResponse.text(), /extractor timed out/);
     assert(timeoutLogs.some((entry) => entry.status === 504 && entry.error === "EXTRACTOR_TIMEOUT"));
+    assert.equal(timeoutServer.getMetrics().extractionFailuresByCode.EXTRACTOR_TIMEOUT, 1, "timeout aliases should map to the fixed timeout failure bucket");
   } finally {
     timeoutServer.close();
   }
@@ -2036,6 +2048,12 @@ try {
     assert.equal(seoArtifacts.headers.get("cache-control"), "no-cache", "origin-aware artifact pages should revalidate transformed metadata");
     assert(seoArtifactsText.includes('content="https://notes.example.test/social-card.png"') && seoArtifactsText.includes('content="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('rel="canonical" href="https://notes.example.test/artifacts.html"') && seoArtifactsText.includes('"@type":"ItemList"') && seoArtifactsText.includes('"url":"https://notes.example.test/experiments/tiny-bpe.mjs"'), "configured public origins should emit absolute artifact-gallery raster social and structured metadata");
     assert(seoArtifactsText.includes('href="https://github.com/example/forked-wiki/fork"') && seoArtifactsText.includes('href="https://github.com/example/forked-wiki/issues/new?template=graph_correction.yml"') && seoArtifactsText.includes('href="https://github.com/example/forked-wiki/issues/new?template=artifact.yml"'), "runtime artifact pages should point fork and contribution links at the configured repository");
+    const seoShare = await fetch(`http://127.0.0.1:${seoPort}/share.html`);
+    const seoShareText = await seoShare.text();
+    assert.equal(seoShare.status, 200);
+    assert.equal(seoShare.headers.get("cache-control"), "no-cache", "origin-aware share pages should revalidate transformed metadata");
+    assert(seoShareText.includes('content="https://notes.example.test/social-card.png"') && seoShareText.includes('content="https://notes.example.test/share.html"') && seoShareText.includes('rel="canonical" href="https://notes.example.test/share.html"') && seoShareText.includes('href="https://notes.example.test/"') && seoShareText.includes('id="copy-correction-context"'), "configured public origins should emit absolute shared-viewer metadata and the correction handoff");
+    assert(seoShareText.includes('href="https://github.com/example/forked-wiki/issues/new?template=graph_correction.yml"'), "runtime share viewers should point correction feedback at the configured repository");
     const literalOriginServer = createAppServer({ publicOrigin: "https://notes.example.test/$release" });
     await new Promise((resolve) => literalOriginServer.listen(0, "127.0.0.1", resolve));
     try {

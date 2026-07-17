@@ -793,6 +793,7 @@ function createDurableStorage(owner, localStorage) {
       pendingKeys.forEach((key) => {
         if (!values.has(key)) enqueueDurableWrite(key, pendingWrites.get(key), () => removeDatabaseValue(database, key), () => fallbackWrite(key, null));
       });
+      notifyStatus();
     } catch (error) {
       hydrationAbandoned = true;
       if (error?.code === "STORAGE_INVALID" && openedDatabase) {

@@ -3,9 +3,9 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
-const helperStart = source.indexOf("const GRAPH_ITEM_HASH_PATTERN");
+const helperStart = source.indexOf("const shareLinkWithFallback");
 const helperEnd = source.indexOf("\nlet lastRenderedGraphState", helperStart);
-assert(helperStart >= 0 && helperEnd > helperStart, "graph item deep-link helpers should remain discoverable");
+assert(helperStart >= 0 && helperEnd > helperStart, "shared link and graph item deep-link helpers should remain discoverable");
 
 const helpers = vm.runInNewContext(`(() => {
   const location = new URL("https://notes.example.test/wiki/?private=discarded#workbench");
@@ -62,6 +62,19 @@ const nativeResult = await nativeHelpers.shareGraphItem("node", "attention");
 assert.equal(nativeResult.mode, "shared", "graph item sharing should use the native share sheet when available");
 assert.equal(nativeShareData?.url, "https://notes.example.test/wiki/#item=node%3Aattention");
 assert.equal(copiedUrl, null, "native graph item sharing should not invoke the clipboard fallback");
+
+let deniedNativeCopiedUrl = null;
+const deniedNativeHelpers = vm.runInNewContext(`(() => {
+  const location = new URL("https://notes.example.test/wiki/");
+  ${source.slice(helperStart, helperEnd)}
+  return { shareGraphItem };
+})()`, {
+  URL,
+  navigator: { share: async () => { throw Object.assign(new Error("share denied"), { name: "NotAllowedError" }); } },
+  copyText: async (value) => { deniedNativeCopiedUrl = value; }
+});
+assert.equal((await deniedNativeHelpers.shareGraphItem("node", "attention")).mode, "copied", "native share permission failures should fall back to the clipboard");
+assert.equal(deniedNativeCopiedUrl, "https://notes.example.test/wiki/#item=node%3Aattention");
 
 let canceledShare = false;
 const canceledHelpers = vm.runInNewContext(`(() => {

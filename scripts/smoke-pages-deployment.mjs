@@ -11,6 +11,7 @@ const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_ATTEMPTS = 12;
 const DEFAULT_RETRY_DELAY_MS = 1000;
 const MANIFEST_FETCH_CONCURRENCY = 4;
+const MAX_SAME_ORIGIN_REDIRECTS = 3;
 const APP_VERSION = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
 
 function boundedPositiveInteger(name, value, fallback, maximum) {
@@ -122,6 +123,27 @@ async function cancelResponseBody(response) {
   } catch {
     // Response cleanup is best-effort and must not mask the probe failure.
   }
+}
+
+async function fetchWithinDeployment(fetchImpl, expectedUrl, base, signal) {
+  let currentUrl = new URL(expectedUrl);
+  for (let redirectCount = 0; redirectCount <= MAX_SAME_ORIGIN_REDIRECTS; redirectCount += 1) {
+    const response = await fetchImpl(currentUrl, { redirect: "manual", signal });
+    const status = Number(response?.status);
+    if (![301, 302, 303, 307, 308].includes(status)) return response;
+    const location = response.headers?.get?.("location");
+    await cancelResponseBody(response);
+    if (!location) throw new Error(`${currentUrl.pathname} returned a redirect without a location`);
+    const redirectedUrl = new URL(location, currentUrl);
+    if (redirectedUrl.username || redirectedUrl.password || !isWithinDeployment(redirectedUrl, base)) {
+      throw new Error(`${currentUrl.pathname} redirected outside the deployment origin`);
+    }
+    if (redirectCount === MAX_SAME_ORIGIN_REDIRECTS) {
+      throw new Error(`${currentUrl.pathname} exceeded the bounded same-origin redirect limit`);
+    }
+    currentUrl = redirectedUrl;
+  }
+  throw new Error("Pages deployment redirect handling failed closed.");
 }
 
 function validManifestPath(path) {
@@ -284,6 +306,16 @@ export async function smokePagesDeployment(deploymentUrl, {
         && /href="https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/new\?template=(?:graph_correction|artifact)\.yml"/.test(body)
     },
     {
+      path: "share.html",
+      contentType: "text/html",
+      validate: (body) => body.includes("Shared knowledge graph")
+        && body.includes(`content="${base.href}share.html"`)
+        && body.includes(`rel="canonical" href="${base.href}share.html"`)
+        && body.includes('id="copy-correction-context"')
+        && body.includes('id="download-share"')
+        && /href="https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/new\?template=graph_correction\.yml"/.test(body)
+    },
+    {
       path: "notes/tokens.html",
       contentType: "text/html",
       validate: (body) => body.includes("Tokens are the interface") && body.includes("script-src 'none'")
@@ -311,7 +343,7 @@ export async function smokePagesDeployment(deploymentUrl, {
         let response;
         let bodyConsumed = false;
         try {
-          const fetchPromise = Promise.resolve().then(() => fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal }));
+          const fetchPromise = Promise.resolve().then(() => fetchWithinDeployment(fetchImpl, expectedUrl, base, controller.signal));
           fetchPromise.then((lateResponse) => {
             if (timedOut) void cancelResponseBody(lateResponse);
           }, () => {});
@@ -356,7 +388,7 @@ export async function smokePagesDeployment(deploymentUrl, {
         let response;
         let bodyConsumed = false;
         try {
-          const fetchPromise = Promise.resolve().then(() => fetchImpl(expectedUrl, { redirect: "follow", signal: controller.signal }));
+          const fetchPromise = Promise.resolve().then(() => fetchWithinDeployment(fetchImpl, expectedUrl, base, controller.signal));
           fetchPromise.then((lateResponse) => {
             if (timedOut) void cancelResponseBody(lateResponse);
           }, () => {});

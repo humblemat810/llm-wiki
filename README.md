@@ -118,8 +118,8 @@ The browser workbench supports:
 - Rechecking connectivity before every remote request in a batch or rebuild,
   preventing a later provider call from starting after the browser disconnects.
 - Explicitly telling users when remote extraction fails that their editable
-  document draft was preserved and can be retried or sent through the local
-  extractor.
+  document draft was preserved, with a one-click retry action or a path to
+  send it through the local extractor.
 - Bounding browser operation diagnostics before they reach batch, vault, or
   rebuild failure summaries.
 - Bounding diagnostics across export, recovery, and global runtime-error
@@ -393,8 +393,18 @@ The browser workbench supports:
 - Filtering large graphs across concepts and relations without changing the
   stored representation.
 - Preserving explicit relation verbs such as “improves,” “preserves,” “reduces,”
-  and “increases” instead of collapsing them into generic co-occurrence edges,
-  including shared-subject multi-clause sentences.
+  “augments,” “retrieves,” and “ranks” instead of collapsing them into generic
+  co-occurrence edges, including shared-subject multi-clause sentences; those
+  verbs are also excluded from adjacent noun-phrase candidates.
+- Recognizing conservative definition statements such as “A tokenizer is a
+  boundary” and “Attention means each token,” so foundational explanations
+  become inspectable concepts and relations instead of sparse or empty graphs.
+- Recognizing common passive technical statements such as “embeddings are
+  stored in a vector index” and “passages are ranked by a reranker,” preserving
+  the useful prepositional relation labels.
+- Preserving causal explanations such as “caching prevents repeated
+  computation” and “retrieval leads to grounded answers” as explicit graph
+  relations.
 - Keeping sparse documents on the same noise-filtered ranking path, so a
   short input does not reintroduce isolated terms beside stronger phrases.
 - Retaining one-off endpoints explicitly named by accepted relation feedback,
@@ -522,6 +532,20 @@ The browser workbench supports:
   source text, evidence quotes, and URIs before sharing.
 - Sharing the redacted Markdown projection through the native file-share
   surface when available, with clipboard and download fallbacks.
+- Copying a bounded recipient-openable `share.html#graph=...` link containing
+  only redacted graph labels and structure; source text, evidence, URIs, and
+  local IDs are excluded, with oversized graphs falling back to HTML export.
+  The recipient page is offline-cacheable, revalidates on server releases, and
+  carries generic social preview metadata and a bounded visual map without
+  embedding graph content, can download the same redacted representation as a
+  versioned JSON handoff, can copy the safe link onward, and offers a
+  correction-context copy action containing only the sanitized share link and
+  public-evidence prompts, plus an explicit fork back into the workbench. The
+  downloaded JSON can also be loaded through
+  the workbench file picker as the same redacted, undoable import.
+  Forking replaces the current workspace only after confirmation, preserves
+  the previous graph through Undo, and removes the import payload from the
+  address bar after handling.
 - Exporting a redacted graph that preserves structure and review state while
   removing source text, evidence quotes, and source URIs for safer sharing.
 - Exporting a redacted HTML snapshot with an accessible, bounded SVG graph
@@ -654,7 +678,9 @@ tie-break rather than file or dataset order.
 - Including those learning pages in Obsidian vault exports and precaching them
   for offline reading.
 - Sharing the public wiki entry point through the native share sheet or a
-  clipboard fallback; local graph data is never placed in the shared URL.
+  clipboard fallback; if a browser exposes but denies native sharing, the same
+  safe link is copied instead, and local graph data is never placed in the
+  shared URL.
 - Keeping note links, Markdown projections, and contribution templates
   copyable when Clipboard API permissions are unavailable by using a bounded
   temporary-textarea fallback.
@@ -665,8 +691,8 @@ tie-break rather than file or dataset order.
   documents; these URLs contain only the stable item identity and never embed
   graph text, evidence, source URIs, or credentials.
 - Sharing those local item links through the native share sheet when available,
-  with a clipboard fallback and generic metadata that does not expose source
-  titles or graph content.
+  with a clipboard fallback—including native-share permission failures—and
+  generic metadata that does not expose source titles or graph content.
 - Publishing the vector share card plus a generated 1200×630 PNG fallback for
   reliable link previews on social platforms and team chat.
 - Publishing machine-readable JSON-LD metadata so search engines can identify
@@ -767,7 +793,8 @@ npm run health -- graph.json --min-provenance 95 --min-fresh-source-review 90 --
 This emits the privacy-safe health contract and exits non-zero when the
 requested quality thresholds are missed.
 Normal verification and tagged releases also run the canonical
-`npm run production:check` gate, which includes `npm run health:sample`, a
+`npm run production:check` gate, which includes the published redacted-share
+fixture verifier and `npm run health:sample`, a
 checked-in self-improvement proof via `npm run learning:check`, and a
 reviewed extraction-quality benchmark via `npm run evaluation:check`, plus a
 checked-in gate for the published sample graph's provenance, evidence
@@ -864,7 +891,8 @@ npm start
 
 To exercise the standalone process locally, including release identity,
 authenticated extraction and metrics, readiness, and graceful SIGTERM
-shutdown, plus a bounded concurrent extraction batch, run:
+shutdown, plus bounded concurrent and one-second duration extraction load
+probes, run:
 
 ```bash
 npm run smoke:server
@@ -915,7 +943,10 @@ requires a different ceiling. Excess work receives HTTP 503 with
 Transient provider failures return HTTP 502 with `Retry-After: 1`, while
 provider timeouts return HTTP 504 with `Retry-After: 5`. Malformed, oversized,
 or schema-incompatible provider output fails closed without a retry hint;
-repeating a deterministic contract violation will not repair it.
+repeating a deterministic contract violation will not repair it. The
+server forwards its bounded `x-request-id` correlation header to the
+configured provider, allowing gateway and provider incidents to be joined
+without putting document metadata into metric labels.
 
 For a zero-code model deployment, configure the built-in
 OpenAI-compatible chat-completions adapter instead of writing a custom
@@ -930,17 +961,30 @@ npm start
 
 `EXTRACTOR_PROVIDER_API_KEY` stays server-side and is never sent to the
 browser. The adapter sends a strict graph-extraction prompt plus bounded
-reviewed guidance, requests JSON mode by default, accepts the returned graph
-only after bounded decoding, and then applies the same provenance and schema
-normalization as the local extractor. Set
+reviewed guidance, requests JSON mode by default, consumes provider responses
+through a bounded stream (including responses without `Content-Length`), and
+then applies the same provenance and schema normalization as the local
+extractor. Set
 `EXTRACTOR_PROVIDER_JSON_MODE=off` for a compatible gateway that does not
 implement `response_format`; the prompt still requires JSON. Set
 `EXTRACTOR_PROVIDER_TIMEOUT_MS` between 100 and 120,000 milliseconds.
+The adapter independently validates and compacts reviewed guidance before
+serialization, so custom integrations cannot forward arbitrary or unbounded
+feedback fields to the provider.
+Provider requests fail closed on HTTP redirects, keeping document content and
+the optional provider credential bound to the configured endpoint, and carry
+`Cache-Control: no-store` so document-bearing requests are not retained by an
+intermediary cache.
+Source URIs remain local provenance and are omitted from model requests by
+default; set `EXTRACTOR_PROVIDER_INCLUDE_SOURCE_URI=true` only when the
+provider must receive them.
 `npm run deployment:check` validates this configuration before traffic.
 
 Without `EXTRACTOR_PROVIDER_URL`, the server intentionally uses the
 transparent local extractor. This keeps local development and offline use
 zero-configuration while making the model boundary explicit for production.
+If any provider setting is present without its URL, startup and
+`npm run deployment:check` fail instead of silently selecting the local lane.
 Set `EXTRACTOR_AUTH_TOKEN` to require a bearer token for extraction requests.
 Loopback development keeps extraction open when it is unset; non-loopback
 server hosts fail extraction closed with HTTP 503 until a token is configured.
@@ -1000,10 +1044,13 @@ privacy-safe Prometheus text counters for total requests, extraction outcomes,
 authentication failures, rate-limited and concurrency-limited requests, and
 in-flight provider work, the configured extractor concurrency ceiling, and
 current rate-limit window occupancy, plus HTTP response status counters and a
-bounded extraction latency histogram; it never includes document content or
-credentials. It also exposes the normalized `TRUST_PROXY_HOPS` value so an
-operator can verify whether forwarded client identity is active. Metrics also
-support bodyless `HEAD` probes and expose
+bounded extraction latency histogram. Extraction failures additionally expose
+fixed-cardinality diagnostic counters by reason, so provider timeouts and
+authentication or request-contract failures can be alerted separately; the
+metrics never include document content or credentials. It also exposes the
+normalized `TRUST_PROXY_HOPS` value so an operator can verify whether
+forwarded client identity is active. Metrics also support bodyless `HEAD`
+probes and expose
 a process-uptime gauge for restart correlation, plus a
 `llm_field_notes_draining` gauge that distinguishes graceful shutdown from
 provider failure. Operational JSON and metrics
@@ -1142,8 +1189,9 @@ test files are included automatically, so a green result cannot silently mean
 locked runtime and development dependencies, generates and validates an SPDX
 dependency inventory, runs `npm run release:check`, builds and verifies a
 fresh Pages artifact, checks the public artifact inventory, audits
-every generated HTML page for accessibility, enforces the critical browser-shell
-performance budget, and re-verifies the final artifact after all tests. It also runs
+local links in the published HTML bundle, audits every generated HTML page for
+accessibility, enforces the critical browser-shell performance budget, and
+re-verifies the final artifact after all tests. It also runs
 `npm run smoke:server`, validating release metadata, the lockfile, workflow
 permissions and pinning, public/offline asset parity, container provenance,
 and the real standalone server lifecycle before Pages or a tagged container
@@ -1201,10 +1249,11 @@ For deployment-specific capacity evidence, `npm run load:server` runs a
 bounded, opt-in probe. It checks `/healthz` by default or authenticated
 `/api/extract-graph` when `EXTRACTOR_AUTH_TOKEN` is supplied, caps requests and
 concurrency, and requires `LOAD_TEST_CONFIRM=I_UNDERSTAND` for non-loopback
-targets. Set `LOAD_TEST_ALLOWED_ORIGIN` to bind a probe to one deployment
-origin; the capacity workflow supplies the repository `PUBLIC_ORIGIN` variable
-when configured. A path-bearing target is preserved when the probe builds its
-health or extraction request. It is an operational sample rather than a
+targets. Set `LOAD_TEST_ALLOWED_ORIGIN` to bind a probe to one exact deployment
+base, including a GitHub Pages project-site path; the capacity workflow
+supplies the repository `PUBLIC_ORIGIN` variable when configured. A path-bearing
+target is preserved when the probe builds its health or extraction request. It
+is an operational sample rather than a
 default CI gate or a replacement for representative browser and sustained-load
 testing.
 
@@ -1252,6 +1301,9 @@ those files as feedback updates rather than new source documents.
 - `tests/` — dependency-free graph and site smoke checks
 - `schema/graph.schema.json` — versioned interchange contract for external tools
 - `schema/feedback.schema.json` — versioned reviewed-example export contract
+- `schema/share.schema.json` — versioned redacted recipient-share contract
+- `scripts/verify-share.mjs` — offline strict verifier for redacted share JSON
+- `examples/sample-share.json` — small public redacted share fixture for the verifier
 - `schema/backup.schema.json` — versioned full-backup restore contract
 - `schema/encrypted-backup.schema.json` — versioned password-encrypted backup envelope
 - `experiments/verify-backup.mjs` — privacy-safe plaintext/encrypted backup verifier
@@ -1382,7 +1434,8 @@ through `EXTRACTOR_PROVIDER_URL`, without changing the graph contract.
 - After GitHub Pages publishes, the workflow runs
   `npm run smoke:pages:deployment` against `PUBLIC_ORIGIN` when configured,
   otherwise the deployment action's final URL. The probe retries bounded CDN
-  propagation and checks the served canonical HTML, `robots.txt`, sitemap,
+  propagation, refuses redirects outside the configured deployment origin, and
+  checks the served canonical HTML, `robots.txt`, sitemap,
   service worker, artifact gallery, sample graph explainer, and a generated
   note page. Run the same
   command locally with

@@ -68,6 +68,7 @@ import { rebuildSources } from "./rebuild-adapter.js";
 import { getBrowserStorage, isExternalStorageRemoval } from "./storage-adapter.js";
 import { buildJsonLd } from "./jsonld-projection.js";
 import { decryptBackup, encryptBackup, isEncryptedBackup, ENCRYPTED_BACKUP_FORMAT, MAX_ENCRYPTED_BACKUP_BYTES, MIN_BACKUP_PASSWORD_CHARS } from "./backup-crypto.js";
+import { buildShareGraph, buildShareUrl, decodeSharePayload, encodeSharePayload, SHARE_FORMAT, validateSharePayload } from "./share-projection.js";
 import { notes, noteDetails } from "./curriculum.js";
 
 const path = [
@@ -277,6 +278,7 @@ if (releaseVersion && typeof releaseInfo.version === "string") {
 }
 const connectionStatus = document.querySelector("#connection-status");
 const retryQueuedFilesButton = document.querySelector("#retry-queued-files");
+const retryBuildButton = document.querySelector("#retry-build");
 let pendingFiles = [];
 let activeExtractionController = null;
 let offlineExtractionCanceled = false;
@@ -285,6 +287,11 @@ const consumeOfflineExtractionCancellation = () => {
   const canceled = offlineExtractionCanceled;
   offlineExtractionCanceled = false;
   return canceled;
+};
+const setRetryBuildAvailable = (available) => {
+  if (!retryBuildButton) return;
+  retryBuildButton.hidden = !available;
+  retryBuildButton.disabled = !available;
 };
 const readDocumentDraftParts = () => [
   document.querySelector("#document-title")?.value || "",
@@ -749,13 +756,11 @@ document.querySelector("#share-wiki").addEventListener("click", async () => {
   };
   const feedback = document.querySelector("#share-status");
   try {
-    if (typeof navigator.share === "function") {
-      await navigator.share(shareData);
-      feedback.textContent = "Share sheet opened.";
-    } else {
-      await copyText(shareUrl.toString());
-      feedback.textContent = "Link copied.";
-    }
+    const shareResult = await shareLinkWithFallback(shareData);
+    if (shareResult.mode === "canceled") return;
+    feedback.textContent = shareResult.mode === "shared"
+      ? "Share sheet opened."
+      : "Share sheet unavailable; link copied.";
   } catch (error) {
     if (error?.name !== "AbortError") feedback.textContent = boundedOperationDiagnostic(error, "Sharing is unavailable in this browser.");
   }
@@ -1151,6 +1156,19 @@ function fitGraphPositions(graph, visibleNodes = getVisibleNodes(graph)) {
   }));
 }
 
+const shareLinkWithFallback = async (shareData) => {
+  if (typeof shareData?.url !== "string" || !shareData.url) throw new TypeError("A share URL is required.");
+  if (typeof navigator.share === "function") {
+    try {
+      await navigator.share(shareData);
+      return { mode: "shared", shareData };
+    } catch (error) {
+      if (error?.name === "AbortError") return { mode: "canceled", shareData };
+    }
+  }
+  await copyText(shareData.url);
+  return { mode: "copied", shareData };
+};
 const GRAPH_ITEM_HASH_PATTERN = /^#item=([^&]+)$/;
 const parseGraphItemHash = (hash = location.hash) => {
   const match = String(hash || "").match(GRAPH_ITEM_HASH_PATTERN);
@@ -1236,17 +1254,7 @@ const buildGraphCorrectionTemplate = (kind, id) => {
 };
 async function shareGraphItem(kind, id) {
   const shareData = buildGraphItemShareData(kind, id);
-  if (typeof navigator.share === "function") {
-    try {
-      await navigator.share(shareData);
-      return { mode: "shared", shareData };
-    } catch (error) {
-      if (error?.name === "AbortError") return { mode: "canceled", shareData };
-      throw error;
-    }
-  }
-  await copyText(shareData.url);
-  return { mode: "copied", shareData };
+  return shareLinkWithFallback(shareData);
 }
 let selectedGraphItem = null;
 let graphItemSelectionFromLocation = false;
@@ -3291,6 +3299,35 @@ document.querySelector("#document-file").addEventListener("change", async (event
         renderFileQueue();
         return;
       }
+      if (imported.format === SHARE_FORMAT) {
+        validateSharePayload(imported);
+        encodeSharePayload(imported);
+        const importedGraph = normalizeGraph(buildShareGraph(imported));
+        if (hasImportIntegrityLoss(importedGraph)) graphStore.captureRecoverySnapshot(text);
+        const currentGraph = graphStore.read();
+        const currentHasContent = currentGraph.nodes.length
+          || currentGraph.edges.length
+          || currentGraph.documents.length
+          || currentGraph.learning?.examples?.length;
+        if (currentHasContent && !window.confirm("Import this redacted shared graph and replace the current workspace? The current graph will remain available through Undo.")) {
+          status.textContent = "Shared graph import canceled; the current graph was kept.";
+          pendingFiles = [];
+          document.querySelector("#document-file").value = "";
+          renderFileQueue();
+          return;
+        }
+        if (!graphStore.write(importedGraph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
+          throw new Error(graphStore.getLastWriteMode() === "conflict"
+            ? "The graph changed in another tab while the shared graph was loading. The import was not written."
+            : "The shared graph could not be saved in this browser.");
+        }
+        renderWorkbench();
+        status.textContent = graphWriteSuccessMessage(`Redacted shared graph imported · ${importedGraph.nodes.length} concept${importedGraph.nodes.length === 1 ? "" : "s"} and ${importedGraph.edges.length} relation${importedGraph.edges.length === 1 ? "" : "s"} restored; source text, evidence, and URIs were not included.`);
+        pendingFiles = [];
+        document.querySelector("#document-file").value = "";
+        renderFileQueue();
+        return;
+      }
       if (imported.schema !== GRAPH_SCHEMA && !LEGACY_GRAPH_SCHEMAS.has(imported.schema)) throw new Error("That JSON file is not an LLM Field Notes graph.");
       if (imported.graphFingerprint !== undefined
         && !matchesGraphFingerprint(imported, imported.graphFingerprint)) {
@@ -3359,6 +3396,7 @@ document.querySelector("#document-file").addEventListener("change", async (event
 });
 async function buildGraphFromInput() {
   void requestPersistentStorage();
+  setRetryBuildAvailable(false);
   const buildSignal = activeBuildController?.signal;
   const ensureBuildActive = () => {
     if (buildSignal?.aborted) throw Object.assign(new Error("Build canceled."), { code: "CANCELED" });
@@ -3658,6 +3696,9 @@ async function buildGraphFromInput() {
       : extractGraph(title, text, { feedback: buildExtractorFeedback(currentGraph, { includeStale: false }), sourceUri });
   } catch (error) {
     const offlineCanceled = consumeOfflineExtractionCancellation();
+    const retryableRemoteFailure = Boolean(remoteExtractor)
+      && (offlineCanceled || ["NETWORK_ERROR", "REMOTE_ERROR", "TIMEOUT"].includes(error?.code));
+    setRetryBuildAvailable(retryableRemoteFailure);
     status.textContent = error?.name === "AbortError" || error?.code === "CANCELED"
       ? offlineCanceled
         ? "Remote build canceled because the browser went offline; your draft and saved graph were preserved."
@@ -3710,6 +3751,11 @@ const rebuildSourcesButton = document.querySelector("#rebuild-sources");
 const documentFileInput = document.querySelector("#document-file");
 retryQueuedFilesButton?.addEventListener("click", () => {
   if (!ingestInFlight) ingestButton.click();
+});
+retryBuildButton?.addEventListener("click", () => {
+  if (ingestInFlight) return;
+  setRetryBuildAvailable(false);
+  ingestButton.click();
 });
 let ingestInFlight = false;
 let sourceReplacementInFlight = false;
@@ -4545,6 +4591,22 @@ document.querySelector("#share-redacted-html").addEventListener("click", async (
     document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The HTML snapshot could not be shared.");
   }
 });
+document.querySelector("#share-redacted-link").addEventListener("click", async () => {
+  try {
+    const shareUrl = buildShareUrl(location, graphStore.read());
+    const shareResult = await shareLinkWithFallback({
+      title: "LLM Field Notes · redacted graph",
+      text: "A bounded, privacy-safe view of an inspectable knowledge graph.",
+      url: shareUrl
+    });
+    if (shareResult.mode === "canceled") return;
+    document.querySelector("#projection-status").textContent = shareResult.mode === "shared"
+      ? "Share link opened; source text, evidence, URIs, and local IDs were excluded."
+      : "Share link copied; source text, evidence, URIs, and local IDs were excluded.";
+  } catch (error) {
+    document.querySelector("#projection-status").textContent = boundedOperationDiagnostic(error, "The graph is too large for a share link; use the redacted HTML export instead.");
+  }
+});
 document.querySelector("#copy-markdown").addEventListener("click", async () => {
   try {
     const graph = graphStore.read();
@@ -4824,6 +4886,41 @@ window.addEventListener("unhandledrejection", (event) => reportRuntimeError(even
 renderWorkbench();
 syncGraphItemFromLocation();
 reconcileBackupCheckpoint();
+
+const importSharedGraphFromLocation = () => {
+  const match = String(location.hash).match(/^#shared=([^&]+)$/u);
+  if (!match) return;
+  const status = document.querySelector("#ingest-status");
+  try {
+    const payload = decodeSharePayload(decodeURIComponent(match[1]));
+    const importedGraph = normalizeGraph(buildShareGraph(payload));
+    const currentGraph = graphStore.read();
+    const hasCurrentContent = currentGraph.nodes.length
+      || currentGraph.edges.length
+      || currentGraph.documents.length
+      || currentGraph.learning?.examples?.length;
+    if (hasCurrentContent && !window.confirm("Fork this shared graph into the workbench and replace the current workspace? The current graph will remain available through Undo.")) {
+      status.textContent = "Shared graph fork canceled; the current graph was kept.";
+      history.replaceState(null, "", `${location.pathname}${location.search}`);
+      return;
+    }
+    const expectedVersion = currentGraph.version;
+    const expectedFingerprint = fingerprintBackup(currentGraph);
+    const expectedHistoryFingerprint = fingerprintBackup(defaultGraph(), graphStore.readHistory());
+    if (!graphStore.write(importedGraph, { expectedVersion, expectedFingerprint, expectedHistoryFingerprint })) {
+      throw new Error(graphStore.getLastWriteMode() === "conflict"
+        ? "The graph changed in another tab while the shared graph was loading."
+        : "The shared graph could not be saved in this browser.");
+    }
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
+    renderWorkbench();
+    status.textContent = graphWriteSuccessMessage(`Shared graph forked · ${importedGraph.nodes.length} concept${importedGraph.nodes.length === 1 ? "" : "s"} and ${importedGraph.edges.length} relation${importedGraph.edges.length === 1 ? "" : "s"} imported. Source text, evidence, and URIs were not included.`);
+  } catch (error) {
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
+    status.textContent = boundedOperationDiagnostic(error, "The shared graph could not be imported.");
+  }
+};
+importSharedGraphFromLocation();
 
 let serviceWorkerManager = null;
 try {

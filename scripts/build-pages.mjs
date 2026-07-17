@@ -177,6 +177,19 @@ function renderOriginAwareArtifactPage(content, origin, repository = DEFAULT_PUB
     .replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
 }
 
+function renderOriginAwareSharePage(content, origin, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  if (!origin && repository === DEFAULT_PUBLIC_REPOSITORY) return content;
+  const rendered = origin
+    ? content
+      .replace('href="./"', () => `href="${origin}/"`)
+      .replace('content="./share.html"', () => `content="${origin}/share.html"`)
+      .replace('content="social-card.png"', () => `content="${origin}/social-card.png"`)
+      .replace('href="./share.html"', () => `href="${origin}/share.html"`)
+    : content;
+  return rendered
+    .replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
+}
+
 function renderRepositoryAwareSecurityTxt(content, repository = DEFAULT_PUBLIC_REPOSITORY) {
   return content.toString("utf8").replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository);
 }
@@ -364,6 +377,13 @@ async function buildPages() {
       throw new Error(`origin-aware artifact gallery exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit`);
     }
     await writeFile(artifactPath, renderedArtifact, "utf8");
+    const sharePath = resolve(buildOutput, "share.html");
+    const share = await readFile(sharePath, "utf8");
+    const renderedShare = renderOriginAwareSharePage(share, publicOrigin, publicRepository);
+    if (Buffer.byteLength(renderedShare) > MAX_STATIC_ASSET_BYTES) {
+      throw new Error(`origin-aware share page exceeds the ${MAX_STATIC_ASSET_BYTES / (1024 * 1024)} MB safety limit`);
+    }
+    await writeFile(sharePath, renderedShare, "utf8");
   }
   const securityPath = resolve(buildOutput, ".well-known/security.txt");
   const security = await readFile(securityPath, "utf8");

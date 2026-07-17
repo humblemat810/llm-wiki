@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 const CACHE_PATTERN = /const CACHE = "(llm-field-notes-v[^"]+)"/;
 const DEPLOYED_CACHE_PATTERN = /^(llm-field-notes-v[^"]+)-([0-9a-f]{16})$/;
 const SHELL_PATTERN = /const APP_SHELL = \[([\s\S]*?)\];/;
+const SHARE_SHELL_PATTERN = /const SHARE_SHELL = \[([\s\S]*?)\];/;
 
 export function readServiceWorkerCacheName(serviceWorker) {
   const match = String(serviceWorker).match(CACHE_PATTERN);
@@ -21,6 +22,21 @@ export function readServiceWorkerShellAssets(serviceWorker) {
   }
   if (!Array.isArray(assets) || assets.some((asset) => typeof asset !== "string")) {
     throw new Error("Service worker APP_SHELL must be a valid JSON string array.");
+  }
+  return assets;
+}
+
+export function readServiceWorkerShareShellAssets(serviceWorker) {
+  const match = String(serviceWorker).match(SHARE_SHELL_PATTERN);
+  if (!match) throw new Error("Service worker is missing its SHARE_SHELL declaration.");
+  let assets;
+  try {
+    assets = JSON.parse(`[${match[1]}]`);
+  } catch {
+    throw new Error("Service worker SHARE_SHELL must be a valid JSON string array.");
+  }
+  if (!Array.isArray(assets) || assets.some((asset) => typeof asset !== "string")) {
+    throw new Error("Service worker SHARE_SHELL must be a valid JSON string array.");
   }
   return assets;
 }

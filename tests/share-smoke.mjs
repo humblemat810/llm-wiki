@@ -4,11 +4,42 @@ import vm from "node:vm";
 import { defaultGraph, inspectGraph, mergeExtraction, extractGraph, redactGraph, fingerprintBackup } from "../graph-core.js";
 
 const source = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const shareViewerSource = fs.readFileSync(new URL("../share.js", import.meta.url), "utf8");
 const shareStart = source.indexOf("async function tryShareFile(");
 const shareEnd = source.indexOf("\nconst browserStorage", shareStart);
 const functionStart = source.indexOf("function buildRedactedGraphVisual(graph");
 const functionEnd = source.indexOf("\nfunction buildFeedbackDataset", functionStart);
 assert(shareStart >= 0 && shareEnd > shareStart && functionStart >= 0 && functionEnd > functionStart && source.includes("function buildRedactedHtmlProjection()"), "share and redacted HTML helpers should remain discoverable");
+const copyValueStart = shareViewerSource.indexOf("const copyTextValue = async");
+const copyValueEnd = shareViewerSource.indexOf("\nconst copyShareLink", copyValueStart);
+assert(copyValueStart >= 0 && copyValueEnd > copyValueStart, "recipient share clipboard helper should remain discoverable");
+
+let fallbackCopied = "";
+let fallbackExecCommands = 0;
+const copyValue = vm.runInNewContext(`(() => {
+  ${shareViewerSource.slice(copyValueStart, copyValueEnd)}
+  return copyTextValue;
+})()`, {
+  navigator: { clipboard: { writeText: async () => { throw new Error("permission denied"); } } },
+  document: {
+    body: { append: () => {} },
+    createElement: () => ({
+      setAttribute: () => {},
+      style: {},
+      select: () => {},
+      remove: () => {},
+      get value() { return fallbackCopied; },
+      set value(value) { fallbackCopied = value; }
+    }),
+    execCommand: (command) => {
+      fallbackExecCommands += command === "copy" ? 1 : 0;
+      return true;
+    }
+  }
+});
+await copyValue("permission-safe correction context");
+assert.equal(fallbackCopied, "permission-safe correction context", "clipboard permission failures should preserve the copied correction context in the textarea fallback");
+assert.equal(fallbackExecCommands, 1, "clipboard permission failures should invoke the bounded copy fallback once");
 
 class FakeFile {
   constructor(parts, name, options) {

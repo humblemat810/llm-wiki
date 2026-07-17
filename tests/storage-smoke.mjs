@@ -262,6 +262,32 @@ const malformedLocalMirrorWithDurableDb = getBrowserStorage({
 await malformedLocalMirrorWithDurableDb.ready;
 assert.equal(malformedLocalMirrorWithDurableDb.durable, true, "a clean IndexedDB should remain usable despite a malformed synchronous mirror");
 assert.equal(malformedLocalMirrorWithDurableDb.storageFailure, true, "a malformed synchronous mirror should remain disclosed alongside durable storage");
+const durableOnlyDatabase = createFakeIndexedDB();
+durableOnlyDatabase.seed("llm-field-notes-knowledge-graph", JSON.stringify({
+  schema: "llm-field-notes/graph@1",
+  version: 4,
+  documents: [{ id: "durable-only", title: "Durable only", text: "Recovered from IndexedDB." }],
+  nodes: [],
+  edges: [],
+  revisions: []
+}));
+const durableOnlyStatus = [];
+const durableOnlyStorage = getBrowserStorage({
+  localStorage: createLocalStorage(),
+  indexedDB: durableOnlyDatabase
+});
+durableOnlyStorage.subscribe((event) => durableOnlyStatus.push(event));
+await durableOnlyStorage.ready;
+assert.equal(durableOnlyStorage.durable, true, "successful IndexedDB hydration should restore durable status");
+assert.equal(
+  JSON.parse(durableOnlyStorage.storage.getItem("llm-field-notes-knowledge-graph")).documents[0].id,
+  "durable-only",
+  "successful hydration should expose durable graph state when the synchronous mirror is empty"
+);
+assert(
+  durableOnlyStatus.some((event) => event.type === "status" && event.durable === true && event.storageFailure === false),
+  "successful hydration should notify subscribers so the workbench can rerender recovered state and durability"
+);
 const crowdedDatabase = createFakeIndexedDB();
 for (let index = 0; index <= MAX_STORAGE_ENTRIES; index += 1) {
   crowdedDatabase.seed(`llm-field-notes-crowded-${index}`, "x");
@@ -790,7 +816,7 @@ durableChannel.subscribe((event) => durableChannelEvents.push(event));
 await durableChannel.ready;
 durableBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: PENDING_WRITES_KEY, value: "{\"forged\":true}" } });
 assert.equal(durableChannel.storage.getItem(PENDING_WRITES_KEY), null, "durable BroadcastChannel updates must ignore the internal pending-write marker");
-assert.equal(durableChannelEvents.length, 0, "ignored pending-write broadcasts must not notify storage subscribers");
+assert.equal(durableChannelEvents.filter((event) => event.type === "change").length, 0, "ignored pending-write broadcasts must not notify storage subscribers as changes");
 durableBroadcastHandler({ data: { format: STORAGE_MESSAGE_FORMAT, key: "llm-field-notes-knowledge-graph", value: { forged: true } } });
 assert.equal(durableChannel.storage.getItem("llm-field-notes-knowledge-graph"), null, "durable BroadcastChannel updates must reject non-string values");
 assert.equal(durableChannelEvents.filter((event) => event.type === "change").length, 0, "rejected BroadcastChannel values must not notify storage subscribers as changes");

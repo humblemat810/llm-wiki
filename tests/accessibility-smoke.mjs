@@ -6,7 +6,7 @@ import { auditHtmlDocument, auditHtmlDirectory } from "../scripts/check-accessib
 
 const root = resolve(new URL("../dist/", import.meta.url).pathname);
 const valid = await auditHtmlDirectory(root);
-assert.equal(valid.files, 17, "the generated Pages bundle should audit every HTML document");
+assert.equal(valid.files, 18, "the generated Pages bundle should audit every HTML document");
 assert(
   auditHtmlDocument("<!doctype html><html><head><title>x</title></head><body><h1>x</h1><img src='x'></body></html>", "missing-alt.html")
     .some((error) => /missing-alt\.html: every img element must declare alt text/.test(error)),

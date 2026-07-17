@@ -30,6 +30,7 @@ const MAX_RATE_LIMIT_KEYS = 10000;
 const RATE_LIMIT_SWEEP_INTERVAL_MS = 1000;
 const MAX_TRUSTED_PROXY_HOPS = 8;
 export const DEFAULT_MAX_CONCURRENT_EXTRACTORS = 8;
+const EXTRACTOR_MODES = new Set(["local-heuristic", "model-provider", "custom"]);
 const MAX_CONCURRENT_EXTRACTORS = 1024;
 const REQUEST_TIMEOUT_MS = 30000;
 const HEADERS_TIMEOUT_MS = 15000;
@@ -40,6 +41,7 @@ const MAX_RUNTIME_TEXT_CHARS = Math.floor(MAX_STATIC_ASSET_BYTES / 4);
 const TEXT_ASSET_EXTENSIONS = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".svg", ".txt", ".webmanifest", ".xml"]);
 const NO_CACHE_STATIC_ASSETS = new Set([
   "index.html",
+  "share.html",
   "artifacts.html",
   "404.html",
   "manifest.webmanifest",
@@ -55,6 +57,32 @@ const DEFAULT_READINESS_TIMEOUT_MS = 5000;
 const MAX_READINESS_TIMEOUT_MS = 30000;
 const HTTP_LATENCY_BUCKETS_MS = [50, 100, 250, 500, 1000, 5000, 30000];
 const EXTRACTION_LATENCY_BUCKETS_MS = [100, 500, 1000, 5000, 30000, 120000];
+const EXTRACTION_FAILURE_CODES = [
+  "CLIENT_ABORT",
+  "ORIGIN_REJECTED",
+  "RATE_LIMITED",
+  "AUTH_NOT_CONFIGURED",
+  "AUTH_REQUIRED",
+  "INVALID_REQUEST",
+  "EXTRACTOR_CAPACITY",
+  "SERVER_DRAINING",
+  "EXTRACTOR_TIMEOUT",
+  "EXTRACTOR_RESPONSE_TOO_LARGE",
+  "EXTRACTOR_FAILURE",
+  "OTHER"
+];
+const EXTRACTION_FAILURE_CODE_ALIASES = new Map([
+  ["EXTRACTOR_TIMEOUT", "EXTRACTOR_TIMEOUT"],
+  ["PROVIDER_TIMEOUT", "EXTRACTOR_TIMEOUT"],
+  ["EXTRACTOR_RESPONSE_TOO_LARGE", "EXTRACTOR_RESPONSE_TOO_LARGE"],
+  ["PROVIDER_RESPONSE_TOO_LARGE", "EXTRACTOR_RESPONSE_TOO_LARGE"],
+  ["EXTRACTOR_INVALID_RESPONSE", "EXTRACTOR_FAILURE"],
+  ["PROVIDER_INVALID_RESPONSE", "EXTRACTOR_FAILURE"],
+  ["PROVIDER_HTTP", "EXTRACTOR_FAILURE"],
+  ["PROVIDER_NETWORK", "EXTRACTOR_FAILURE"],
+  ["PROVIDER_CANCELED", "EXTRACTOR_FAILURE"],
+  ["PROVIDER_INVALID_REQUEST", "INVALID_REQUEST"]
+]);
 const root = fileURLToPath(new URL("./", import.meta.url));
 const types = {
   ".html": "text/html; charset=utf-8",
@@ -407,6 +435,20 @@ function renderOriginAwareArtifactPage(content, origin, repository = DEFAULT_PUB
     .replace('"@id":"./artifacts.html"', () => `"@id":"${origin}/artifacts.html"`)
     .replace('"url":"./artifacts.html"', () => `"url":"${origin}/artifacts.html"`)
     .replace(/"url":"(experiments\/[^"]+)"/g, (_, asset) => `"url":"${origin}/${asset}"`), "utf8");
+}
+
+function renderOriginAwareSharePage(content, origin, repository = DEFAULT_PUBLIC_REPOSITORY) {
+  const source = content.toString("utf8");
+  if (!origin && repository === DEFAULT_PUBLIC_REPOSITORY) return Buffer.from(source, "utf8");
+  const rendered = origin
+    ? source
+      .replace('href="./"', () => `href="${origin}/"`)
+      .replace('content="./share.html"', () => `content="${origin}/share.html"`)
+      .replace('content="social-card.png"', () => `content="${origin}/social-card.png"`)
+      .replace('href="./share.html"', () => `href="${origin}/share.html"`)
+    : source;
+  return Buffer.from(rendered
+    .replaceAll(DEFAULT_PUBLIC_REPOSITORY, repository), "utf8");
 }
 
 function renderRepositoryAwareSecurityTxt(content, repository = DEFAULT_PUBLIC_REPOSITORY) {
@@ -791,7 +833,8 @@ export function createAppServer({
   requireSecurePublicOrigin = false,
   requireBuildRevision = false,
   readinessTimeoutMs = DEFAULT_READINESS_TIMEOUT_MS,
-  trustedProxyHops = 0
+  trustedProxyHops = 0,
+  extractorMode = "custom"
 } = {}) {
   const safeRoot = resolve(staticRoot);
   const learningNoteAssets = discoverLearningNoteAssets(safeRoot);
@@ -845,6 +888,7 @@ export function createAppServer({
     ? Math.min(MAX_READINESS_TIMEOUT_MS, Math.floor(numericReadinessTimeout))
     : DEFAULT_READINESS_TIMEOUT_MS;
   const proxyHops = parseTrustedProxyHops(trustedProxyHops).value;
+  const activeExtractorMode = EXTRACTOR_MODES.has(extractorMode) ? extractorMode : "custom";
   const authToken = typeof extractorAuthToken === "string" ? extractorAuthToken : "";
   const extractorAuthRequired = requireExtractorAuth === true || Boolean(authToken);
   const extractorAuthConfigured = isUsableAuthToken(authToken);
@@ -903,6 +947,7 @@ export function createAppServer({
     extractionRequests: 0,
     extractionSuccesses: 0,
     extractionFailures: 0,
+    extractionFailuresByCode: new Map(EXTRACTION_FAILURE_CODES.map((code) => [code, 0])),
     extractionClientAborts: 0,
     readinessFailures: 0,
     readinessTimeouts: 0,
@@ -913,6 +958,7 @@ export function createAppServer({
     extractionLatencySumMs: 0,
     extractionLatencyCount: 0,
     trustedProxyHops: proxyHops,
+    extractorMode: activeExtractorMode,
     buildRevision: BUILD_REVISION,
     responsesByStatus: new Map()
   };
@@ -933,6 +979,14 @@ export function createAppServer({
     EXTRACTION_LATENCY_BUCKETS_MS.forEach((bucket, index) => {
       if (boundedDuration <= bucket) metrics.extractionLatencyBuckets[index] += 1;
     });
+  };
+  const observeExtractionFailure = (code) => {
+    const normalized = EXTRACTION_FAILURE_CODE_ALIASES.get(code)
+      || (typeof code === "string" && EXTRACTION_FAILURE_CODES.includes(code) ? code : "OTHER");
+    metrics.extractionFailuresByCode.set(
+      normalized,
+      (metrics.extractionFailuresByCode.get(normalized) || 0) + 1
+    );
   };
   const safeLog = (entry) => {
     if (typeof logger !== "function") return;
@@ -1266,6 +1320,9 @@ export function createAppServer({
           "# HELP llm_field_notes_extraction_failures_total Extraction requests that did not return HTTP 200.",
           "# TYPE llm_field_notes_extraction_failures_total counter",
           `llm_field_notes_extraction_failures_total ${metrics.extractionFailures}`,
+          "# HELP llm_field_notes_extraction_failures_by_code_total Extraction failures grouped by a fixed, privacy-safe diagnostic code.",
+          "# TYPE llm_field_notes_extraction_failures_by_code_total counter",
+          ...EXTRACTION_FAILURE_CODES.map((code) => `llm_field_notes_extraction_failures_by_code_total{code="${code}"} ${metrics.extractionFailuresByCode.get(code) || 0}`),
           "# HELP llm_field_notes_extraction_client_aborts_total Extraction requests abandoned by the client before a response could be delivered.",
           "# TYPE llm_field_notes_extraction_client_aborts_total counter",
           `llm_field_notes_extraction_client_aborts_total ${metrics.extractionClientAborts}`,
@@ -1305,6 +1362,9 @@ export function createAppServer({
           "# HELP llm_field_notes_extractor_concurrency_limit Configured maximum provider extraction operations.",
           "# TYPE llm_field_notes_extractor_concurrency_limit gauge",
           `llm_field_notes_extractor_concurrency_limit ${concurrencyLimit}`,
+          "# HELP llm_field_notes_extractor_mode Active extraction implementation (local-heuristic, model-provider, or custom).",
+          "# TYPE llm_field_notes_extractor_mode gauge",
+          `llm_field_notes_extractor_mode{mode="${metrics.extractorMode}"} 1`,
           "# HELP llm_field_notes_build_info Build metadata for the running application.",
           "# TYPE llm_field_notes_build_info gauge",
           `llm_field_notes_build_info{version="${APP_VERSION}"} 1`,
@@ -1392,7 +1452,10 @@ export function createAppServer({
           const durationMs = Date.now() - startedAt;
           observeExtractionLatency(durationMs);
           if (status === 200) metrics.extractionSuccesses += 1;
-          else metrics.extractionFailures += 1;
+          else {
+            metrics.extractionFailures += 1;
+            observeExtractionFailure(logFields.error);
+          }
           extractionOutcomeLogged = true;
           sendJson(response, status, payload, { "x-request-id": requestId, ...extractionRateLimitHeaders, ...extraHeaders });
           safeLog({ requestId, status, durationMs, route: "extract-graph", ...logFields });
@@ -1404,6 +1467,7 @@ export function createAppServer({
           observeExtractionLatency(durationMs);
           metrics.extractionFailures += 1;
           metrics.extractionClientAborts += 1;
+          observeExtractionFailure("CLIENT_ABORT");
           safeLog({ requestId, status: 499, durationMs, route: "extract-graph", error: "REQUEST_ABORTED", ...logFields });
         };
         const rejectForCapacity = () => {
@@ -1430,7 +1494,7 @@ export function createAppServer({
         }
         if (!rateLimits.has(clientKey) && rateLimits.size >= MAX_RATE_LIMIT_KEYS) {
           discardRequestBody(request, response);
-          respondJson(503, { error: "Rate limiter capacity is temporarily exhausted." }, { "retry-after": "60" });
+          respondJson(503, { error: "Rate limiter capacity is temporarily exhausted." }, { "retry-after": "60" }, { error: "OTHER" });
           return;
         }
         const current = rateLimits.get(clientKey);
@@ -1442,7 +1506,7 @@ export function createAppServer({
           discardRequestBody(request, response);
           metrics.rateLimited += 1;
           const retryAfter = Math.max(1, Math.ceil((windowStart + 60000 - now) / 1000));
-          respondJson(429, { error: "Extraction rate limit exceeded." }, { "retry-after": String(retryAfter) });
+          respondJson(429, { error: "Extraction rate limit exceeded." }, { "retry-after": String(retryAfter) }, { error: "RATE_LIMITED" });
           return;
         }
         if (extractorAuthRequired && !extractorAuthConfigured) {
@@ -1459,7 +1523,7 @@ export function createAppServer({
         const requestContentType = String(request.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
         if (requestContentType !== "application/json") {
           discardRequestBody(request, response);
-          respondJson(415, { error: "The extraction endpoint requires application/json." });
+          respondJson(415, { error: "The extraction endpoint requires application/json." }, {}, { error: "INVALID_REQUEST" });
           return;
         }
         if (activeExtractors.size >= concurrencyLimit) {
@@ -1484,7 +1548,7 @@ export function createAppServer({
                 : error?.message === "Request body is not valid UTF-8."
                   ? error.message
                   : "Invalid extraction request body.";
-          respondJson(error?.statusCode || 400, { error: bodyError });
+          respondJson(error?.statusCode || 400, { error: bodyError }, {}, { error: "INVALID_REQUEST" });
           return;
         }
         const document = body?.document;
@@ -1508,11 +1572,11 @@ export function createAppServer({
             : contradictoryFeedback
               ? "Reviewed feedback contains contradictory decisions for the same concept or relation."
               : "Expected the llm-field-notes extract-graph request contract.";
-          respondJson(status, { error });
+          respondJson(status, { error }, {}, { error: "INVALID_REQUEST" });
           return;
         }
         if (document.text.trim().length < 40 || document.text.length > MAX_DOCUMENT_CHARS) {
-          respondJson(400, { error: "Document text must be between 40 and 300,000 characters." });
+          respondJson(400, { error: "Document text must be between 40 and 300,000 characters." }, {}, { error: "INVALID_REQUEST" });
           return;
         }
         if (server.isDraining) {
@@ -1733,6 +1797,8 @@ export function createAppServer({
         ? renderOriginAwareIndex(content, origin, repository)
         : relative === "artifacts.html"
           ? renderOriginAwareArtifactPage(content, origin, repository)
+          : relative === "share.html"
+            ? renderOriginAwareSharePage(content, origin, repository)
           : relative === "sw.js"
             ? renderServiceWorker(content)
           : relative === "version.json"
@@ -1833,8 +1899,10 @@ export function createAppServer({
     responsesByStatus: Object.fromEntries(metrics.responsesByStatus),
     httpLatencyBuckets: [...metrics.httpLatencyBuckets],
     extractionLatencyBuckets: [...metrics.extractionLatencyBuckets],
+    extractionFailuresByCode: Object.fromEntries(metrics.extractionFailuresByCode),
     httpRequestsInFlight: metrics.httpRequestsInFlight,
     extractionsInFlight: activeExtractors.size,
+    extractorMode: activeExtractorMode,
     rateLimitKeys: rateLimits.size,
     rateLimitKeyCapacity: MAX_RATE_LIMIT_KEYS,
     draining: server.isDraining,
@@ -1909,6 +1977,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     requireBuildRevision: productionMode,
     trustedProxyHops,
     extractor: configuredProvider.extractor || undefined,
+    extractorMode: configuredProvider.configuration.configured ? "model-provider" : "local-heuristic",
     logger: (entry) => console.log(JSON.stringify(entry))
   });
   let actualPort = port;

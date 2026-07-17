@@ -5,6 +5,7 @@ const local = checkDeploymentConfig({});
 assert.equal(local.ok, true, "empty configuration should remain valid for loopback development");
 assert.equal(local.mode, "loopback-development");
 assert(local.warnings.some((warning) => warning.includes("EXTRACTOR_AUTH_TOKEN")), "loopback development should disclose open extraction");
+assert(checkDeploymentConfig({ EXTRACTOR_PROVIDER_MODEL: "orphaned-model" }).errors.some((error) => error.includes("EXTRACTOR_PROVIDER_URL")), "partial provider settings should fail deployment preflight");
 assert.equal(checkDeploymentConfig({ PUBLIC_ORIGIN: "http://localhost:8000" }).ok, true, "loopback development should explicitly allow a loopback HTTP origin");
 const proxiedProduction = checkDeploymentConfig({
   HOST: "127.0.0.1",

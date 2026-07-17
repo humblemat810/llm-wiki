@@ -98,7 +98,7 @@ const pagesBuildOutput = execFileSync(process.execPath, ["scripts/build-pages.mj
     PUBLIC_REPOSITORY_URL: "https://github.com/example/forked-wiki"
   }
 });
-assert(pagesBuildOutput.includes("artifact check ok: 20 public cards"), "direct Pages builds should execute the artifact consistency gate");
+assert(pagesBuildOutput.includes("artifact check ok: 21 public cards"), "direct Pages builds should execute the artifact consistency gate");
 execFileSync(process.execPath, ["scripts/verify-pages.mjs", root], {
   stdio: "ignore",
   env: { ...process.env, BUILD_REVISION: "abcdef1234567890", PUBLIC_ORIGIN: "https://wiki.example.test/field-notes" }
@@ -278,6 +278,11 @@ assert(indexText.includes("LLM Field Notes"));
   const artifactsText = await artifacts.text();
   assert(artifactsText.includes("Community artifacts") && artifactsText.includes('property="og:image" content="https://wiki.example.test/field-notes/social-card.png"') && artifactsText.includes('property="og:url" content="https://wiki.example.test/field-notes/artifacts.html"') && artifactsText.includes('rel="canonical" href="https://wiki.example.test/field-notes/artifacts.html"') && artifactsText.includes('"@type":"ItemList"') && artifactsText.includes('"url":"https://wiki.example.test/field-notes/experiments/tiny-bpe.mjs"'), "Pages should publish the shareable artifact gallery with absolute raster social and structured discovery metadata");
   assert(artifactsText.includes('href="https://github.com/example/forked-wiki/fork"') && artifactsText.includes('href="https://github.com/example/forked-wiki/issues/new?template=graph_correction.yml"') && artifactsText.includes('href="https://github.com/example/forked-wiki/issues/new?template=artifact.yml"'), "the published artifact gallery should point fork and contribution links at the configured repository");
+  const sharePage = await fetch(`http://127.0.0.1:${port}/share.html`);
+  const sharePageText = await sharePage.text();
+  assert.equal(sharePage.status, 200);
+  assert(sharePageText.includes('content="https://wiki.example.test/field-notes/social-card.png"') && sharePageText.includes('content="https://wiki.example.test/field-notes/share.html"') && sharePageText.includes('rel="canonical" href="https://wiki.example.test/field-notes/share.html"') && sharePageText.includes('href="https://wiki.example.test/field-notes/"'), "Pages should publish absolute shared-viewer social, canonical, and return-path metadata under nested origins");
+  assert(sharePageText.includes('href="https://github.com/example/forked-wiki/issues/new?template=graph_correction.yml"') && sharePageText.includes('id="copy-correction-context"'), "Pages share viewers should publish the configured correction path and source-free correction handoff");
   const notFound = await fetch(`http://127.0.0.1:${port}/404.html`);
   const notFoundText = await notFound.text();
   assert.equal(notFound.status, 200, "the preview host should expose the generated 404 document as a static asset");

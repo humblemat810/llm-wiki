@@ -33,6 +33,7 @@
     "verify:jsonld": "node experiments/verify-jsonld.mjs",
     "verify:graph": "node experiments/verify-graph.mjs",
     "verify:backup": "node experiments/verify-backup.mjs",
+    "verify:share": "node scripts/verify-share.mjs",
     "verify:diff": "node experiments/verify-diff.mjs",
     "verify:canvas": "node scripts/verify-canvas.mjs examples/sample-graph.canvas",
     "verify:service-health": "node scripts/verify-service-health.mjs examples/sample-service-health.json readiness",
@@ -44,6 +45,7 @@
     "accessibility:check": "node scripts/check-accessibility.mjs",
     "performance:check": "node scripts/check-performance.mjs",
     "artifacts:check": "node scripts/check-artifacts.mjs",
+    "links:check": "node scripts/check-public-links.mjs",
     "security:check": "node scripts/check-security-txt.mjs",
     "backup:smoke": "node tests/backup-crypto-smoke.mjs && node tests/backup-verifier-smoke.mjs",
     "assets:generate": "node scripts/generate-raster-assets.mjs"

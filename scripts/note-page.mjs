@@ -144,7 +144,7 @@ export function buildLearningNotePage({
   const rootUrl = safeOrigin || "..";
   const pageUrl = safeOrigin
     ? new URL(`./notes/${encodeURIComponent(id)}.html`, base).toString()
-    : `./notes/${encodeURIComponent(id)}.html`;
+    : `./${encodeURIComponent(id)}.html`;
   const markdownUrl = safeOrigin
     ? new URL(`./notes/${encodeURIComponent(id)}.md`, base).toString()
     : `./${encodeURIComponent(id)}.md`;

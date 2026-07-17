@@ -111,6 +111,9 @@ The default application is local-first:
 - IndexedDB hydration also enforces aggregate entry and byte ceilings; an
   over-capacity application namespace falls back to synchronous storage instead
   of being fully materialized into memory.
+- Successful IndexedDB hydration emits a durable-status update after state is
+  adopted, so a workbench that started with an empty or stale synchronous
+  mirror cannot remain visibly empty or falsely report degraded durability.
 - Durable writes and cross-tab updates enforce those same aggregate ceilings;
   over-capacity external state is rejected and the previous local value is
   restored when possible.
@@ -169,14 +172,30 @@ The default application is local-first:
   server-side provider request. It is never included in browser configuration,
   graph state, logs, or model prompts. Provider URLs must be credential-free,
   and non-loopback production providers must use HTTPS.
+- Provider settings are a closed configuration group: model, key, timeout,
+  JSON mode, and URI opt-in values without a provider URL fail startup and
+  deployment preflight rather than silently changing the extraction lane.
+- Source URIs are retained in the authoritative local graph but are omitted
+  from server-side model-provider requests by default. The explicit
+  `EXTRACTOR_PROVIDER_INCLUDE_SOURCE_URI=true` opt-in is required before a
+  provider receives those URLs.
 - Model-provider responses are bounded, JSON-only, parsed with duplicate-key
   rejection, and normalized through the same graph/provenance boundary as
-  local extraction. Provider output cannot replace the saved source document
-  or bypass review status.
+  local extraction. Responses are consumed through a bounded stream when the
+  provider omits `Content-Length`, so the 10 MB ceiling is enforced before an
+  oversized body can accumulate in memory. Provider output cannot replace the
+  saved source document or bypass review status.
+- The reference server forwards only its validated UUID request ID as
+  `x-request-id` to the configured provider for incident correlation; arbitrary
+  caller-controlled header values are not forwarded.
+- The provider adapter independently validates and compacts reviewed feedback
+  before serialization, so custom server integrations cannot forward
+  arbitrary feedback fields or unbounded review context to a model.
 - The built-in model prompt labels document text as untrusted source material
   and requests deterministic temperature-zero extraction; instructions inside
-  a document are not treated as operator or system instructions. This reduces
-  prompt-injection influence, but human review remains required for correctness.
+  a document or reviewed label are not treated as operator or system
+  instructions. This reduces prompt-injection influence, but human review
+  remains required for correctness.
 - The production Docker build context excludes local Codex artifacts, so agent
   workspace files are not copied into the published container image.
   Application files are copied with ownership assigned to the non-root `node`
@@ -204,6 +223,9 @@ budget before constructing large export strings.
 The workbench also offers an optional encrypted full-backup export. It uses
 browser Web Crypto AES-GCM with a password-derived PBKDF2-SHA-256 key; the
 password never enters graph storage, the server, or the exported envelope.
+Encryption validates the canonical full-backup envelope before protecting it,
+so an authenticated encrypted artifact cannot contain arbitrary JSON that the
+restore path would later reject.
 Users must keep that password separately because a lost password cannot be
 recovered by the application. Plain full backups remain available for
 interoperability and require the same sensitive-data handling.
@@ -247,9 +269,31 @@ identifying titles from escaping any redacted projection.
 The workbench's native graph-share action sends only the redacted Markdown
 projection; browsers without file sharing receive the same redacted content
 through clipboard or download fallback.
+Native share permission failures on note and local graph-item links also fall
+back to copying the already-sanitized link; an explicit user cancellation does
+not trigger an unexpected copy.
+The bounded recipient-openable graph link uses a URL fragment containing only
+redacted labels and structure with locally remapped IDs; source text, evidence,
+URIs, and original local IDs are excluded, and oversized payloads are rejected
+in favor of the redacted HTML export. URL fragments are not sent in HTTP
+requests by the browser. The recipient's explicit workbench fork reconstructs
+only a redacted graph with fresh share-scoped IDs, asks before replacing a
+non-empty workspace, preserves the prior graph through Undo, and removes the
+fragment from the address bar after handling. The versioned decoder also uses
+the shared duplicate-key-safe, depth-bounded JSON parser and a closed-field
+schema with bounded strings, finite confidence values, unique node IDs, and
+existing relation endpoints, so malformed or hidden payload fields fail before
+rendering or download. The viewer's copy action strips query
+parameters before copying, retaining only the intended origin and fragment.
 Public wiki share links also remove URL credentials and query parameters before
 copying or opening the workbench, so embedded credentials, deployment metadata,
-or session data in the current URL is not carried into a shared link.
+or session data in the current URL is not carried into a shared link. This
+applies to graph-share URLs, recipient re-sharing, and the workbench fork
+return link. The recipient's correction-context action copies only that
+sanitized share URL plus generic privacy and public-evidence prompts; it never
+adds source text, evidence quotes, credentials, or personal data. If a browser
+denies the native Clipboard API, the same bounded text goes through the
+textarea fallback rather than a broader or unbounded export path.
 Source-bearing export controls are associated with a persistent visible and
 accessible warning before users choose a full Markdown, vault, JSON, backup,
 or feedback export.
@@ -421,6 +465,10 @@ capacity remains bounded, and a shared gateway limiter is still required for
 multi-instance deployments. The metrics endpoint exposes the normalized
 trusted-hop count so a deployment can verify that its forwarded-identity
 assumption is active.
+It also exposes fixed-cardinality extraction-failure counters by sanitized
+reason, so operators can distinguish authentication, rate-limit, request
+contract, timeout, and provider failures without receiving document content,
+provider payloads, or unbounded diagnostic labels.
 
 The CodeQL workflow still analyzes pull requests from forks, but disables SARIF
 publication for those runs because fork-provided workflow tokens are read-only.
@@ -437,6 +485,11 @@ silence a telemetry warning.
 
 The reference endpoint intentionally does not accept browser API keys. Keep
 provider credentials in the server-side extraction implementation or proxy.
+Provider requests also disable automatic HTTP redirects, so a misconfigured or
+compromised provider endpoint cannot silently redirect document content or its
+Bearer credential to another host. They also carry `Cache-Control: no-store` to
+reduce retention of document-bearing requests and responses by intermediary
+caches.
 For a simple single-instance deployment, set `EXTRACTOR_AUTH_TOKEN` to require
 an `Authorization: Bearer ...` header on `/api/extract-graph`; the comparison
 is constant-time and the token is never included in logs. This is a useful

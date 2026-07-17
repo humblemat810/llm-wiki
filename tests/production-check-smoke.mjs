@@ -66,6 +66,24 @@ assert.throws(
   /invalid PAGES_EXPECTED_REVISION/,
   "configured deployment checks should reject malformed revisions"
 );
+assert.equal(
+  buildProductionChecks({
+    PUBLIC_ORIGIN: "https://wiki.example.test/field-notes",
+    PAGES_DEPLOYMENT_URL: "https://wiki.example.test/field-notes/",
+    PAGES_EXPECTED_REVISION: "0123456789abcdef"
+  }).at(-1)?.[0],
+  "Verify the exact deployed Pages origin",
+  "equivalent public and deployed origins should be accepted"
+);
+assert.throws(
+  () => buildProductionChecks({
+    PUBLIC_ORIGIN: "https://wiki.example.test/field-notes",
+    PAGES_DEPLOYMENT_URL: "https://stale.example.test/field-notes/",
+    PAGES_EXPECTED_REVISION: "0123456789abcdef"
+  }),
+  /PUBLIC_ORIGIN and PAGES_DEPLOYMENT_URL to identify the same deployment/,
+  "configured deployment checks should reject a probe pointed at a different origin"
+);
 
 let propagatedEnvironment;
 const testEnvironment = { PATH: "/tmp/test-path", PAGES_DEPLOYMENT_URL: "" };

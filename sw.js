@@ -5,7 +5,7 @@ const CACHE_OPERATION_TIMEOUT_MS = 3000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const PRECACHE_CONCURRENCY = 4;
 const PRECACHE_DEADLINE_MS = 60000;
-const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./curriculum.js", "./graph-core.js", "./graph-store.js", "./extractor-adapter.js", "./rebuild-adapter.js", "./projection-adapter.js", "./jsonld-projection.js", "./storage-adapter.js", "./backup-crypto.js", "./evaluation.js", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./icon-512.png", "./social-card.svg", "./social-card.png", "./LICENSE", "./README.md", "./ARCHITECTURE.md", "./CHANGELOG.md", "./llms.txt", "./SECURITY.md", "./RUNBOOK.md", "./PRODUCTION_STATUS.md", "./CONTRIBUTING.md", "./ARTIFACTS.md", "./ARTIFACT_SUBMISSION.md", "./artifacts.html", "./examples/sample-graph.json", "./examples/sample-graph.canvas", "./examples/sample-service-health.json", "./CODE_OF_CONDUCT.md", "./.well-known/security.txt", "./version.json", "./experiments/README.md", "./experiments/bounded-file.mjs", "./experiments/compare-evaluations.mjs", "./experiments/diff-graphs.mjs", "./experiments/evaluate-feedback.mjs", "./experiments/graph-input.mjs", "./experiments/inspect-graph.mjs", "./experiments/learning-loop.mjs", "./experiments/tiny-bpe.mjs", "./experiments/tiny-attention.mjs", "./experiments/tiny-training.mjs", "./experiments/tiny-transformer.mjs", "./experiments/project-jsonld.mjs", "./experiments/verify-jsonld.mjs", "./experiments/verify-graph.mjs", "./experiments/verify-backup.mjs", "./experiments/verify-diff.mjs", "./schema/graph.schema.json", "./schema/feedback.schema.json", "./schema/backup.schema.json", "./schema/encrypted-backup.schema.json", "./schema/diff.schema.json", "./schema/extractor-request.schema.json", "./schema/evaluation.schema.json", "./schema/evaluation-comparison.schema.json", "./schema/health.schema.json", "./schema/jsonld.schema.json", "./schema/canvas.schema.json", "./scripts/verify-canvas.mjs", "./scripts/verify-service-health.mjs", "./schema/service-health.schema.json", "./schema/learning-loop.schema.json", "./schema/vault-manifest.schema.json", "./notes/README.md", "./notes/tokens.md", "./notes/embeddings.md", "./notes/attention.md", "./notes/training.md", "./notes/transformers.md", "./notes/scaling.md", "./notes/inference.md", "./notes/evaluation.md", "./notes/rag.md", "./notes/finetuning.md", "./notes/agents.md", "./notes/production.md", "./notes/knowledge-graphs.md"];
+const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./curriculum.js", "./graph-core.js", "./graph-store.js", "./extractor-adapter.js", "./rebuild-adapter.js", "./projection-adapter.js", "./jsonld-projection.js", "./storage-adapter.js", "./backup-crypto.js", "./evaluation.js", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./icon-512.png", "./social-card.svg", "./social-card.png", "./LICENSE", "./README.md", "./ARCHITECTURE.md", "./CHANGELOG.md", "./llms.txt", "./SECURITY.md", "./RUNBOOK.md", "./PRODUCTION_STATUS.md", "./CONTRIBUTING.md", "./ARTIFACTS.md", "./ARTIFACT_SUBMISSION.md", "./artifacts.html", "./examples/sample-graph.json", "./examples/sample-graph.canvas", "./examples/sample-service-health.json", "./examples/sample-share.json", "./CODE_OF_CONDUCT.md", "./.well-known/security.txt", "./version.json", "./experiments/README.md", "./experiments/bounded-file.mjs", "./experiments/compare-evaluations.mjs", "./experiments/diff-graphs.mjs", "./experiments/evaluate-feedback.mjs", "./experiments/graph-input.mjs", "./experiments/inspect-graph.mjs", "./experiments/learning-loop.mjs", "./experiments/tiny-bpe.mjs", "./experiments/tiny-attention.mjs", "./experiments/tiny-training.mjs", "./experiments/tiny-transformer.mjs", "./experiments/project-jsonld.mjs", "./experiments/verify-jsonld.mjs", "./experiments/verify-graph.mjs", "./experiments/verify-backup.mjs", "./experiments/verify-diff.mjs", "./schema/graph.schema.json", "./schema/feedback.schema.json", "./schema/share.schema.json", "./schema/backup.schema.json", "./schema/encrypted-backup.schema.json", "./schema/diff.schema.json", "./schema/extractor-request.schema.json", "./schema/evaluation.schema.json", "./schema/evaluation-comparison.schema.json", "./schema/health.schema.json", "./schema/jsonld.schema.json", "./schema/canvas.schema.json", "./scripts/verify-canvas.mjs", "./scripts/verify-service-health.mjs", "./scripts/verify-share.mjs", "./schema/service-health.schema.json", "./schema/learning-loop.schema.json", "./schema/vault-manifest.schema.json", "./notes/README.md", "./notes/tokens.md", "./notes/embeddings.md", "./notes/attention.md", "./notes/training.md", "./notes/transformers.md", "./notes/scaling.md", "./notes/inference.md", "./notes/evaluation.md", "./notes/rag.md", "./notes/finetuning.md", "./notes/agents.md", "./notes/production.md", "./notes/knowledge-graphs.md"];
 const REQUIRED_SHELL_ASSETS = new Set([
   "./", "./index.html", "./styles.css", "./app.js", "./curriculum.js",
   "./graph-core.js", "./graph-store.js", "./extractor-adapter.js",
@@ -15,7 +15,9 @@ const REQUIRED_SHELL_ASSETS = new Set([
   "./version.json",
   ...(APP_SHELL.includes("./asset-manifest.json") ? ["./asset-manifest.json"] : [])
 ]);
-const SHELL_PATHS = new Set(APP_SHELL.map((asset) => new URL(asset, self.location).pathname));
+const SHARE_SHELL = ["./share.html", "./share.js", "./share-projection.js"];
+for (const asset of SHARE_SHELL) REQUIRED_SHELL_ASSETS.add(asset);
+const SHELL_PATHS = new Set([...APP_SHELL, ...SHARE_SHELL].map((asset) => new URL(asset, self.location).pathname));
 
 function isShellRequest(request) {
   const url = new URL(request.url);
@@ -197,8 +199,9 @@ async function fetchFresh(request) {
 }
 
 async function precacheShell(cache) {
-  for (let offset = 0; offset < APP_SHELL.length; offset += PRECACHE_CONCURRENCY) {
-    const assets = APP_SHELL.slice(offset, offset + PRECACHE_CONCURRENCY);
+  const shellAssets = [...APP_SHELL, ...SHARE_SHELL];
+  for (let offset = 0; offset < shellAssets.length; offset += PRECACHE_CONCURRENCY) {
+    const assets = shellAssets.slice(offset, offset + PRECACHE_CONCURRENCY);
     await Promise.all(assets.map(async (asset) => {
       try {
         const request = new Request(new URL(asset, self.location), { cache: "no-cache" });

@@ -32,6 +32,12 @@ someone else to try in one sitting.
 
 <!-- Link the note, graph export, pull request, paper, or code. -->
 
+## Privacy check
+
+<!-- Confirm that the shared artifact is safe for a public repository. -->
+
+- [ ] I removed private source text, confidential evidence, credentials, and personal data.
+
 ## Next handle
 
 <!-- What should the next curious person change, compare, or try? -->

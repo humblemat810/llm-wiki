@@ -7,6 +7,7 @@ const packageManifest = JSON.parse(fs.readFileSync(new URL("../package.json", im
 assert.match(source, /const PRECACHE_DEADLINE_MS = 60000;/, "service-worker installation should have an aggregate precache deadline");
 assert.match(source, /withOperationDeadline\(/, "service-worker installation should enforce its aggregate precache deadline");
 assert.match(source, /APP_SHELL\.includes\("\.\/asset-manifest\.json"\)/, "Pages deployments should promote the injected asset manifest to a required shell asset");
+assert.match(source, /const SHARE_SHELL = \["\.\/share\.html", "\.\/share\.js", "\.\/share-projection\.js"\]/, "recipient share assets should have an explicit offline shell");
 const requiredShellSource = source.slice(
   source.indexOf("const REQUIRED_SHELL_ASSETS ="),
   source.indexOf("\nconst SHELL_PATHS =", source.indexOf("const REQUIRED_SHELL_ASSETS ="))
@@ -216,6 +217,9 @@ assert(entries.has(new URL("./storage-adapter.js", location).toString()), "insta
 assert(entries.has(new URL("./evaluation.js", location).toString()), "install should precache the evaluator");
 assert(entries.has(new URL("./SECURITY.md", location).toString()), "install should precache security guidance");
 assert(entries.has(new URL("./social-card.svg", location).toString()), "install should precache the social share card");
+assert(entries.has(new URL("./share.html", location).toString()), "install should precache the recipient share page");
+assert(entries.has(new URL("./share.js", location).toString()), "install should precache the recipient share renderer");
+assert(entries.has(new URL("./share-projection.js", location).toString()), "install should precache the recipient share codec");
 assert(maxPrecacheActive > 1 && maxPrecacheActive <= 4, "shell precaching should use bounded parallelism");
 precacheMode = true;
 precacheFailureAsset = "./notes/tokens.md";

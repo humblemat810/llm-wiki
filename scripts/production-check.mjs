@@ -14,9 +14,11 @@ const baseChecks = [
   ["Validate release metadata and deployment contracts", ["run", "release:check"]],
   ["Verify the published Canvas projection", ["run", "verify:canvas"]],
   ["Verify the published service-health fixture", ["run", "verify:service-health"]],
+  ["Verify the published redacted share fixture", ["run", "verify:share", "--", "examples/sample-share.json"]],
   ["Build the static Pages artifact", ["run", "build:pages"]],
   ["Verify public artifact inventory", ["run", "artifacts:check"]],
   ["Audit generated HTML accessibility", ["run", "accessibility:check", "--", "dist"]],
+  ["Verify generated HTML local links", ["run", "links:check", "--", "dist"]],
   ["Verify critical browser-shell performance budget", ["run", "performance:check", "--", "dist"]],
   ["Verify the static Pages artifact", ["run", "verify:pages"]],
   ["Run the complete test and contract suite", ["test"]],
@@ -28,6 +30,24 @@ const baseChecks = [
   ["Gate the published sample graph", ["run", "health:sample"]],
   ["Verify the final Pages artifact", ["run", "verify:pages"]],
 ];
+
+function normalizeDeploymentUrl(value, name) {
+  let url;
+  try {
+    url = new URL(String(value).trim());
+  } catch {
+    throw Object.assign(new Error(`${name} must be an absolute HTTP(S) URL.`), { exitCode: 1 });
+  }
+  if (!["http:", "https:"].includes(url.protocol)
+    || url.username
+    || url.password
+    || url.search
+    || url.hash) {
+    throw Object.assign(new Error(`${name} must be an HTTP(S) URL without credentials, query, or fragment.`), { exitCode: 1 });
+  }
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
+  return url.toString();
+}
 
 export function buildProductionChecks(environment = process.env) {
   const checks = [...baseChecks];
@@ -43,6 +63,17 @@ export function buildProductionChecks(environment = process.env) {
     }
     if (!/^(?:unknown|[0-9a-f]{7,64})$/i.test(expectedRevision)) {
       throw Object.assign(new Error("production check received an invalid PAGES_EXPECTED_REVISION."), { exitCode: 1 });
+    }
+    const configuredPublicOrigin = typeof environment.PUBLIC_ORIGIN === "string"
+      ? environment.PUBLIC_ORIGIN.trim()
+      : "";
+    if (configuredPublicOrigin
+      && normalizeDeploymentUrl(configuredPublicOrigin, "PUBLIC_ORIGIN")
+        !== normalizeDeploymentUrl(deployedPagesUrl, "PAGES_DEPLOYMENT_URL")) {
+      throw Object.assign(
+        new Error("production check requires PUBLIC_ORIGIN and PAGES_DEPLOYMENT_URL to identify the same deployment."),
+        { exitCode: 1 }
+      );
     }
     checks.push(["Verify the exact deployed Pages origin", ["run", "smoke:pages:deployment"]]);
   }

@@ -83,6 +83,46 @@ await assert.rejects(
 );
 assert.equal(canceledEarlyResponse, true, "Pages deployment smoke should cancel unread bodies after early validation failures");
 
+let redirectRequests = [];
+await assert.rejects(
+  () => smokePagesDeployment("https://wiki.example.test/field-notes/", {
+    attempts: 1,
+    fetchImpl: async (url, options) => {
+      redirectRequests.push({ url: String(url), options });
+      return {
+        ok: false,
+        status: 302,
+        url: String(url),
+        headers: {
+          get: (name) => name === "location" ? "https://outside.example.test/field-notes/" : null
+        },
+        body: { cancel: async () => {} }
+      };
+    }
+  }),
+  /redirected outside the deployment origin/,
+  "Pages deployment smoke should reject redirects outside the configured origin"
+);
+assert.equal(redirectRequests.length, 1, "external redirects should not be followed");
+assert.equal(redirectRequests[0].options.redirect, "manual", "Pages deployment requests should disable automatic redirects");
+
+await assert.rejects(
+  () => smokePagesDeployment("https://wiki.example.test/field-notes/", {
+    attempts: 1,
+    fetchImpl: async () => ({
+      ok: false,
+      status: 302,
+      url: "https://wiki.example.test/field-notes/",
+      headers: {
+        get: (name) => name === "location" ? "https://user:secret@wiki.example.test/field-notes/" : null
+      },
+      body: { cancel: async () => {} }
+    })
+  }),
+  /redirected outside the deployment origin/,
+  "Pages deployment smoke should reject credential-bearing same-origin redirects"
+);
+
 await assert.rejects(
   () => smokePagesDeployment("https://wiki.example.test/field-notes/", {
     attempts: 1,
@@ -172,7 +212,7 @@ try {
   });
   const result = await smokePagesDeployment(`http://127.0.0.1:${port}/field-notes/`, { attempts: 1, expectedRevision: "abcdef1234567890" });
   assert.equal(result.manifestFiles > 0, true);
-  assert.equal(result.endpointChecks >= 13, true, "Pages deployment smoke should retain its critical endpoint checks");
+  assert.equal(result.endpointChecks >= 14, true, "Pages deployment smoke should retain its critical endpoint checks");
   assert.equal(result.checked, result.manifestFiles + result.endpointChecks);
   await assert.rejects(
     () => smokePagesDeployment(`http://127.0.0.1:${port}/field-notes/`, { attempts: 1, expectedRevision: "deadbeef" }),

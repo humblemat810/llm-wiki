@@ -13,6 +13,15 @@ New backups carry a deterministic `graphFingerprint`, bounded `appVersion`
 producer metadata, and at most three undo-history snapshots; older backups
 without either optional field remain readable
 through the browser compatibility path.
+`share.schema.json` is the closed contract for `llm-field-notes/share@1`, the
+source-free recipient projection used by share links, redacted JSON downloads,
+and workbench forks. It bounds concepts, relations, labels, statuses, and
+confidence values; runtime validation additionally requires unique node IDs and
+relation endpoints that resolve to nodes.
+The dependency-free `scripts/verify-share.mjs` command applies the same
+closed-field, duplicate-key, byte, identity, and endpoint checks to a saved
+handoff before another tool consumes it; file and stdin reads stop at the
+verifier's bounded input ceiling before parsing begins.
 The browser, graph-input library, and verification CLI nevertheless require
 the envelope's required fields, compatible history array, past export
 timestamp, and closed top-level metadata contract before normalization.

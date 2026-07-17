@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'unsafe-inline'; script-src 'self'">
+  <meta name="description" content="A bounded, privacy-safe view of an inspectable LLM Field Notes knowledge graph.">
+  <meta property="og:title" content="Shared knowledge graph · LLM Field Notes">
+  <meta property="og:description" content="A bounded, privacy-safe view of an inspectable knowledge graph. Source text, evidence, and URIs stay out of the shared link.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="LLM Field Notes">
+  <meta property="og:url" content="./share.html">
+  <meta property="og:image" content="social-card.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="LLM Field Notes: documents into a living map">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Shared knowledge graph · LLM Field Notes">
+  <meta name="twitter:description" content="A bounded, privacy-safe view of an inspectable knowledge graph.">
+  <meta name="twitter:image" content="social-card.png">
+  <meta name="twitter:image:alt" content="LLM Field Notes: documents into a living map">
+  <link rel="canonical" href="./share.html">
+  <title>Shared knowledge graph · LLM Field Notes</title>
+  <style>
+    :root { color-scheme: light; --ink: #171513; --muted: #6d655e; --line: #ded8d0; --paper: #f7f4ef; --accent: #b84b32; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font: 16px/1.55 system-ui, sans-serif; }
+    main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0 72px; }
+    header { border-bottom: 2px solid var(--ink); padding-bottom: 24px; }
+    .eyebrow { color: var(--accent); font-size: .75rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { font: 700 clamp(2.4rem, 7vw, 5.5rem)/.95 Georgia, serif; letter-spacing: -.05em; margin: 12px 0; }
+    h2 { font: 700 2rem/1.05 Georgia, serif; margin: 0 0 18px; }
+    .lede, .notice, footer { color: var(--muted); }
+    .notice { border-left: 4px solid var(--accent); margin: 24px 0; padding: 12px 16px; background: #fffaf5; }
+    .stats { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); margin: 28px 0 48px; }
+    .stat, section { border: 1px solid var(--line); background: #fffdf9; }
+    .stat { padding: 16px; }
+    .stat span { color: var(--muted); display: block; font-size: .86rem; }
+    .stat strong { display: block; font-size: 1.6rem; }
+    section { margin: 18px 0; padding: 24px; }
+    .graph-map { display: block; width: 100%; height: auto; min-height: 300px; border: 1px solid var(--line); background: #f1ece5; }
+    .graph-map line { stroke: #8a8178; stroke-width: 2; opacity: .8; }
+    .graph-map text { fill: #171513; font: 600 12px ui-monospace, monospace; }
+    .graph-map .graph-map-edge-label { fill: var(--accent); font-size: 10px; }
+    .graph-map circle { fill: var(--accent); stroke: #fffdf9; stroke-width: 2; }
+    .graph-map .graph-map-confidence { fill: #f5d7c9; font-size: 9px; }
+    .map-limit { color: var(--muted); font-size: .86rem; margin: 12px 0 0; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li { border-top: 1px solid var(--line); padding: 12px 0; }
+    li:first-child { border-top: 0; padding-top: 0; }
+    li span { color: var(--muted); display: block; font-size: .86rem; }
+    em { color: var(--accent); font-style: normal; }
+    footer { font-size: .85rem; margin-top: 36px; }
+    a { color: var(--accent); font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">LLM Field Notes · shared projection</div>
+      <h1 id="title">Shared knowledge graph</h1>
+      <p class="lede">A bounded, redacted view of an inspectable internal representation.</p>
+      <p class="notice"><strong>Privacy boundary:</strong> this link contains labels and graph structure only. Source text, evidence, URIs, and local graph IDs are not included.</p>
+    </header>
+    <div class="stats" id="stats" aria-label="Graph summary"></div>
+    <section><h2>Map</h2><svg class="graph-map" id="graph-map" viewBox="0 0 960 560" role="img" aria-label="Shared knowledge graph map"></svg><p class="map-limit" id="map-limit" hidden></p></section>
+    <section><h2>Concepts</h2><ul id="nodes"></ul></section>
+    <section><h2>Relations</h2><ul id="edges"></ul></section>
+    <p><a id="fork-share" href="./" hidden>Fork into your workbench →</a> <a href="https://github.com/humblemat810/llm-wiki/issues/new?template=graph_correction.yml" target="_blank" rel="noopener noreferrer">Suggest a correction ↗</a> <button id="copy-correction-context" type="button">Copy correction context</button> <button id="copy-share-link" type="button">Copy share link</button> <button id="download-share" type="button">Download redacted JSON ↓</button> <span id="share-action-status" role="status" aria-live="polite"></span></p>
+    <p id="error" role="alert" hidden>This share link is unavailable or malformed.</p>
+    <p><a href="./">Open the workbench →</a></p>
+    <footer>Generated by LLM Field Notes. The payload stays in the URL fragment and is not sent to the server.</footer>
+  </main>
+  <script type="module" src="share.js"></script>
+</body>
+</html>

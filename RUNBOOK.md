@@ -23,17 +23,19 @@ For the product boundary and hosted-service gaps, see
    runtime, audits dependencies, builds and independently verifies a fresh
    Pages artifact, then runs the complete test suite, security,
    self-improvement, reviewed extraction-quality, and
+   `npm run verify:share -- examples/sample-share.json` and
    `npm run health:sample` graph-quality gates, then independently re-verifies
    the final Pages artifact immediately before success. Building first is
-   intentional: accessibility and performance checks must inspect the current
-   artifact, not a stale or accidentally pre-existing `dist/` directory. Each
-   child check has a five-minute timeout, so a stalled audit or smoke probe
-   fails with an operator-visible diagnostic instead of hanging the release
-   gate indefinitely.
+   intentional: generated HTML link-integrity, accessibility, and performance
+   checks must inspect the current artifact, not a stale or accidentally
+   pre-existing `dist/` directory. Each child check has a five-minute timeout,
+   so a stalled audit or smoke probe fails with an operator-visible diagnostic
+   instead of hanging the release gate indefinitely.
 6. When changing server startup, authentication, readiness, or shutdown,
    run `npm run smoke:server`. This is the same standalone-process probe used
-   by the Node CI matrix; it also runs bounded concurrent health and
-   authenticated-extraction load probes against the live process.
+by the Node CI matrix; it also runs bounded concurrent health and
+authenticated-extraction load probes against the live process, including a
+one-second duration probe that exercises sustained local pressure.
 7. When changing the Dockerfile, runtime image, or container security policy,
    run `npm run smoke:container`. It builds the local image, verifies
    non-root/revision metadata and runtime exclusions, then probes hardened
@@ -75,7 +77,9 @@ For the product boundary and hosted-service gaps, see
 
    Without these variables, `production:check` proves the locally generated
    artifact and reference server only; it does not claim that a public URL is
-   serving that artifact.
+   serving that artifact. When `PUBLIC_ORIGIN` is also configured, it must
+   identify the same URL as `PAGES_DEPLOYMENT_URL`; this prevents a stale or
+   mistyped deployment target from passing the external smoke check.
 11. For a server release, set `EXTRACTOR_AUTH_TOKEN` and `METRICS_AUTH_TOKEN`
 outside the repository. Use values 16–4,096 characters long without
 surrounding whitespace or control characters. `PORT` defaults to `8000`;
@@ -101,6 +105,13 @@ milliseconds and `EXTRACTOR_PROVIDER_JSON_MODE` accepts `required` (the
 default) or `off`. The deployment preflight validates this configuration,
 requires HTTPS for non-loopback providers, and leaves the deterministic local
 extractor active when `EXTRACTOR_PROVIDER_URL` is unset.
+Source URIs are omitted from model-provider requests by default; set
+`EXTRACTOR_PROVIDER_INCLUDE_SOURCE_URI=true` only after confirming that the
+provider needs provenance URLs and that the deployment's privacy policy allows
+them.
+Partial provider settings without `EXTRACTOR_PROVIDER_URL` fail preflight and
+startup; this prevents an apparently configured deployment from silently using
+the local heuristic.
 
 If the default project URL returns GitHub's 404 page, stop the release:
 enable **Settings → Pages → Source: GitHub Actions**, rerun the publication
@@ -132,8 +143,10 @@ time-based run; otherwise the probe uses a fixed request count. Requests,
 concurrency, duration, response body reads, and latency reporting are bounded
 in the script; fetches and response bodies that ignore cancellation are also
 forced to settle at the probe deadline, with late response bodies canceled
-best-effort. Output includes actual attempts, throughput, failure rate, and
-latency percentiles. To enforce an agreed deployment-specific budget, also set
+best-effort. Output includes the sanitized target and deployment base, actual
+attempts, throughput, failure rate, and latency percentiles; the same
+sanitization applies to programmatic probe callers. To enforce an agreed
+deployment-specific budget, also set
 `LOAD_TEST_MAX_FAILURES` and/or `LOAD_TEST_MAX_P95_MS`; omitted thresholds
 default to zero tolerated failures and no latency threshold. Explicitly
 provided request, concurrency, duration, failure-budget, and p95-budget values
@@ -144,7 +157,7 @@ deployment and provider combination, not as a universal capacity guarantee;
 never aim it at a production endpoint without an agreed traffic budget.
 
 For a repeatable operator-run probe, use the manually dispatched
-`Deployment capacity probe` workflow. Enter the exact HTTPS target,
+`Deployment capacity probe` workflow. Enter the exact HTTPS deployment base,
 `I_UNDERSTAND`, the agreed duration/concurrency, and explicit failure/p95
 budgets. When the repository `PUBLIC_ORIGIN` variable is configured, the
 workflow rejects targets whose origin does not match it; keep that variable
@@ -152,8 +165,10 @@ set to the externally visible deployment origin. The workflow is intentionally
 health-only so a user-entered target cannot receive a repository secret. For
 authenticated extraction capacity, use the protected operator shell above with the target and
 `EXTRACTOR_AUTH_TOKEN` controlled together. A project-site path in the target is
-preserved when the probe constructs its request. The script's hard limits still
-cap traffic at 30 seconds, 64 concurrent requests, and 10,000 attempts.
+preserved when the probe constructs its request. Each run retains the bounded
+probe output for 14 days, including failure diagnostics, so an SLO decision can
+be reviewed after the workflow completes. The script's hard limits still cap
+traffic at 30 seconds, 64 concurrent requests, and 10,000 attempts.
 
 For a versioned release, update `package.json`, `version.json`, and the
 changelog together, set `version.json.channel` to `stable`, commit them, and
@@ -209,13 +224,18 @@ served source revision to match that branch. This keeps manual runs from a
 feature branch from producing a false stale-publication alert. Set the
 repository `PUBLIC_ORIGIN` variable when a custom domain or non-default Pages
 path is used. A failed monitor run indicates that the published site needs
-investigation even when the last deployment was green.
+investigation even when the last deployment was green. The workflow retains
+the bounded probe output as a 14-day artifact on failure, so publication,
+CDN-propagation, activation, and source-revision diagnostics remain available
+after the scheduled run completes.
 The scheduled `Monitor published browser experience` workflow repeats the
 browser smoke matrix daily against that same exact origin and checks the
 served source revision against the repository default branch. Each browser
 probe gets three bounded attempts with a short delay for normal publication
 propagation; the post-deploy release workflow remains strict and does not use
-this monitor tolerance. It is read-only and uses the repository
+this monitor tolerance. Failed browser lanes retain their bounded command log
+and diagnostic screenshots for seven days, which preserves the retry history
+and exact failure context for incident review. It is read-only and uses the repository
 `PUBLIC_ORIGIN` variable or the default GitHub Pages URL.
 
 ## Real-browser certification
@@ -270,6 +290,10 @@ Monitor these endpoints through the trusted gateway:
   local loopback deployment. It includes aggregate HTTP latency and in-flight
   request pressure, plus extraction latency and provider capacity metrics; it
   intentionally avoids document, URI, and client-identity labels.
+  `llm_field_notes_extraction_failures_by_code_total` groups extraction
+  failures into a fixed set of privacy-safe reasons such as
+  `AUTH_REQUIRED`, `RATE_LIMITED`, `EXTRACTOR_TIMEOUT`, and
+  `EXTRACTOR_FAILURE`; use it to route alerts without parsing request logs.
   It also exposes `llm_field_notes_rate_limit_keys` and
   `llm_field_notes_rate_limit_key_capacity`; alert when occupancy approaches
   the ceiling (for example,
@@ -281,6 +305,8 @@ Useful baseline alerts:
 ```promql
 llm_field_notes_draining == 1
 rate(llm_field_notes_extraction_failures_total[5m]) > 0
+rate(llm_field_notes_extraction_failures_by_code_total{code="EXTRACTOR_TIMEOUT"}[5m]) > 0
+rate(llm_field_notes_extraction_failures_by_code_total{code="AUTH_REQUIRED"}[5m]) > 0
 rate(llm_field_notes_rate_limited_total[5m]) > 0
 rate(llm_field_notes_readiness_timeouts_total[5m]) > 0
 rate(llm_field_notes_readiness_failures_total[5m]) > 0
@@ -323,7 +349,11 @@ The service worker’s shell network request has a three-second explicit
 settlement deadline, including environments that ignore abort signals; cached
 offline fallback remains available after that deadline.
 
-Extraction responses expose `RateLimit-Limit`, `RateLimit-Remaining`, and
+The authenticated `/metrics` response exposes
+`llm_field_notes_extractor_mode` so operators can confirm whether the process
+is using the deterministic local heuristic, the configured model provider, or
+a custom injected extractor. Extraction responses expose
+`RateLimit-Limit`, `RateLimit-Remaining`, and
 `RateLimit-Reset` for the process-local budget, plus `Retry-After` when a
 request is rejected. A reverse proxy should still enforce the authoritative
 shared limit for a multi-instance deployment; use these headers to make client

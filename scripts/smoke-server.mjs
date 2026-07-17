@@ -27,14 +27,22 @@ const child = spawn(process.execPath, ["server.mjs"], {
     BUILD_REVISION: revision,
     PUBLIC_ORIGIN: `http://127.0.0.1:${port}`,
     EXTRACTOR_AUTH_TOKEN: extractorToken,
-    METRICS_AUTH_TOKEN: metricsToken
+    METRICS_AUTH_TOKEN: metricsToken,
+    EXTRACTOR_RATE_LIMIT: "10000"
   },
   stdio: ["ignore", "pipe", "pipe"]
 });
 
 let output = "";
+let lifecycleOutput = "";
 const appendOutput = (chunk) => {
-  output = `${output}${String(chunk)}`.slice(-64 * 1024);
+  const text = String(chunk);
+  output = `${output}${text}`.slice(-64 * 1024);
+  if (text.includes('"event":"server-ready"')
+    || text.includes('"event":"server-draining"')
+    || text.includes('"event":"server-stopped"')) {
+    lifecycleOutput = `${lifecycleOutput}${text}`.slice(-8 * 1024);
+  }
 };
 child.stdout.on("data", appendOutput);
 child.stderr.on("data", appendOutput);
@@ -154,6 +162,22 @@ try {
   assert.equal(extractionLoad.statuses["200"], 8, "standalone extraction load should return HTTP 200 for every request");
   assert.equal(extractionLoad.peakInFlight, 4, "standalone extraction load should reach the configured concurrency");
 
+  const sustainedExtractionLoad = await runLoadProbe({
+    config: {
+      url: new URL(`http://127.0.0.1:${port}`),
+      requests: 10000,
+      concurrency: 4,
+      mode: "extract-graph",
+      token: extractorToken,
+      durationMs: 1000,
+      deadlineMs: 10000
+    }
+  });
+  assert.equal(sustainedExtractionLoad.failures.length, 0, "standalone extraction should survive a bounded duration load probe");
+  assert(sustainedExtractionLoad.requests > 0, "duration load probes should complete at least one extraction");
+  assert.equal(sustainedExtractionLoad.targetDurationMs, 1000, "standalone extraction duration probes should preserve their bounded target");
+  assert.equal(sustainedExtractionLoad.failureRate, 0, "standalone extraction duration probes should report no failures");
+
   const concurrentExtractions = await Promise.all(
     Array.from({ length: 4 }, (_, index) => fetchWithTimeout("/api/extract-graph", {
       method: "POST",
@@ -189,9 +213,9 @@ try {
   const [exitCode, signal] = await waitForExit();
   assert.equal(signal, null, "standalone server should exit by signal only after graceful shutdown");
   assert.equal(exitCode, 0, "standalone server should exit successfully after SIGTERM");
-  assert.match(output, /"event":"server-ready"/, "standalone server should log readiness");
-  assert.match(output, /"event":"server-draining"/, "standalone server should log drain start");
-  assert.match(output, /"event":"server-stopped"/, "standalone server should log graceful stop");
+  assert.match(lifecycleOutput, /"event":"server-ready"/, "standalone server should log readiness");
+  assert.match(lifecycleOutput, /"event":"server-draining"/, "standalone server should log drain start");
+  assert.match(lifecycleOutput, /"event":"server-stopped"/, "standalone server should log graceful stop");
   console.log("standalone server smoke ok");
 } catch (error) {
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");

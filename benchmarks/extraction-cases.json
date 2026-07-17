@@ -32,6 +32,21 @@
       }
     },
     {
+      "id": "ungrounded-feedback",
+      "title": "Grounded note",
+      "text": "A tokenizer maps text to integers.",
+      "feedback": [
+        { "kind": "concept", "id": "unseen-mechanism", "label": "unseen mechanism", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "noise", "label": "noise", "status": "rejected", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 0,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 0,
+        "rejectedSuppressionRate": 1
+      }
+    },
+    {
       "id": "non-latin",
       "title": "Multilingual notes",
       "text": "注意 机制 保留 上下文 信息，并且 注意 机制 使用 上下文。",
@@ -80,6 +95,81 @@
         "reviewedPrecision": 1,
         "evidenceCoverage": 1,
         "rejectedSuppressionRate": 1
+      }
+    },
+    {
+      "id": "pipeline-verb-coverage",
+      "title": "Retrieval pipeline",
+      "text": "# Retrieval pipeline\nRetrieval augments generation. The retriever retrieves documents, and the reranker ranks candidates. Retrieval augments generation for grounded answers.",
+      "feedback": [
+        { "kind": "concept", "id": "retrieval", "label": "retrieval", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "generation", "label": "generation", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "retriever", "label": "retriever", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "documents", "label": "documents", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "reranker", "label": "reranker", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "candidates", "label": "candidates", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "retrieval--generation--augments", "source": "retrieval", "target": "generation", "sourceLabel": "retrieval", "targetLabel": "generation", "label": "augments", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "retriever--documents--retrieves", "source": "retriever", "target": "documents", "sourceLabel": "retriever", "targetLabel": "documents", "label": "retrieves", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "reranker--candidates--ranks", "source": "reranker", "target": "candidates", "sourceLabel": "reranker", "targetLabel": "candidates", "label": "ranks", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1
+      }
+    },
+    {
+      "id": "definition-structure",
+      "title": "Definitions",
+      "text": "A tokenizer is a boundary between text and integers. Attention means each token can use context for representation.",
+      "feedback": [
+        { "kind": "concept", "id": "tokenizer", "label": "tokenizer", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "boundary", "label": "boundary", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "attention", "label": "attention", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "token", "label": "token", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "tokenizer--boundary--is", "source": "tokenizer", "target": "boundary", "sourceLabel": "tokenizer", "targetLabel": "boundary", "label": "is", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "attention--token--means", "source": "attention", "target": "token", "sourceLabel": "attention", "targetLabel": "token", "label": "means", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1
+      }
+    },
+    {
+      "id": "passive-structure",
+      "title": "Indexed retrieval",
+      "text": "Embeddings are stored in a vector index. Retrieved passages are ranked by the reranker.",
+      "feedback": [
+        { "kind": "concept", "id": "embeddings", "label": "embeddings", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "vector-index", "label": "vector index", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "retrieved-passages", "label": "retrieved passages", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "reranker", "label": "reranker", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "embeddings--vector-index--stored-in", "source": "embeddings", "target": "vector-index", "sourceLabel": "embeddings", "targetLabel": "vector index", "label": "stored in", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "retrieved-passages--reranker--ranked-by", "source": "retrieved-passages", "target": "reranker", "sourceLabel": "retrieved passages", "targetLabel": "reranker", "label": "ranked by", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1
+      }
+    },
+    {
+      "id": "causal-structure",
+      "title": "Causal retrieval",
+      "text": "Caching prevents repeated computation. Retrieval leads to grounded answers.",
+      "feedback": [
+        { "kind": "concept", "id": "caching", "label": "caching", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "repeated-computation", "label": "repeated computation", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "retrieval", "label": "retrieval", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "concept", "id": "grounded-answers", "label": "grounded answers", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "caching--repeated-computation--prevents", "source": "caching", "target": "repeated-computation", "sourceLabel": "caching", "targetLabel": "repeated computation", "label": "prevents", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" },
+        { "kind": "relation", "id": "retrieval--grounded-answers--leads-to", "source": "retrieval", "target": "grounded-answers", "sourceLabel": "retrieval", "targetLabel": "grounded answers", "label": "leads to", "status": "accepted", "lastReviewedAt": "2026-07-14T00:00:00.000Z" }
+      ],
+      "minimum": {
+        "acceptedRecall": 1,
+        "reviewedPrecision": 1,
+        "evidenceCoverage": 1
       }
     }
   ]
