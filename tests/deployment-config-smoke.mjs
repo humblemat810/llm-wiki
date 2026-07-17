@@ -7,6 +7,19 @@ assert.equal(local.mode, "loopback-development");
 assert(local.warnings.some((warning) => warning.includes("EXTRACTOR_AUTH_TOKEN")), "loopback development should disclose open extraction");
 assert(checkDeploymentConfig({ EXTRACTOR_PROVIDER_MODEL: "orphaned-model" }).errors.some((error) => error.includes("EXTRACTOR_PROVIDER_URL")), "partial provider settings should fail deployment preflight");
 assert.equal(checkDeploymentConfig({ PUBLIC_ORIGIN: "http://localhost:8000" }).ok, true, "loopback development should explicitly allow a loopback HTTP origin");
+const staticPages = checkDeploymentConfig({
+  DEPLOYMENT_MODE: "static-pages",
+  PUBLIC_ORIGIN: "https://humblemat810.github.io/llm-wiki/",
+  PUBLIC_REPOSITORY_URL: "https://github.com/example/field-notes",
+  BUILD_REVISION: "abcdef1234567890"
+});
+assert.equal(staticPages.ok, true, "static Pages publication should not require server authentication secrets");
+assert.equal(staticPages.mode, "static-pages");
+assert(checkDeploymentConfig({
+  DEPLOYMENT_MODE: "static-pages",
+  BUILD_REVISION: "abcdef1234567890"
+}).errors.some((error) => error.includes("PUBLIC_ORIGIN")), "static Pages publication should require an HTTPS public origin");
+assert(checkDeploymentConfig({ DEPLOYMENT_MODE: "unknown" }).errors.some((error) => error.includes("DEPLOYMENT_MODE")), "unknown deployment modes should fail closed");
 const proxiedProduction = checkDeploymentConfig({
   HOST: "127.0.0.1",
   PUBLIC_ORIGIN: "https://wiki.example.test",

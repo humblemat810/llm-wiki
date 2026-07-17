@@ -50,6 +50,7 @@ jobs:
           fi
       - name: Run canonical production gate
         env:
+          DEPLOYMENT_MODE: static-pages
           PUBLIC_ORIGIN: ${{ vars.PUBLIC_ORIGIN || steps.pages.outputs.base_url }}
           PUBLIC_REPOSITORY_URL: https://github.com/${{ github.repository }}
           BUILD_REVISION: ${{ github.sha }}

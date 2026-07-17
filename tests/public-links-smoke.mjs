@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { checkPublicLinks, discoverHtmlSources, extractLocalHtmlReferences } from "../scripts/check-public-links.mjs";
 
@@ -21,6 +21,22 @@ try {
   await writeFile(resolve(root, "index.html"), '<a href="./present.txt">present</a><a href="./sample-graph.html">generated</a>', "utf8");
   await writeFile(resolve(root, "present.txt"), "ok", "utf8");
   await checkPublicLinks({ root, sources: ["index.html"] });
+  await assert.rejects(
+    () => checkPublicLinks({
+      root,
+      sources: ["index.html"],
+      publishedTargets: new Set(["index.html", "present.txt"])
+    }),
+    /not in the published asset allowlist/,
+    "public link checks should reject existing but unpublished local targets"
+  );
+  await symlink("present.txt", resolve(root, "linked.txt"));
+  await writeFile(resolve(root, "index.html"), '<a href="./linked.txt">linked</a>', "utf8");
+  await assert.rejects(
+    () => checkPublicLinks({ root, sources: ["index.html"] }),
+    /must not be a symbolic link/,
+    "public link checks should reject symlinked local targets"
+  );
   await writeFile(resolve(root, "nested.html"), '<a href="./present.txt">present</a>', "utf8");
   assert.deepEqual(await discoverHtmlSources(root), ["index.html", "nested.html"], "HTML source discovery should be deterministic");
 

@@ -19,6 +19,9 @@ For the product boundary and hosted-service gaps, see
    variables. It validates the complete non-loopback security and identity
    boundary before traffic or provider calls begin; loopback development
    reports warnings for intentionally open optional endpoints.
+   The Pages publication workflow sets `DEPLOYMENT_MODE=static-pages`, which
+   validates the static HTTPS origin and source revision without requiring
+   server-only extractor and metrics secrets.
 5. Run `npm run production:check`. This first verifies the supported Node
    runtime, audits dependencies, builds and independently verifies a fresh
    Pages artifact, then runs the complete test suite, security,

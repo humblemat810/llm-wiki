@@ -103,7 +103,8 @@ if (JSON.stringify(manifestPaths) !== JSON.stringify(sortedManifestPaths)) {
 }
 await checkPublicLinks({
   root: outputRealPath,
-  sources: outputFiles.filter((asset) => asset.endsWith(".html"))
+  sources: outputFiles.filter((asset) => asset.endsWith(".html")),
+  publishedTargets: new Set(outputFiles)
 });
 const robotsFile = await resolveContainedFile(resolve(outputRealPath, "robots.txt"), "Pages robots policy");
 const robotsText = await readFile(robotsFile.fileRealPath, "utf8");

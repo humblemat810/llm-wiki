@@ -1288,6 +1288,7 @@ those files as feedback updates rather than new source documents.
 - `experiments/` — small dependency-free runnable learning artifacts (see [experiments/README.md](experiments/README.md))
 - `server.mjs` — optional same-origin static server and extraction contract example
 - `scripts/check-deployment-config.mjs` — fail-closed deployment environment preflight
+- `scripts/check-public-links.mjs` — published-asset-aware HTML link and symlink boundary check
 - `scripts/note-page.mjs` — shared crawler-readable learning-note page renderer
 - `manifest.webmanifest` / `sw.js` — installable, cacheable static deployment
   with explicit 192px and 512px raster app icons
@@ -1395,8 +1396,10 @@ through `EXTRACTOR_PROVIDER_URL`, without changing the graph contract.
   Actions** as the build and deployment source, and run the workflow from the
   Actions tab. The workflow publishes the generated `dist/` bundle rather than
   the repository root, so server code, tests, container files, and local project
-  metadata stay out of the public artifact. The repository cannot enable the
-  Pages setting through source files alone.
+  metadata stay out of the public artifact. Its static-publication preflight
+  validates the HTTPS origin and source revision without requiring the optional
+  server extractor/metrics secrets. The repository cannot enable the Pages
+  setting through source files alone.
 - For a custom domain or non-default project path, set the repository
   `PUBLIC_ORIGIN` variable to the exact externally visible HTTPS origin before
   running the workflow. The deployment and browser-monitor workflows otherwise

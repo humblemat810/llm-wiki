@@ -4,6 +4,17 @@ import { fileURLToPath } from "node:url";
 
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 export const CHECK_TIMEOUT_MS = 5 * 60 * 1000;
+const LOCAL_CHECK_LABELS = new Set([
+  "Run the complete test and contract suite",
+  "Smoke the standalone server lifecycle"
+]);
+const STATIC_PUBLICATION_VARIABLES = [
+  "DEPLOYMENT_MODE",
+  "PUBLIC_ORIGIN",
+  "PUBLIC_REPOSITORY_URL",
+  "PAGES_DEPLOYMENT_URL",
+  "PAGES_EXPECTED_REVISION"
+];
 const baseChecks = [
   ["Verify the supported Node runtime", ["run", "runtime:check"]],
   ["Validate deployment configuration", ["run", "deployment:check"]],
@@ -80,6 +91,15 @@ export function buildProductionChecks(environment = process.env) {
   return checks;
 }
 
+export function environmentForProductionCheck(label, environment = process.env) {
+  if (environment.DEPLOYMENT_MODE !== "static-pages" || !LOCAL_CHECK_LABELS.has(label)) {
+    return environment;
+  }
+  const localEnvironment = { ...environment };
+  for (const variable of STATIC_PUBLICATION_VARIABLES) delete localEnvironment[variable];
+  return localEnvironment;
+}
+
 export function runProductionCheck(label, args, {
   command = npmCommand,
   timeoutMs = CHECK_TIMEOUT_MS,
@@ -90,7 +110,7 @@ export function runProductionCheck(label, args, {
   log(`\n==> ${label}`);
   const result = spawn(command, args, {
     cwd: process.cwd(),
-    env: environment,
+    env: environmentForProductionCheck(label, environment),
     stdio: "inherit",
     timeout: timeoutMs,
     killSignal: "SIGTERM"

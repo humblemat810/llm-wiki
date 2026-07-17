@@ -43,6 +43,16 @@ All notable changes to LLM Field Notes are documented here.
 - Add the same interactive workbench and runnable-artifact entry points to the
   durable notes index, preserving discovery paths for readers arriving through
   the learning map.
+- Add an explicit closure checklist that separates repository engineering
+  completion from GitHub Pages activation, deployed browser certification, and
+  future hosted multi-user work.
+- Make HTML link verification reject existing but unpublished targets and
+  symlink escapes, so a green release check reflects the actual Pages asset
+  allowlist.
+- Give the Pages workflow an explicit `static-pages` deployment preflight so
+  static publication does not require unrelated server authentication secrets.
+- Keep static-publication origin variables out of local behavioral and server
+  smoke checks, preventing Pages metadata from changing local HTTP assertions.
 - Make the Pages deployment verifier follow only bounded, manually validated
   same-origin redirects, preventing a misconfigured target from sending CI
   probes to an unrelated host.

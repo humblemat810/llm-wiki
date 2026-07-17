@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   CHECK_TIMEOUT_MS,
   buildProductionChecks,
+  environmentForProductionCheck,
   runProductionCheck,
   runProductionChecks
 } from "../scripts/production-check.mjs";
@@ -46,6 +47,24 @@ assert.throws(
 );
 
 assert.equal(CHECK_TIMEOUT_MS, 5 * 60 * 1000);
+const staticPublicationEnvironment = {
+  DEPLOYMENT_MODE: "static-pages",
+  PUBLIC_ORIGIN: "https://wiki.example.test/field-notes",
+  PUBLIC_REPOSITORY_URL: "https://github.com/example/field-notes",
+  BUILD_REVISION: "abcdef1234567890",
+  PAGES_DEPLOYMENT_URL: "https://wiki.example.test/field-notes/",
+  PAGES_EXPECTED_REVISION: "abcdef1234567890"
+};
+assert.equal(
+  environmentForProductionCheck("Run the complete test and contract suite", staticPublicationEnvironment).PUBLIC_ORIGIN,
+  undefined,
+  "static publication variables should not contaminate local behavioral tests"
+);
+assert.equal(
+  environmentForProductionCheck("Build the static Pages artifact", staticPublicationEnvironment).PUBLIC_ORIGIN,
+  staticPublicationEnvironment.PUBLIC_ORIGIN,
+  "static publication variables should remain available to Pages build checks"
+);
 assert(
   buildProductionChecks({
     PAGES_DEPLOYMENT_URL: "https://wiki.example.test/",

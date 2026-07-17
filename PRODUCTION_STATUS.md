@@ -18,7 +18,7 @@ tenant isolation, cloud graph storage, billing, or hosted backup retention.
 | Optional extraction gateway | Ready for a protected single instance | pre-traffic `npm run deployment:check`, authenticated readiness, bounded requests, rate/concurrency limits, streamed provider-response ceiling enforcement (including absent `Content-Length`), provider HTTP smoke, built-in server-side OpenAI-compatible model adapter |
 | Model-provider privacy boundary | Ready for protected single-instance use | provider credentials remain server-side; source URIs are opt-in; requests disable automatic redirects and intermediary caching; bounded response decoding and structured-output normalization are covered by provider smoke tests |
 | Standalone server lifecycle | Ready for the reference process contract | `npm run smoke:server` covers build identity, liveness/readiness, auth success/rejection, bounded concurrent and one-second duration extraction load, and graceful drain |
-| Static public wiki | Ready for publication | shared Node/Pages asset contract, required deployed asset manifest, exact manifest/digest verification, generated-bundle local-link integrity, accessibility/performance gates, and deployment probe |
+| Static public wiki | Ready for publication | dedicated static-pages preflight, shared Node/Pages asset contract, required deployed asset manifest, exact manifest/digest verification, published-asset-aware HTML link and symlink checks, accessibility/performance gates, and deployment probe |
 | Live default Pages deployment | Blocked by external configuration | A direct probe on July 17, 2026 returned HTTP 404 from `https://humblemat810.github.io/llm-wiki/`; enable GitHub Pages with the Actions source, run the publication workflow, and pass `npm run smoke:pages:deployment` before calling the public URL production |
 | Container runtime | Ready for a hardened single instance | `npm run smoke:container` proves non-root, read-only filesystem, capability drop, readiness, health, auth, and drain behavior |
 | Supply-chain evidence | Ready | deterministic SPDX SBOM, parsed workflow/permission checks, immutable action pins, and GitHub artifact attestations for Pages/release manifests |
@@ -58,6 +58,24 @@ PAGES_DEPLOYMENT_URL=https://humblemat810.github.io/llm-wiki/ \
 PAGES_EXPECTED_REVISION="$(git rev-parse HEAD)" \
 npm run smoke:pages:deployment
 ```
+
+## Closure checklist
+
+The repository engineering phase can close for the supported single-instance
+contract when a release-candidate commit passes the clean Node 22
+`npm run production:check` gate and the resulting artifact and evidence are
+reviewed. A public launch is a separate external step:
+
+1. Set GitHub Pages to **GitHub Actions** and run the publication workflow.
+2. Run the exact-origin Pages smoke with `PAGES_DEPLOYMENT_URL` and
+   `PAGES_EXPECTED_REVISION`.
+3. Run the deployed Chromium, Firefox, and WebKit browser smoke.
+4. Record the deployed URL, source revision, and any environment-specific
+   capacity evidence in the release record.
+
+Until those checks pass, do not call the public URL production. Hosted
+multi-user work remains future scope and should begin only after an explicit
+identity, tenancy, storage, and retention design.
 
 ## Remaining product work
 

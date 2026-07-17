@@ -7,7 +7,7 @@ import { readServiceWorkerShellAssets } from "./service-worker-cache.mjs";
 import { buildSampleGraphCanvas } from "./sample-graph-canvas.mjs";
 import { verifyCanvasProjection } from "./verify-canvas.mjs";
 import { checkWorkflows } from "./check-workflows.mjs";
-import { checkPublicLinks } from "./check-public-links.mjs";
+import { checkPublicLinks, GENERATED_HTML_TARGETS } from "./check-public-links.mjs";
 
 const packageManifest = parseJsonWithUniqueKeys(await readFile(new URL("../package.json", import.meta.url), "utf8"), "package.json");
 const packageLock = parseJsonWithUniqueKeys(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"), "package-lock.json");
@@ -50,7 +50,10 @@ const checkPngDimensions = async (asset, width, height) => {
     throw new Error(`${asset} must be a valid ${width}×${height} PNG`);
   }
 };
-await checkPublicLinks({ root: rootRealPath });
+await checkPublicLinks({
+  root: rootRealPath,
+  publishedTargets: new Set([...PUBLIC_ASSETS, ...GENERATED_PUBLIC_ASSETS, ...GENERATED_HTML_TARGETS])
+});
 const localLlmsLinks = [...llms.matchAll(/\]\(([^)]+)\)/g)]
   .map((match) => match[1].trim())
   .filter((target) => target.startsWith("./"));
