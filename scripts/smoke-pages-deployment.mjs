@@ -48,12 +48,15 @@ function normalizeDeploymentOrigin(value) {
   return url;
 }
 
-async function readBoundedBody(response, signal = null) {
+export async function readBoundedBody(response, signal = null) {
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_RESPONSE_BYTES)) {
     throw new Error(`response is larger than the ${MAX_RESPONSE_BYTES}-byte smoke-test limit`);
   }
-  const expectedLength = declaredLength === null ? null : Number(declaredLength);
+  const contentEncoding = (response.headers.get("content-encoding") || "").trim().toLowerCase();
+  const expectedLength = declaredLength === null || (contentEncoding && contentEncoding !== "identity")
+    ? null
+    : Number(declaredLength);
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
   const chunks = [];
@@ -256,7 +259,7 @@ export async function smokePagesDeployment(deploymentUrl, {
     },
     {
       path: "sw.js",
-      contentType: "text/javascript",
+      contentType: ["text/javascript", "application/javascript"],
       validate: (body) => body.includes("./asset-manifest.json") && body.includes('const CACHE = "llm-field-notes-v')
     },
     {

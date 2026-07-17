@@ -19,7 +19,7 @@ tenant isolation, cloud graph storage, billing, or hosted backup retention.
 | Model-provider privacy boundary | Ready for protected single-instance use | provider credentials remain server-side; source URIs are opt-in; requests disable automatic redirects and intermediary caching; bounded response decoding and structured-output normalization are covered by provider smoke tests |
 | Standalone server lifecycle | Ready for the reference process contract | `npm run smoke:server` covers build identity, liveness/readiness, auth success/rejection, bounded concurrent and one-second duration extraction load, and graceful drain |
 | Static public wiki | Ready for publication | dedicated static-pages preflight, shared Node/Pages asset contract, required deployed asset manifest, exact manifest/digest verification, published-asset-aware HTML link and symlink checks, accessibility/performance gates, and deployment probe |
-| Live default Pages deployment | Blocked by external configuration | A direct probe on July 17, 2026 returned HTTP 404 from `https://humblemat810.github.io/llm-wiki/`; enable GitHub Pages with the Actions source, run the publication workflow, and pass `npm run smoke:pages:deployment` before calling the public URL production |
+| Live default Pages deployment | Deployed; workflow verifier fix pending rerun | On July 17, 2026, the public origin served revision `8e6852e6bc4b9b6b2605980bbc67eba28c90c1b9`; the corrected local `npm run smoke:pages:deployment` passed 123 checks against it. The publication workflow for that revision failed before this verifier fix because GitHub Pages transparently gzip-decodes responses and serves `sw.js` as `application/javascript`; push the verifier fix and rerun publication before calling the workflow green |
 | Container runtime | Ready for a hardened single instance | `npm run smoke:container` proves non-root, read-only filesystem, capability drop, readiness, health, auth, and drain behavior |
 | Supply-chain evidence | Ready | deterministic SPDX SBOM, parsed workflow/permission checks, immutable action pins, and GitHub artifact attestations for Pages/release manifests |
 | Supported Node compatibility | Verified for current worktree | On July 17, 2026, the full `npm test` suite passed on Node 24; the canonical Node 22 production gate also passes, matching the CI runtime matrix |
@@ -48,11 +48,11 @@ smoke probe to pass. For the reference server, use TLS at the gateway,
 configure both authentication secrets, enforce gateway identity/CSRF policy,
 and monitor `/livez`, `/readyz`, and authenticated `/metrics`.
 
-The repository cannot enable GitHub Pages through source files. Until the
-repository Settings → Pages source is set to **GitHub Actions** and a
-publication workflow succeeds, the default project URL is an external
-deployment blocker, not evidence against the generated artifact. Verify the
-exact origin and revision with:
+GitHub Pages is now configured with the Actions source and the default origin
+is serving the expected revision. The repository still requires one clean
+publication workflow after the verifier compatibility fix before the public
+launch can be considered fully certified. Verify the exact origin and
+revision with:
 
 ```bash
 PAGES_DEPLOYMENT_URL=https://humblemat810.github.io/llm-wiki/ \
@@ -74,7 +74,7 @@ reviewed. A public launch is a separate external step:
 4. Record the deployed URL, source revision, and any environment-specific
    capacity evidence in the release record.
 
-Until those checks pass, do not call the public URL production. Hosted
+Until those checks pass, do not call the public URL production-certified. Hosted
 multi-user work remains future scope and should begin only after an explicit
 identity, tenancy, storage, and retention design.
 

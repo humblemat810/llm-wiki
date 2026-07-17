@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
-import { parsePagesSmokeConfig, smokePagesDeployment } from "../scripts/smoke-pages-deployment.mjs";
+import { parsePagesSmokeConfig, readBoundedBody, smokePagesDeployment } from "../scripts/smoke-pages-deployment.mjs";
 
 assert.deepEqual(parsePagesSmokeConfig({}), {
   attempts: 12,
@@ -148,7 +148,9 @@ await assert.rejects(
         ok: true,
         status: 200,
         url: "https://wiki.example.test/field-notes/",
-        headers: { get: (name) => name === "content-type" ? "text/html" : "2" },
+        headers: {
+          get: (name) => name === "content-type" ? "text/html" : name === "content-length" ? "2" : null
+        },
         body: {
           getReader: () => ({
             read: async () => {
@@ -168,6 +170,29 @@ await assert.rejects(
   "Pages deployment smoke should reject truncated declared response bodies"
 );
 assert.equal(canceledTruncatedResponse, true, "Pages deployment smoke should cancel truncated response bodies");
+
+let encodedRead = false;
+const encodedBody = await readBoundedBody({
+  headers: {
+    get: (name) => name === "content-length" ? "2" : name === "content-encoding" ? "gzip" : null
+  },
+  body: {
+    getReader: () => ({
+      read: async () => {
+        if (encodedRead) return { done: true };
+        encodedRead = true;
+        return { done: false, value: new TextEncoder().encode("decoded body") };
+      },
+      cancel: async () => {},
+      releaseLock: () => {}
+    })
+  }
+});
+assert.equal(
+  new TextDecoder().decode(encodedBody),
+  "decoded body",
+  "Pages deployment smoke should compare Content-Length only against decoded bodies when the response is not encoded"
+);
 
 await assert.rejects(
   () => smokePagesDeployment("https://wiki.example.test/field-notes/", {
