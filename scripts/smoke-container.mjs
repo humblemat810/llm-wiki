@@ -61,6 +61,46 @@ export function boundDiagnosticLog(value) {
   return bytes.subarray(start).toString("utf8");
 }
 
+export function formatReadinessFailure(status, body) {
+  let detail = "";
+  try {
+    const payload = JSON.parse(boundDiagnosticLog(body));
+    if (typeof payload?.error === "string" && payload.error.trim()) {
+      detail = payload.error.trim().slice(0, 256);
+    }
+  } catch {
+    // Keep the status-only diagnostic for non-JSON readiness responses.
+  }
+  return `HTTP ${status}${detail ? `: ${detail}` : ""}`;
+}
+
+export async function readBoundedResponseBody(response, maxBytes = MAX_DIAGNOSTIC_LOG_BYTES) {
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    return boundDiagnosticLog(await response.text());
+  }
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (totalBytes < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      const remainingBytes = maxBytes - totalBytes;
+      const chunk = value.subarray(0, remainingBytes);
+      chunks.push(chunk);
+      totalBytes += chunk.byteLength;
+      if (chunk.byteLength < value.byteLength) {
+        await reader.cancel();
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 const printContainerDiagnostics = (containerName) => {
   try {
     const logs = runDocker(["logs", "--tail", "200", containerName], { quiet: true }).trim();
@@ -157,7 +197,7 @@ export async function smokeContainer(environment = process.env) {
       config.documentation,
       "container documentation metadata must identify the runbook"
     );
-    runDocker(["run", "--rm", "--entrypoint", "sh", config.image, "-c", "test ! -e /app/.git && test ! -e /app/.codex && test ! -e /app/.env && test ! -e /app/node_modules && test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/backups && test ! -e /app/exports && test ! -e /app/sbom.spdx.json && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/experiments/tiny-training.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/scripts/sample-graph-page.mjs && test -f /app/experiments/verify-backup.mjs"]);
+    runDocker(["run", "--rm", "--entrypoint", "sh", config.image, "-c", "test ! -e /app/.git && test ! -e /app/.codex && test ! -e /app/.env && test ! -e /app/node_modules && test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/backups && test ! -e /app/exports && test ! -e /app/sbom.spdx.json && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/experiments/tiny-training.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/scripts/sample-graph-page.mjs && test -f /app/scripts/verify-share.mjs && test -f /app/experiments/verify-backup.mjs"]);
     runDocker([
       "run", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
@@ -193,8 +233,8 @@ export async function smokeContainer(environment = process.env) {
           ready = true;
           break;
         }
-        lastReadinessError = `HTTP ${response.status}`;
-        await response.arrayBuffer();
+        const body = await readBoundedResponseBody(response);
+        lastReadinessError = formatReadinessFailure(response.status, body);
       } catch (error) {
         lastReadinessError = error.message;
       }

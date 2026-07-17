@@ -18,6 +18,7 @@ scripts/*.mjs
 !scripts/sample-graph-page.mjs
 !scripts/verify-canvas.mjs
 !scripts/verify-service-health.mjs
+!scripts/verify-share.mjs
 experiments/*.mjs
 !experiments/bounded-file.mjs
 !experiments/compare-evaluations.mjs

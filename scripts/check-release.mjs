@@ -20,6 +20,7 @@ const { notes: browserNotes } = await import(new URL("../curriculum.js", import.
 const llms = await readFile(new URL("../llms.txt", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
 const dockerignore = await readFile(new URL("../.dockerignore", import.meta.url), "utf8");
+const dockerignoreEntries = new Set(dockerignore.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean));
 const graphCorrectionTemplate = await readFile(new URL("../.github/ISSUE_TEMPLATE/graph_correction.yml", import.meta.url), "utf8");
 const securityTxt = await readFile(new URL("../.well-known/security.txt", import.meta.url), "utf8");
 const sampleGraph = parseJsonWithUniqueKeys(await readFile(new URL("../examples/sample-graph.json", import.meta.url), "utf8"), "sample graph");
@@ -129,6 +130,16 @@ if (Buffer.byteLength(graphCorrectionTemplate, "utf8") > 100 * 1024
 }
 if (!dockerignore.split(/\r?\n/).some((entry) => entry.trim() === ".codex")) {
   throw new Error(".dockerignore must exclude .codex");
+}
+for (const asset of PUBLIC_ASSETS) {
+  const broadRule = asset.startsWith("scripts/") && asset.endsWith(".mjs")
+    ? "scripts/*.mjs"
+    : asset.startsWith("experiments/") && asset.endsWith(".mjs")
+      ? "experiments/*.mjs"
+      : null;
+  if (broadRule && dockerignoreEntries.has(broadRule) && !dockerignoreEntries.has(`!${asset}`)) {
+    throw new Error(`.dockerignore excludes declared public asset without an allow-list exception: ${asset}`);
+  }
 }
 if (!securityTxt.includes("Contact: https://github.com/humblemat810/llm-wiki/security/advisories/new")
   || !securityTxt.includes("Policy: https://github.com/humblemat810/llm-wiki/blob/main/SECURITY.md")

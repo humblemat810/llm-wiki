@@ -4,6 +4,12 @@ All notable changes to LLM Field Notes are documented here.
 
 ## [Unreleased]
 
+- Retain every declared public verifier in hardened container images, and
+  reject Docker allow-list omissions during release validation.
+- Make container readiness diagnostics byte-bounded while reading response
+  bodies, and preserve actionable non-secret failure details for CI.
+- Keep Node 22 and Node 24 verification lanes independent so one runtime
+  failure cannot cancel evidence from the other supported production lane.
 - Add a source-free “copy correction context” handoff to recipient share
   pages, including the sanitized share link, privacy reminder, and structured
   public-evidence prompts.

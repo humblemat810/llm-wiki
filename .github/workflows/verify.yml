@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         node-version: ["22.x", "24.x"]
     steps:
@@ -75,7 +76,7 @@ jobs:
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.documentation"}}' llm-field-notes:ci)" = "$documentation"
           test "$(docker image inspect --format '{{.Config.User}}' llm-field-notes:ci)" = "node"
           test "$(docker image inspect --format '{{.Config.StopSignal}}' llm-field-notes:ci)" = "SIGTERM"
-          docker run --rm --entrypoint sh llm-field-notes:ci -c 'test ! -e /app/.git && test ! -e /app/.codex && test ! -e /app/.env && test ! -e /app/node_modules && test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/backups && test ! -e /app/exports && test ! -e /app/sbom.spdx.json && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/experiments/tiny-training.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/scripts/sample-graph-page.mjs && test -f /app/experiments/verify-backup.mjs'
+          docker run --rm --entrypoint sh llm-field-notes:ci -c 'test ! -e /app/.git && test ! -e /app/.codex && test ! -e /app/.env && test ! -e /app/node_modules && test ! -e /app/benchmarks && test ! -e /app/tests && test ! -e /app/backups && test ! -e /app/exports && test ! -e /app/sbom.spdx.json && test ! -e /app/scripts/check-runtime.mjs && test ! -e /app/scripts/smoke-container.mjs && test ! -e /app/scripts/load-server.mjs && test -f /app/experiments/tiny-training.mjs && test -f /app/scripts/public-assets.mjs && test -f /app/scripts/sample-graph-page.mjs && test -f /app/scripts/verify-share.mjs && test -f /app/experiments/verify-backup.mjs'
       - name: Smoke test hardened container runtime
         env:
           CONTAINER_IMAGE: llm-field-notes:ci
