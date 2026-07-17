@@ -352,6 +352,47 @@ try {
     })
     .filter(Boolean));
   assert.deepEqual(unnamedControls, [], "visible browser controls should expose accessible names");
+  const lowContrastControls = await page.evaluate(() => {
+    const parseColor = (value) => {
+      const match = String(value).match(/^rgba?\(([^)]+)\)$/);
+      if (!match) return null;
+      const channels = match[1].split(",").map(Number);
+      if (channels.length < 3 || channels.some((channel) => !Number.isFinite(channel))) return null;
+      return { r: channels[0], g: channels[1], b: channels[2], a: channels[3] ?? 1 };
+    };
+    const luminance = ({ r, g, b }) => [r, g, b]
+      .map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      })
+      .reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    const contrastRatio = (foreground, background) => {
+      const [lighter, darker] = [luminance(foreground), luminance(background)].sort((left, right) => right - left);
+      return (lighter + 0.05) / (darker + 0.05);
+    };
+    const effectiveBackground = (element) => {
+      for (let current = element; current; current = current.parentElement) {
+        const color = parseColor(getComputedStyle(current).backgroundColor);
+        if (color?.a === 1) return color;
+      }
+      return { r: 255, g: 255, b: 255, a: 1 };
+    };
+    return [...document.querySelectorAll(".workbench-section button:not(:disabled), .map-section button:not(:disabled), .contribute-section button:not(:disabled)")]
+      .filter((element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden")
+      .map((element) => {
+        const foreground = parseColor(getComputedStyle(element).color);
+        const background = effectiveBackground(element);
+        return {
+          id: element.id || "(no-id)",
+          text: element.textContent?.trim().slice(0, 80) || "(no text)",
+          ratio: foreground ? contrastRatio(foreground, background) : 0
+        };
+      })
+      .filter((control) => control.ratio < 4.5);
+  });
+  assert.deepEqual(lowContrastControls, [], `visible enabled dark-surface buttons must meet 4.5:1 contrast: ${JSON.stringify(lowContrastControls)}`);
   await page.locator("#try-sample").focus();
   assert.equal(await page.evaluate(() => document.activeElement?.id), "try-sample", "keyboard focus should reach the sample action");
 

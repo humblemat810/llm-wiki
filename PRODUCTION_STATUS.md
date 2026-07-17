@@ -19,14 +19,14 @@ tenant isolation, cloud graph storage, billing, or hosted backup retention.
 | Model-provider privacy boundary | Ready for protected single-instance use | provider credentials remain server-side; source URIs are opt-in; requests disable automatic redirects and intermediary caching; bounded response decoding and structured-output normalization are covered by provider smoke tests |
 | Standalone server lifecycle | Ready for the reference process contract | `npm run smoke:server` covers build identity, liveness/readiness, auth success/rejection, bounded concurrent and one-second duration extraction load, and graceful drain |
 | Static public wiki | Ready for publication | dedicated static-pages preflight, shared Node/Pages asset contract, required deployed asset manifest, exact manifest/digest verification, published-asset-aware HTML link and symlink checks, accessibility/performance gates, and deployment probe |
-| Live default Pages deployment | Deployed; browser compatibility fix pending rerun | On July 17, 2026, the public origin served revision `2220648f744c58f17f4f5023383aeb886f6f1c41`; `npm run smoke:pages:deployment` passed 123 checks against it. The publication job deployed successfully, but the post-deploy browser matrix found that service-worker precache compared GitHub Pages’ compressed `Content-Length` to transparently decoded bytes; push the service-worker compatibility fix and rerun publication before calling the workflow green |
+| Live default Pages deployment | Certified for static public release | On July 17, 2026, the public origin served revision `19d78f36924ddf865688d661b652ff8b9a35a68e`; the Pages deployment job, its 123-check post-deploy smoke, and the Chromium/Firefox/WebKit exact-origin browser matrix all passed |
 | Container runtime | Ready for a hardened single instance | `npm run smoke:container` proves non-root, read-only filesystem, capability drop, readiness, health, auth, and drain behavior |
 | Supply-chain evidence | Ready | deterministic SPDX SBOM, parsed workflow/permission checks, immutable action pins, and GitHub artifact attestations for Pages/release manifests |
 | Supported Node compatibility | Verified for current worktree | On July 17, 2026, the full `npm test` suite passed on Node 24; the canonical Node 22 production gate also passes, matching the CI runtime matrix |
 | Automated release checks | Ready | locked install, dependency audit, full suite, CodeQL, Scorecard, tag/container gates, ten reviewed extraction-quality cases covering technical phrases, multilingual text, ungrounded-feedback suppression, definitions, passive structure, causal structure, and relation suppression, Chromium/Firefox/WebKit release-workbench matrix, and retained Pages evidence |
 | Automated browser smoke | Repository gate | `.github/workflows/browser.yml` runs the local workbench smoke across Chromium, Firefox, and WebKit, including same-origin model-mode extraction and draft-preserving failure recovery where runner interception is supported, recipient-openable redacted share links with origin-aware metadata, a bounded visual map, redacted JSON download, fragment privacy checks, and offline reopen coverage where the runner supports it, manifest, raster-icon, and installed-app metadata delivery, human review→reusable learning, Obsidian ZIP export/import, source-revision identity, and failure screenshots |
 | Clean local browser certification | Verified for current worktree | On July 17, 2026, `npm run browser:smoke` passed in clean Node 22 environments for Chromium, Firefox, and WebKit, including the transient-provider failure/retry drill where runner interception is supported; this proves the local workbench contract, not the still-unpublished external origin |
-| Exact-deployment browser smoke | Pages release gate | The Pages workflow runs the browser smoke across Chromium, Firefox, and WebKit against the deployed URL after publication and verifies the deployed source revision |
+| Exact-deployment browser smoke | Verified for current deployment | On July 17, 2026, the Pages workflow passed Chromium, Firefox, and WebKit against the deployed revision `19d78f36924ddf865688d661b652ff8b9a35a68e` |
 | Scheduled browser experience monitor | Daily operator gate | `.github/workflows/browser-monitor.yml` repeats the exact-origin browser smoke across Chromium, Firefox, and WebKit after publication against the default-branch revision |
 | Repeatable deployment capacity probe | Operator gate | `.github/workflows/capacity.yml` runs a health-only bounded duration probe only after explicit target authorization and SLO inputs; the target must match the exact normalized `PUBLIC_ORIGIN` deployment base, including project-site paths |
 | Local bounded extraction-duration evidence | Verified for current worktree | On July 17, 2026, `npm run smoke:server` passed its one-second authenticated extraction-duration probe; provider, proxy, and deployment-specific capacity still require the opt-in operator probe |
@@ -48,11 +48,11 @@ smoke probe to pass. For the reference server, use TLS at the gateway,
 configure both authentication secrets, enforce gateway identity/CSRF policy,
 and monitor `/livez`, `/readyz`, and authenticated `/metrics`.
 
-GitHub Pages is now configured with the Actions source and the default origin
-is serving the expected revision. The repository still requires one clean
-publication workflow after the service-worker compatibility fix before the
-public launch can be considered fully certified. Verify the exact origin and
-revision with:
+GitHub Pages is configured with the Actions source and the default origin is
+serving a fully certified static release. On July 17, 2026, the publication
+workflow, exact-origin deployment smoke, and deployed Chromium/Firefox/WebKit
+browser matrix passed for revision `19d78f36924ddf865688d661b652ff8b9a35a68e`.
+For a future release, verify the exact origin and revision with:
 
 ```bash
 PAGES_DEPLOYMENT_URL=https://humblemat810.github.io/llm-wiki/ \
@@ -62,10 +62,11 @@ npm run smoke:pages:deployment
 
 ## Closure checklist
 
-The repository engineering phase can close for the supported single-instance
-contract when a release-candidate commit passes the clean Node 22
-`npm run production:check` gate and the resulting artifact and evidence are
-reviewed. A public launch is a separate external step:
+The repository engineering phase is complete for the supported single-instance
+contract. Revision `19d78f36924ddf865688d661b652ff8b9a35a68e` passed the clean
+Node 22 release gate, GitHub Pages publication, the exact-origin deployment
+smoke, and the Chromium/Firefox/WebKit deployed-browser matrix. For a future
+release, repeat:
 
 1. Set GitHub Pages to **GitHub Actions** and run the publication workflow.
 2. Run the exact-origin Pages smoke with `PAGES_DEPLOYMENT_URL` and
@@ -74,7 +75,8 @@ reviewed. A public launch is a separate external step:
 4. Record the deployed URL, source revision, and any environment-specific
    capacity evidence in the release record.
 
-Until those checks pass, do not call the public URL production-certified. Hosted
+Until those checks pass for a future release, do not call that release
+production-certified. Hosted
 multi-user work remains future scope and should begin only after an explicit
 identity, tenancy, storage, and retention design.
 
