@@ -35,7 +35,7 @@ The [knowledge-graph note](notes/knowledge-graphs.md) explains the same loop
 from document to reviewed, reusable representation.
 The [production status](PRODUCTION_STATUS.md) states exactly which deployment
 mode is ready today and which hosted multi-user capabilities are intentionally
-not implemented yet.
+outside the current product contract.
 
 ## Try it in 60 seconds
 
@@ -1213,10 +1213,11 @@ failure. Inspect an existing bundle with `npm run performance:check -- dist`.
 The same checks run in GitHub Actions on every push to `main` and every pull
 request across Node 22 and 24, matching the supported production runtime
 baseline. To extend the local gate to the exact deployed Pages origin, set
-`PAGES_DEPLOYMENT_URL` and `PAGES_EXPECTED_REVISION`; the gate then runs the
-same manifest, endpoint, digest, service-worker, and source-revision probe used
-after publication. Without those variables, it intentionally makes no claim
-about external deployment state.
+`DEPLOYMENT_MODE=static-pages`, `PAGES_DEPLOYMENT_URL`, and
+`PAGES_EXPECTED_REVISION`; the gate then runs the same manifest, endpoint,
+digest, service-worker, and source-revision probe used after publication
+without requiring server-only authentication secrets. Without those variables,
+it intentionally makes no claim about external deployment state.
 The checked-in `.nvmrc` and `.node-version` files select Node 22 for local
 version managers; `npm run runtime:check` verifies those hints stay aligned
 with `package.json`.

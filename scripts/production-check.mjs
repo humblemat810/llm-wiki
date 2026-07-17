@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 export const CHECK_TIMEOUT_MS = 5 * 60 * 1000;
 const LOCAL_CHECK_LABELS = new Set([
-  "Run the complete test and contract suite",
   "Smoke the standalone server lifecycle"
 ]);
 const STATIC_PUBLICATION_VARIABLES = [

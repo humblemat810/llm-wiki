@@ -15,6 +15,7 @@ const staticPages = checkDeploymentConfig({
 });
 assert.equal(staticPages.ok, true, "static Pages publication should not require server authentication secrets");
 assert.equal(staticPages.mode, "static-pages");
+assert.equal(staticPages.publicOrigin, "https://humblemat810.github.io/llm-wiki/", "static Pages diagnostics should retain the validated public origin");
 assert(checkDeploymentConfig({
   DEPLOYMENT_MODE: "static-pages",
   BUILD_REVISION: "abcdef1234567890"

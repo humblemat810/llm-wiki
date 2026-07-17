@@ -113,6 +113,7 @@ export function checkDeploymentConfig(environment = process.env) {
     ok: errors.length === 0,
     mode: staticPages ? "static-pages" : loopback ? "loopback-development" : "non-loopback-production",
     host,
+    publicOrigin,
     settings,
     errors,
     warnings
@@ -127,7 +128,7 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log(`deployment config ok: ${result.mode} (${result.host})`);
+  console.log(`deployment config ok: ${result.mode} (${result.mode === "static-pages" ? result.publicOrigin : result.host})`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

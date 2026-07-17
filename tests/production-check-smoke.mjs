@@ -56,9 +56,14 @@ const staticPublicationEnvironment = {
   PAGES_EXPECTED_REVISION: "abcdef1234567890"
 };
 assert.equal(
-  environmentForProductionCheck("Run the complete test and contract suite", staticPublicationEnvironment).PUBLIC_ORIGIN,
+  environmentForProductionCheck("Smoke the standalone server lifecycle", staticPublicationEnvironment).PUBLIC_ORIGIN,
   undefined,
   "static publication variables should not contaminate local behavioral tests"
+);
+assert.equal(
+  environmentForProductionCheck("Smoke the standalone server lifecycle", staticPublicationEnvironment).BUILD_REVISION,
+  staticPublicationEnvironment.BUILD_REVISION,
+  "static publication source revision should remain available to local artifact tests"
 );
 assert.equal(
   environmentForProductionCheck("Build the static Pages artifact", staticPublicationEnvironment).PUBLIC_ORIGIN,

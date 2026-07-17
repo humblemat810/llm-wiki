@@ -3,6 +3,15 @@ import { spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
 
 const IGNORED_DIRECTORIES = new Set([".git", ".codex", "dist", "node_modules"]);
+const STATIC_PUBLICATION_VARIABLES = [
+  "DEPLOYMENT_MODE",
+  "PUBLIC_ORIGIN",
+  "PUBLIC_REPOSITORY_URL",
+  "BUILD_REVISION",
+  "PAGES_DEPLOYMENT_URL",
+  "PAGES_EXPECTED_REVISION"
+];
+const STATIC_PUBLICATION_TEST_FILES = new Set(["tests/artifacts-smoke.mjs"]);
 function collectJavaScriptFiles(directory, output = []) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
@@ -24,11 +33,21 @@ const testFiles = readdirSync("tests")
   .sort()
   .map((file) => join("tests", file));
 
-function run(label, args) {
+function run(label, args, { isolateStaticPublication = false } = {}) {
   console.log(`\n==> ${label}`);
+  const testFile = args[0];
+  const preserveStaticPublication = STATIC_PUBLICATION_TEST_FILES.has(testFile);
+  const environment = isolateStaticPublication
+      && process.env.DEPLOYMENT_MODE === "static-pages"
+      && !preserveStaticPublication
+    ? { ...process.env }
+    : process.env;
+  if (environment !== process.env) {
+    for (const variable of STATIC_PUBLICATION_VARIABLES) delete environment[variable];
+  }
   const result = spawnSync(process.execPath, args, {
     cwd: process.cwd(),
-    env: process.env,
+    env: environment,
     stdio: "inherit",
     timeout: 120000
   });
@@ -53,7 +72,7 @@ for (const file of sourceFiles) {
 run("Release contract: scripts/check-release.mjs", ["scripts/check-release.mjs"]);
 
 for (const file of testFiles) {
-  run(`Behavioral test: ${file}`, [file]);
+  run(`Behavioral test: ${file}`, [file], { isolateStaticPublication: true });
 }
 
 console.log(`\nTest suite passed: ${sourceFiles.length} syntax checks, release contracts, and ${testFiles.length} behavioral tests.`);

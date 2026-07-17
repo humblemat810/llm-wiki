@@ -53,6 +53,15 @@ All notable changes to LLM Field Notes are documented here.
   static publication does not require unrelated server authentication secrets.
 - Keep static-publication origin variables out of local behavioral and server
   smoke checks, preventing Pages metadata from changing local HTTP assertions.
+- Document `DEPLOYMENT_MODE=static-pages` in the manual release path so
+  operators do not accidentally invoke server-only preflight requirements for
+  a static Pages publication.
+- Report the validated public Pages origin in static deployment-preflight
+  diagnostics instead of the unused loopback server host.
+- Record the verified Node 24 compatibility result in the production status
+  matrix alongside the Node 22 canonical gate.
+- Clarify that hosted multi-user behavior is an intentional future boundary,
+  not an implicit promise of the current local-first release.
 - Make the Pages deployment verifier follow only bounded, manually validated
   same-origin redirects, preventing a misconfigured target from sending CI
   probes to an unrelated host.

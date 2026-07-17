@@ -73,10 +73,18 @@ one-second duration probe that exercises sustained local pressure.
    exact deployed URL and source revision:
 
    ```bash
+   DEPLOYMENT_MODE=static-pages \
+   PUBLIC_ORIGIN=https://wiki.example.test/field-notes \
+   PUBLIC_REPOSITORY_URL=https://github.com/example/forked-wiki \
+   BUILD_REVISION="$(git rev-parse HEAD)" \
    PAGES_DEPLOYMENT_URL=https://wiki.example.test/field-notes/ \
    PAGES_EXPECTED_REVISION="$(git rev-parse HEAD)" \
    npm run production:check
    ```
+
+   `DEPLOYMENT_MODE=static-pages` is required for a static publication gate;
+   it validates the Pages artifact without requiring the reference server's
+   extractor and metrics secrets.
 
    Without these variables, `production:check` proves the locally generated
    artifact and reference server only; it does not claim that a public URL is

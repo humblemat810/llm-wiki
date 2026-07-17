@@ -22,6 +22,7 @@ tenant isolation, cloud graph storage, billing, or hosted backup retention.
 | Live default Pages deployment | Blocked by external configuration | A direct probe on July 17, 2026 returned HTTP 404 from `https://humblemat810.github.io/llm-wiki/`; enable GitHub Pages with the Actions source, run the publication workflow, and pass `npm run smoke:pages:deployment` before calling the public URL production |
 | Container runtime | Ready for a hardened single instance | `npm run smoke:container` proves non-root, read-only filesystem, capability drop, readiness, health, auth, and drain behavior |
 | Supply-chain evidence | Ready | deterministic SPDX SBOM, parsed workflow/permission checks, immutable action pins, and GitHub artifact attestations for Pages/release manifests |
+| Supported Node compatibility | Verified for current worktree | On July 17, 2026, the full `npm test` suite passed on Node 24; the canonical Node 22 production gate also passes, matching the CI runtime matrix |
 | Automated release checks | Ready | locked install, dependency audit, full suite, CodeQL, Scorecard, tag/container gates, ten reviewed extraction-quality cases covering technical phrases, multilingual text, ungrounded-feedback suppression, definitions, passive structure, causal structure, and relation suppression, Chromium/Firefox/WebKit release-workbench matrix, and retained Pages evidence |
 | Automated browser smoke | Repository gate | `.github/workflows/browser.yml` runs the local workbench smoke across Chromium, Firefox, and WebKit, including same-origin model-mode extraction and draft-preserving failure recovery where runner interception is supported, recipient-openable redacted share links with origin-aware metadata, a bounded visual map, redacted JSON download, fragment privacy checks, and offline reopen coverage where the runner supports it, manifest, raster-icon, and installed-app metadata delivery, human review→reusable learning, Obsidian ZIP export/import, source-revision identity, and failure screenshots |
 | Clean local browser certification | Verified for current worktree | On July 17, 2026, `npm run browser:smoke` passed in clean Node 22 environments for Chromium, Firefox, and WebKit, including the transient-provider failure/retry drill where runner interception is supported; this proves the local workbench contract, not the still-unpublished external origin |
@@ -41,11 +42,11 @@ npm ci --ignore-scripts --no-audit --no-fund
 npm run production:check
 ```
 
-For a public static release, also configure the exact HTTPS `PUBLIC_ORIGIN`,
-build and verify Pages, and wait for the post-deploy smoke probe to pass. For
-the reference server, use TLS at the gateway, configure both authentication
-secrets, enforce gateway identity/CSRF policy, and monitor `/livez`, `/readyz`,
-and authenticated `/metrics`.
+For a public static release, set `DEPLOYMENT_MODE=static-pages`, configure the
+exact HTTPS `PUBLIC_ORIGIN`, build and verify Pages, and wait for the post-deploy
+smoke probe to pass. For the reference server, use TLS at the gateway,
+configure both authentication secrets, enforce gateway identity/CSRF policy,
+and monitor `/livez`, `/readyz`, and authenticated `/metrics`.
 
 The repository cannot enable GitHub Pages through source files. Until the
 repository Settings → Pages source is set to **GitHub Actions** and a
