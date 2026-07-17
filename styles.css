@@ -1,6 +1,6 @@
 :root {
   --ink: #151513;
-  --muted: #77756e;
+  --muted: #68655e;
   --paper: #f4f1eb;
   --paper-deep: #e9e4da;
   --line: rgba(21, 21, 19, .14);
@@ -13,6 +13,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 .not-found-page {
   min-height: 100vh;
@@ -69,7 +70,7 @@ button, input { font: inherit; }
 button { appearance: none; color: inherit; }
 .skip-link { position: fixed; z-index: 20; top: 8px; left: 8px; padding: 9px 12px; color: var(--paper); background: var(--ink); font: 10px var(--mono); transform: translateY(-150%); transition: transform .2s; }
 .skip-link:focus { transform: translateY(0); }
-:focus-visible { outline: 2px solid var(--orange); outline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--orange) !important; outline-offset: 3px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .noise { position: fixed; inset: 0; opacity: .035; pointer-events: none; z-index: 10; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E"); }
 .section-shell { width: min(1180px, calc(100% - 64px)); margin-inline: auto; }
@@ -270,7 +271,7 @@ kbd { color: #78736b; border: 1px solid #5b5852; padding: 1px 6px; font: 10px va
 .open-note, .note-source, .copy-note, .mark-done { padding: 0; border: 0; background: transparent; font: 10px var(--mono); cursor: pointer; }
 .open-note { color: var(--paper); }
 .open-note span { color: var(--orange); margin-left: 5px; font-size: 15px; }
-.note-source { color: #858078; }
+.note-source { color: #8a867d; }
 .copy-note { color: #aaa59b; }
 .mark-done { padding: 0; border: 0; color: #aaa59b; background: transparent; font: 10px var(--mono); cursor: pointer; }
 .mark-done:hover, .completed .mark-done { color: #9cc19a; }
@@ -420,5 +421,20 @@ pre b { color: var(--orange); font-weight: 400; }
   .contribute-copy { padding-top: 12px; }.site-footer { display: grid; gap: 15px; padding-block: 30px; }.footer-links { flex-wrap: wrap; }
   .note-dialog { padding: 37px 24px 29px; }.note-dialog h2 { font-size: 38px; }.dialog-columns { display: block; }.dialog-columns > div + div { margin-top: 24px; }
   .sample-graph-header { align-items: flex-start; flex-direction: column; margin-bottom: 58px; }.sample-graph-stats { grid-template-columns: repeat(2, 1fr); }.sample-graph-grid { grid-template-columns: 1fr; }.sample-graph-relations li { grid-template-columns: minmax(0, 1fr) auto; }.sample-graph-relations li strong:last-of-type { grid-column: 1 / -1; }.sample-graph-shell > footer { flex-direction: column; }.sample-graph-shell > footer span { text-align: left; }
+
+  /* Compact text actions remain visually quiet while gaining a reliable touch target. */
+  .text-button, .clear-graph, .forget-local-data, .undo-graph, .filter,
+  .open-note, .note-source, .copy-note, .mark-done,
+  .artifact-header .text-link, .artifact-footer a,
+  .sample-graph-header .text-link, .sample-graph-shell > footer a,
+  .note-page-shell > p:last-child a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+  }
+  .footer-links a { display: inline-flex; align-items: center; min-width: 24px; min-height: 32px; }
+  .mini-button, .path-check { min-width: 32px; min-height: 32px; }
+  .path-check { width: 32px; height: 32px; }
+  .graph-search, .search-wrap input { min-height: 32px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }

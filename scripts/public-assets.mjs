@@ -29,6 +29,7 @@ export const CORE_SHELL_ASSETS = [
 export const FIXED_PUBLIC_ASSETS = [
   ...CORE_SHELL_ASSETS,
   "share.html",
+  "share.css",
   "share.js",
   "share-projection.js",
   ".well-known/security.txt",

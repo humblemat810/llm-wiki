@@ -3740,6 +3740,7 @@ async function buildGraphFromInput() {
   }
   renderWorkbench();
   status.textContent = graphWriteSuccessMessage(`Revision ${result.graph.version} saved · ${result.graph.nodes.length} concepts now in memory.`);
+  setRetryBuildAvailable(false);
   commitDocumentDraft();
   pendingFiles = [];
   document.querySelector("#document-file").value = "";

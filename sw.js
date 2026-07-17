@@ -15,7 +15,7 @@ const REQUIRED_SHELL_ASSETS = new Set([
   "./version.json",
   ...(APP_SHELL.includes("./asset-manifest.json") ? ["./asset-manifest.json"] : [])
 ]);
-const SHARE_SHELL = ["./share.html", "./share.js", "./share-projection.js"];
+const SHARE_SHELL = ["./share.html", "./share.css", "./share.js", "./share-projection.js"];
 for (const asset of SHARE_SHELL) REQUIRED_SHELL_ASSETS.add(asset);
 const SHELL_PATHS = new Set([...APP_SHELL, ...SHARE_SHELL].map((asset) => new URL(asset, self.location).pathname));
 

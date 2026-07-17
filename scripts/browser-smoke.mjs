@@ -379,7 +379,7 @@ try {
       }
       return { r: 255, g: 255, b: 255, a: 1 };
     };
-    return [...document.querySelectorAll(".workbench-section button:not(:disabled), .map-section button:not(:disabled), .contribute-section button:not(:disabled)")]
+    return [...document.querySelectorAll(".workbench-section button:not(:disabled), .map-section button:not(:disabled), .contribute-section button:not(:disabled), .note-source, .site-footer a")]
       .filter((element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden")
       .map((element) => {
         const foreground = parseColor(getComputedStyle(element).color);
@@ -392,7 +392,34 @@ try {
       })
       .filter((control) => control.ratio < 4.5);
   });
-  assert.deepEqual(lowContrastControls, [], `visible enabled dark-surface buttons must meet 4.5:1 contrast: ${JSON.stringify(lowContrastControls)}`);
+  assert.deepEqual(lowContrastControls, [], `visible enabled dark-surface controls and links must meet 4.5:1 contrast: ${JSON.stringify(lowContrastControls)}`);
+  const undersizedTouchControls = await page.evaluate(() => [...document.querySelectorAll("a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")]
+    .filter((element) => {
+      const style = getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+    })
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        tag: element.tagName.toLowerCase(),
+        id: element.id || "(no-id)",
+        className: typeof element.className === "string" ? element.className.slice(0, 80) : "",
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        text: (element.textContent || element.getAttribute("aria-label") || "").trim().slice(0, 80)
+      };
+    })
+    .filter((control) => control.width < 24 || control.height < 24));
+  assert.deepEqual(undersizedTouchControls, [], `visible mobile controls should have at least a 24px target: ${JSON.stringify(undersizedTouchControls)}`);
+  await page.locator("#document-title").focus();
+  const documentTitleFocusStyle = await page.locator("#document-title").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { width: style.outlineWidth, style: style.outlineStyle, color: style.outlineColor };
+  });
+  assert(
+    Number.parseFloat(documentTitleFocusStyle.width) >= 2 && documentTitleFocusStyle.style === "solid",
+    `keyboard focus must remain visibly marked on text inputs: ${JSON.stringify(documentTitleFocusStyle)}`
+  );
   await page.locator("#try-sample").focus();
   assert.equal(await page.evaluate(() => document.activeElement?.id), "try-sample", "keyboard focus should reach the sample action");
 
@@ -440,6 +467,53 @@ try {
   await samplePage.close();
   samplePage = null;
 
+  debug("auditing static public page affordances");
+  const staticPage = await context.newPage();
+  await staticPage.setViewportSize({ width: 390, height: 844 });
+  staticPage.setDefaultTimeout(10000);
+  for (const [path, title] of [
+    ["artifacts.html", "Artifacts · LLM Field Notes"],
+    ["notes/tokens.html", "Tokens are the interface · LLM Field Notes"],
+    ["404.html", "Page not found · LLM Field Notes"]
+  ]) {
+    await staticPage.goto(new URL(path, baseUrl).toString(), { waitUntil: "networkidle", timeout: 10000 });
+    assert.equal(await staticPage.title(), title, `${path} should retain a useful document title`);
+    const staticAffordances = await staticPage.evaluate(() => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0 && rect.width > 0 && rect.height > 0;
+      };
+      const undersized = [...document.querySelectorAll("a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")]
+        .filter(visible)
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            tag: element.tagName.toLowerCase(),
+            text: (element.textContent || element.getAttribute("aria-label") || "").trim().slice(0, 80),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          };
+        })
+        .filter((control) => control.width < 24 || control.height < 24);
+      const overflowing = [...document.querySelectorAll("body *")]
+        .filter((element) => visible(element) && !element.closest(".ticker"))
+        .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+        .filter(({ rect }) => rect.right > innerWidth + 2 || rect.left < -2)
+        .slice(0, 5)
+        .map(({ element, rect }) => ({
+          tag: element.tagName.toLowerCase(),
+          className: typeof element.className === "string" ? element.className.slice(0, 80) : "",
+          left: Math.round(rect.left),
+          right: Math.round(rect.right)
+        }));
+      return { undersized, overflowing };
+    });
+    assert.deepEqual(staticAffordances.undersized, [], `${path} should keep visible mobile controls at least 24px: ${JSON.stringify(staticAffordances)}`);
+    assert.deepEqual(staticAffordances.overflowing, [], `${path} should not overflow its mobile viewport: ${JSON.stringify(staticAffordances)}`);
+  }
+  await staticPage.close();
+
   debug("loading recipient-openable share projection");
   const sharePayload = {
     format: SHARE_FORMAT,
@@ -473,6 +547,25 @@ try {
   assert.equal(await sharePage.locator("#nodes b").count(), 0, "shared labels must not inject markup into the recipient page");
   assert.equal(await sharePage.locator("#edges li").count(), 1, "the share page should render every bounded relation");
   assert.match(await sharePage.locator("#edges").textContent() || "", /Retrieval.*supports.*Grounded answer/);
+  const shareActionStyles = await sharePage.evaluate(() => [...document.querySelectorAll("button")]
+    .map((button) => {
+      const style = getComputedStyle(button);
+      return {
+        id: button.id,
+        background: style.backgroundColor,
+        border: style.borderTopColor,
+        cursor: style.cursor
+      };
+    }));
+  assert.deepEqual(
+    shareActionStyles,
+    [
+      { id: "copy-correction-context", background: "rgb(255, 253, 249)", border: "rgb(23, 21, 19)", cursor: "pointer" },
+      { id: "copy-share-link", background: "rgb(255, 253, 249)", border: "rgb(23, 21, 19)", cursor: "pointer" },
+      { id: "download-share", background: "rgb(255, 253, 249)", border: "rgb(23, 21, 19)", cursor: "pointer" }
+    ],
+    "share actions should use intentional readable controls instead of browser-native defaults"
+  );
   const forkHref = await sharePage.locator("#fork-share").getAttribute("href");
   assert.match(forkHref || "", /#shared=[A-Za-z0-9_-]+$/, "the share page should expose a bounded workbench fork link");
   const correctionHref = await sharePage.locator('a[href*="template=graph_correction.yml"]').getAttribute("href");
