@@ -54,7 +54,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "playwright": "^1.61.1",
+    "playwright": "^1.62.1",
     "yaml": "^2.9.0"
   }
 }
